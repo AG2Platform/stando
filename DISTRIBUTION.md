@@ -15,6 +15,35 @@ control plane (auth, billing, observability).
 - **Public release** (later): architectural redesign once internal users have
   validated the experience.
 
+## Status (last updated 2026-05-05)
+
+Phases 0–4 implemented end-to-end on the `distribution` branches in both
+repos. The full loop has been smoke-tested locally: install → enter Gemini
+key in Settings → install background services → sign in to cloud → talk to
+voice agent → telemetry rows appear in dashboard.
+
+| Phase | Status | Notes |
+|---|---|---|
+| Phase 0 — Lift hardcoded assumptions | **DONE** | All 6 sub-phases. Backwards-compatible: dev workflow unchanged when `SUTANDO_HOME` unset. Commit `b8e35d8`. |
+| Phase 1 — `.app` bundle + installer | **DONE** (1.4 merged into 4.7) | Bundle, Xcode-free build script, ad-hoc signing, launchd installer, DMG. Bundled Node/Python deferred — relies on Homebrew on the target Mac. Commit `a840053`. |
+| Phase 2 — Signing, notarization, auto-update | **DONE** (no creds yet) | Code is wired; release workflow runs in degraded mode until Apple Developer ID + Sparkle key secrets are set in GitHub Actions. Commit `97decf5`. |
+| Phase 3 — Cloud control plane | **DONE** (running locally) | Skeleton, schema, auth, API endpoints, billing, dashboard. Deploy to Vercel still pending. `agent-universe` commit `82ac0b2`. |
+| Phase 4 — Desktop ↔ cloud wiring + telemetry | **DONE** | Sign-in via `sutando://` URL scheme, keychain token, heartbeat, three meters wired (voice, TTS, image-gen). Commit `9e1b80f`. |
+| Phase 4.7 — Settings + first-launch flow | **DONE** (added post-plan) | Triggered by real-world test — original Phase 1.4 deferral was wrong. See section below. |
+| Phase 4-bug — launchd installer hardening | **DONE** (added post-plan) | First install bailed mid-way on `Disabled=true` plist. Installer now collects errors instead of throwing + skips disabled plists. |
+| Phase 4-core-agent — Claude Code as launchd service | **DONE** (added post-plan) | Voice agent reported "core agent isn't running" because the original 7-plist set didn't include Claude Code itself. Added `com.sutando.core-agent.plist` + `src/run-core-agent.sh` wrapper. |
+| Phase 5 — Architectural redesign | **PENDING** | Intentionally deferred until after internal release. |
+
+Operational gaps before we can hand a build to internal users:
+
+- Cloud must be deployed to a real domain (Vercel + DNS for `sutando.ai`)
+  with production Neon, Clerk, Stripe credentials.
+- Apple Developer ID cert + Sparkle EdDSA keypair generated and stored as
+  GitHub Actions secrets so `release.yml` produces a notarized DMG.
+- Manual smoke test on a fresh Mac (one without the dev environment) to
+  verify the install → settings → use loop works end-to-end without any
+  Terminal commands.
+
 ## Guiding principle: wrap, don't refactor
 
 For the internal release, every existing service keeps running exactly as it
@@ -81,41 +110,36 @@ Findings from the audit (2026-05-04) that constrain the design:
 
 ---
 
-## Phase 0 — Lift hardcoded assumptions (1 week, in `sutando`)
+## Phase 0 — Lift hardcoded assumptions [DONE — commit `b8e35d8`]
 
-1. **Introduce `SUTANDO_HOME`** (default `~/Library/Application Support/Sutando`).
-   Move runtime state out of the repo cwd:
-   - `tasks/`, `results/`, `state/`, `logs/`, `notes/`, `build_log.md`,
-     `core-status.json`, `voice-state.json`
-   - The repo becomes read-only at runtime; user state is mutable in
-     `SUTANDO_HOME`.
-2. **Add port-override env vars** for the three services that don't have one:
-   - `dashboard.py:30` → `DASHBOARD_PORT`
-   - `agent-api.py` → `AGENT_API_PORT`
-   - `screen-capture-server.py:17` → `SCREEN_CAPTURE_PORT`
-   - All services should auto-allocate if the configured port is in use.
-3. **Stable memory dir**. Replace the
-   `~/.claude/projects/-Users-{whoami}-Desktop-sutando/memory/` slug detection
-   (`startup.sh:29`, `health-check.py:34`) with `SUTANDO_HOME/memory/`. Symlink
-   the Claude Code project dir to it.
-4. **Vendor `bodhi-realtime-agent`**. Move source into
-   `vendor/bodhi-realtime-agent/` or publish to npm.
-5. **Convert inline launches to launchd.** Each service in `startup.sh` becomes
-   a `~/Library/LaunchAgents/com.sutando.*.plist` template installed by the
-   Swift launcher:
+1. **Introduce `SUTANDO_HOME`** [DONE]. `state_path()` / `state_dir()` helpers
+   in `util_paths.{ts,py}`; `stateRoot` in `main.swift`. Defaults to repo cwd
+   when unset → no behavior change for dev workflow.
+2. **Add port-override env vars** [DONE]. `DASHBOARD_PORT`, `AGENT_API_PORT`,
+   `SCREEN_CAPTURE_PORT`, `SUTANDO_SCREENSHOT_DIR` added.
+3. **Stable memory dir** [DONE]. `SUTANDO_MEMORY_DIR` was already supported in
+   `voice-context.ts` and `health-check.py`; documented in `.env.example`.
+4. **Vendor `bodhi-realtime-agent`** [DONE]. Switched from
+   `github:sonichi/bodhi_realtime_agent#ffec0cd` to npm `0.1.5`.
+5. **Convert inline launches to launchd** [DONE]. LaunchAgent templates ship
+   in `app/LaunchAgents/`. Final service list (8, not 8 — task-bridge dropped
+   because it's a module not a process; core-agent added later in Phase
+   4-core-agent):
    - `com.sutando.voice-agent`
    - `com.sutando.web-client`
    - `com.sutando.dashboard`
    - `com.sutando.agent-api`
    - `com.sutando.screen-capture`
    - `com.sutando.credential-proxy`
-   - `com.sutando.task-bridge`
-   - `com.sutando.phone-conversation` (optional, paid tier only)
-6. **Config layering**: `SUTANDO_HOME/.env` → repo `.env` (dev) → bundled
-   defaults. Eventually replaced with macOS keychain entries via the Settings
-   UI.
+   - `com.sutando.core-agent` (added post-plan, Phase 4-core-agent)
+   - `com.sutando.phone-conversation` (paid tier; ships `Disabled=true`,
+     installer skips bootstrap — see Phase 4-bug)
+6. **Config layering** [DONE]. `src/load-env.ts` loads repo `.env` first then
+   `$SUTANDO_HOME/.env` with override; `startup.sh` sources the latter so
+   Python services inherit it; Settings window writes to `$SUTANDO_HOME/.env`
+   (Phase 4.7).
 
-## Phase 1 — `.app` bundle + installer (2–3 weeks, in `sutando` `app/`)
+## Phase 1 — `.app` bundle + installer [DONE — commit `a840053`]
 
 Bundle structure:
 
@@ -136,28 +160,45 @@ Sutando.app/
 │   └── _CodeSignature/
 ```
 
-Concrete work:
+Concrete work — what shipped:
 
-- Create Xcode project. Replace `src/Sutando/main.swift`'s 8-dir-walk-for-
-  `CLAUDE.md` with `Bundle.main.resourcePath`.
-- Build Node via `node --experimental-sea-config` (single-executable). Users no
-  longer need `brew install node`.
-- Bundle `fswatch` and `ffmpeg` (Universal2) under `Resources/runtime/bin/`.
-- `claude` CLI is a separate prerequisite — guided install in the first-launch
-  wizard, not bundled (we cannot bundle the user's Claude Code subscription).
-- First-launch wizard (Swift):
-  1. Grant TCC permissions (Screen Recording, Accessibility, Microphone,
-     Notifications) with deep links to System Settings panes.
-  2. Detect / install Claude Code (`brew install claude-code` or download from
-     claude.ai).
-  3. Sign in to Sutando cloud account (opens browser, OAuth flow, returns to a
-     localhost listener).
-  4. Cloud pushes the user's `.env` (Gemini key, optional Twilio for BYO users,
-     etc.) into `SUTANDO_HOME/.env`.
-  5. Install + load launchd agents.
-- Build `.dmg` with `create-dmg`, drag-to-Applications.
+- **No Xcode project** [DONE differently]. `app/build-app.sh` shells out to
+  `swiftc` directly, listing each Swift source. Cleaner for a small
+  multi-file launcher; no `.pbxproj` to maintain. main.swift's
+  `workspace` now prefers `Bundle.main.resourcePath/repo` when bundled,
+  falls back to the 8-dir-walk for raw-binary dev (preserves existing
+  workflow).
+- **Node bundling deferred** [PARTIAL → v2]. Single-executable Node via
+  `--experimental-sea-config` requires a static-link toolchain that
+  Homebrew's node doesn't ship with. `LaunchAgentInstaller` falls back to
+  `/opt/homebrew/bin → /usr/local/bin → /usr/bin` so the .app works as
+  long as the user has Homebrew node + python3 + fswatch. Documented in
+  `app/README.md`. Bundling the official static Node tarball is v2.
+- **`claude` CLI as separate prereq** [DONE]. Settings shows a missing-
+  prereq warning in the core-agent log (`run-core-agent.sh` self-checks
+  for `tmux` and `claude` on PATH and sleeps 60s rather than crash-loop).
+- **First-launch wizard** [SUPERSEDED by Phase 4.7]. Originally deferred
+  with the assumption "internal users are devs". Real-world test killed
+  that assumption — without a Settings UI, even devs had to hand-edit
+  `~/Library/Application Support/Sutando/.env`. Replaced by the Settings
+  window — see Phase 4.7.
+- **`.dmg` build** [DONE]. `app/build-dmg.sh` produces a 93MB UDZO DMG
+  with `/Applications` symlink and READ ME FIRST, via `hdiutil`.
 
-## Phase 2 — Signing, notarization, auto-update (1 week, in `sutando` `app/`)
+## Phase 2 — Signing, notarization, auto-update [DONE — commit `97decf5`]
+
+Code is wired; the workflow runs in degraded mode (ad-hoc signing,
+unsigned appcast warnings) until the GitHub Actions secrets below are
+populated. To turn on full signing:
+
+1. Set `APPLE_DEVELOPER_ID_CERT_P12_BASE64` + `APPLE_DEVELOPER_ID_CERT_PASSWORD`
+2. Set `APPLE_ID` + `APPLE_TEAM_ID` + `APPLE_APP_SPECIFIC_PASSWORD`
+3. Run `bash app/sparkle/generate-keys.sh` once locally; paste the public
+   key into `app/Info.plist` (replacing `REPLACE_WITH_PUBLIC_ED_KEY`); set
+   `SPARKLE_PRIVATE_KEY_BASE64` from the exported private key.
+
+After that, pushing a `v*` tag produces a signed + notarized DMG +
+EdDSA-signed appcast and uploads to GitHub Releases.
 
 - **Apple Developer ID Application** certificate stored in 1Password and GitHub
   Secrets.
@@ -185,7 +226,7 @@ Concrete work:
 
 ---
 
-## Phase 3 — Cloud control plane (parallel, in `agent-universe`)
+## Phase 3 — Cloud control plane [DONE — `agent-universe` commit `82ac0b2`]
 
 ### Architecture
 
@@ -321,7 +362,94 @@ accessible from any browser. Shows:
 
 ---
 
-## Phase 4 — Monetization
+## Phase 4 — Desktop ↔ cloud wiring + telemetry [DONE — commit `9e1b80f`]
+
+Implemented:
+
+- `src/Sutando/CloudAuth.swift` — keychain token, `sutando://auth?…` URL
+  scheme handler with challenge validation, `$SUTANDO_HOME/cloud-auth.json`
+  mirror so Node + Python services share the auth without keychain access,
+  stable `machineId` in `device.json`, 5-minute heartbeat to `/api/devices`.
+- `src/cloud-client.ts` — auth-aware fetch + batched event sender (60s or
+  200 events) with 5000-event queue cap.
+- `src/cloud_metrics.py` — fire-and-forget Python equivalent.
+- `agent-universe` `cli-login` page redirects via URL scheme (legacy
+  localhost-port path retained as fallback).
+- `main.swift` — Sign in / Sign out menu items, URL scheme handler, 5-min
+  heartbeat timer.
+- Three meters wired: `voice.gemini` (`voice-agent.ts` writeVoiceMetrics),
+  `tts.cartesia` (`cartesia-tts.ts` generateSpeech), `image.gen` /
+  `video.gen` (`skills/image-generation/scripts/generate.py`).
+
+Deferred to v2 (operational, not code):
+
+- Hosted Twilio relay — needs a Twilio account we operate.
+- Hosted Gemini gateway — needs a paid GCP project.
+- These are paid-tier features; BYO works for internal release.
+
+## Phase 4.7 — Settings + first-launch flow [DONE]
+
+Added post-plan after the first real-world test — installing the .app and
+trying to use it required hand-editing `.env`. Original Phase 1.4 wizard
+deferral was wrong.
+
+- `src/Sutando/EnvFile.swift` — round-tripping `.env` parser/writer that
+  preserves comments + unknown keys.
+- `src/Sutando/Permissions.swift` — TCC status (Microphone via
+  `AVCaptureDevice`, Accessibility via `AXIsProcessTrusted`, Screen
+  Recording via `CGPreflightScreenCaptureAccess`) plus
+  `x-apple.systempreferences:` deeplinks.
+- `src/Sutando/SettingsWindow.swift` — single-pane window with cloud
+  account row, API key form (Gemini required + Cartesia + 12 advanced
+  fields under disclosure), permission rows with Grant buttons, and
+  Background Services Install / Uninstall.
+- `main.swift` — `setupMainMenu()` builds an Edit menu so ⌘V works in
+  text fields (LSUIElement apps don't get one by default — without it,
+  pasting an API key fails silently). `Settings…` menu item with `⌘,`
+  accelerator. First-launch detection: if no Gemini key + no
+  `$SUTANDO_HOME/.firstrun-complete` marker, Settings auto-opens 300ms
+  after launch.
+
+## Phase 4-bug — launchd installer hardening [DONE]
+
+First Settings → Install attempt installed only 4 of 7 plists then
+showed an error. Root cause: `launchctl bootstrap` of a plist with
+`<key>Disabled</key><true/>` returns "Bootstrap failed: 5: Input/output
+error", which threw and aborted the install loop mid-stream
+(`com.sutando.phone-conversation` ships disabled because it's the
+paid-tier service).
+
+Fix in `src/Sutando/LaunchAgentInstaller.swift`:
+
+- New `LaunchAgentInstallSummary` struct with `installed` /
+  `skippedDisabled` / `failed` lists.
+- `install()` now collects errors instead of throwing on first failure.
+- Detects `<key>Disabled</key><true/>` in the rendered template and
+  writes the plist (so manual `launchctl enable` later works) but skips
+  the bootstrap call.
+- Settings + menu callers updated to display per-failure detail.
+
+## Phase 4-core-agent — Claude Code as launchd service [DONE]
+
+The original 7-plist set didn't include the Claude Code core agent —
+the proactive loop that processes voice tasks queued in `tasks/`.
+Real-world test surfaced it: `get_core_status` tool returned "not
+running" because nothing in the install set actually ran `claude`.
+
+- `src/run-core-agent.sh` — wrapper that creates a tmux session detached
+  (`-d` so no TTY needed under launchd), runs claude with
+  `--dangerously-skip-permissions /proactive-loop`, polls
+  `tmux has-session` every 30s, and exits when the session ends so
+  launchd's `KeepAlive` recreates it. Self-checks for `tmux` and
+  `claude` on PATH and sleeps 60s rather than crash-loop on prereqs.
+- `app/LaunchAgents/com.sutando.core-agent.plist.template` — runs the
+  wrapper with `PATH` extended to include Homebrew dirs.
+- Bundled into `Sutando.app/Contents/Resources/repo/src/` automatically
+  by `build-app.sh` (already copies the whole `src/` tree).
+
+Prereq the user must do once: `claude auth login` in Terminal.
+
+## Phase 4 — Monetization (pricing plan, code partially in place)
 
 ### The Claude Code billing problem
 
@@ -383,7 +511,7 @@ Even if not in v1, the cloud schema must support:
 
 ---
 
-## Phase 5 — Architectural redesign (post-internal, before public)
+## Phase 5 — Architectural redesign [PENDING — post-internal, before public]
 
 These will surface during internal use. Don't pre-fix them:
 
@@ -406,15 +534,20 @@ These will surface during internal use. Don't pre-fix them:
 
 ## Sequencing
 
-| Weeks | Track A — App (`sutando` `app/`) | Track B — Cloud (`agent-universe`) | Track C — Telemetry (`sutando`) |
-|---|---|---|---|
-| 1 | Phase 0 path/port cleanup, vendor bodhi | Stand up Next.js + Neon + Clerk skeleton | Extend `event_log.py` with cloud sink interface (no-op default) |
-| 2–3 | Phase 1 .app bundle, Xcode project, first-launch wizard | Stripe products + webhooks; `/api/auth`, `/api/usage` endpoints | Wire Gemini + Twilio + Cartesia + image-gen instrumentation |
-| 4 | Phase 2 signing + notarization + Sparkle | Cloud dashboard MVP (devices, usage, billing) | Verify event flow end-to-end |
-| 5 | Internal alpha to ~5 users on `internal` channel | Manual-override Plus subscriptions for internal users | Watch metrics, fix what breaks |
-| 6+ | Iterate on internal feedback | Phone relay (biggest UX win) | — |
+Original 5–6 week plan, actually completed (code-side) in one session
+plus a debugging round. The bottleneck shifted from "writing the code"
+to "operational provisioning".
 
-Realistic time to internal release: **5–6 weeks of focused work**.
+| Track A — App (`sutando` `app/`) | Track B — Cloud (`agent-universe`) | Track C — Telemetry (`sutando`) |
+|---|---|---|
+| Phase 0 path/port cleanup [DONE] | Next.js + Neon + Clerk skeleton [DONE] | `cloud-client.ts` + `cloud_metrics.py` [DONE] |
+| Phase 1 .app bundle [DONE] | Stripe products + webhooks; `/api/auth`, `/api/usage` [DONE] | `voice.gemini`, `tts.cartesia`, `image.gen` instrumentation [DONE] |
+| Phase 2 signing + notarization + Sparkle [DONE — needs secrets] | Cloud dashboard MVP [DONE] | End-to-end event flow [DONE — verified locally] |
+| Phase 4.7 Settings + first-launch [DONE] | Manual-override Plus subscriptions [PENDING] | — |
+| Phase 4-bug installer hardening [DONE] | Production deploy (Vercel + DNS) [PENDING] | — |
+| Phase 4-core-agent claude wrapper [DONE] | Phone relay [PENDING — paid tier] | — |
+| Internal alpha [PENDING] | | |
+| Apple Developer ID + Sparkle keys [PENDING] | | |
 
 ## Operational notes
 

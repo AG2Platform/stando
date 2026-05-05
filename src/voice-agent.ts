@@ -793,7 +793,7 @@ async function main() {
 				toolCount: voiceToolCalls.length,
 				events: voiceEvents,
 			};
-			appendFileSync('data/voice-metrics.jsonl', JSON.stringify(metrics) + '\n');
+			appendFileSync(statePath('data/voice-metrics.jsonl'), JSON.stringify(metrics) + '\n');
 			console.log(`${ts()} [Observability] Wrote voice metrics: ${voiceToolCalls.length} tools, ${voiceEvents.length} events, ${voiceTranscript.length} transcript lines`);
 		} catch (err) {
 			console.log(`${ts()} [Observability] Failed to write metrics: ${err}`);

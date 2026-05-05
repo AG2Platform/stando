@@ -33,4 +33,5 @@ Phase 0.5.
 | `com.sutando.agent-api` | 7843 | yes |
 | `com.sutando.screen-capture` | 7845 | yes |
 | `com.sutando.credential-proxy` | 7846 | yes (for Claude quota visibility) |
-| `com.sutando.phone-conversation` | 3100 | optional (paid tier) |
+| `com.sutando.core-agent` | (none) | yes (Claude Code in tmux; supervises `tasks/`) |
+| `com.sutando.phone-conversation` | 3100 | optional (paid tier; ships `Disabled=true`, the installer skips bootstrap) |

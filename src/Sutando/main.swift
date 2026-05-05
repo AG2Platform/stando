@@ -82,6 +82,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// otherwise. See src/Sutando/SparkleUpdater.swift.
     let sparkle = SparkleUpdater()
 
+    /// Settings window. Created lazily on first open + retained so each
+    /// "Settings…" menu click brings up the same window with the same
+    /// in-flight edits.
+    var settingsWindow: SettingsWindowController?
+
     /// Fixed tmux socket path for the sutando-core session. The shell
     /// (via startup.sh -S flag) and the app (launched by macOS with a
     /// different TMPDIR due to sandboxing) must target the same socket
@@ -123,12 +128,72 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         DispatchQueue.main.async { [self] in
+            setupMainMenu()
             setupMenuBar()
             registerHotKey()
             watchResults()
             registerURLSchemeHandler()
             startCloudHeartbeat()
             logToFile("App started, workspace=\(workspace)")
+            maybeRunFirstLaunchFlow()
+        }
+    }
+
+    /// LSUIElement apps don't get a main menu by default, which means ⌘V
+    /// doesn't route to text fields in our Settings window (the Cut /
+    /// Copy / Paste / Select-All actions live on the standard Edit menu
+    /// and reach NSTextField via the responder chain). Provide a minimal
+    /// main menu so paste works when a Settings field is focused.
+    func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        // Application menu (first menu — title is the app name).
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu(title: "Sutando")
+        appMenu.addItem(NSMenuItem(title: "About Sutando", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
+        appMenu.addItem(.separator())
+        appMenu.addItem(NSMenuItem(title: "Hide Sutando", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
+        appMenu.addItem(.separator())
+        appMenu.addItem(NSMenuItem(title: "Quit Sutando", action: #selector(quit), keyEquivalent: "q"))
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        // Edit menu — the reason this whole function exists.
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        // Window menu — provides standard window operations.
+        let windowMenuItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        windowMenu.addItem(NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        windowMenuItem.submenu = windowMenu
+        mainMenu.addItem(windowMenuItem)
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    /// On first launch (no $SUTANDO_HOME/.firstrun-complete + no Gemini key),
+    /// open Settings automatically so the user knows where to go. Idempotent —
+    /// once they save with a key, the marker file blocks future auto-opens.
+    func maybeRunFirstLaunchFlow() {
+        guard SettingsWindowController.needsFirstLaunchSetup else { return }
+        // Tiny delay so the menu bar icon is up before the window appears.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
+            openSettings()
+            logToFile("First-launch: opened Settings (no Gemini key + no marker)")
         }
     }
 
@@ -192,6 +257,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         CloudAuth.shared.signOut()
         updateCloudMenuItems()
         notify("Sutando", "Signed out of cloud account.")
+    }
+
+    @objc func openSettings() {
+        if settingsWindow == nil {
+            settingsWindow = SettingsWindowController(appDelegate: self)
+        }
+        settingsWindow?.showAndFocus()
     }
 
     // MARK: - Result notifications (when voice is not connected)
@@ -308,7 +380,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Stop All Services", action: #selector(stopServices), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Restart Sutando App", action: #selector(restartSelf), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
-        // Cloud account.
+        // Settings — primary entry point for API keys, cloud account,
+        // permissions, services. Cmd+, follows macOS convention.
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        menu.addItem(settingsItem)
+        menu.addItem(NSMenuItem.separator())
+        // Cloud account — also accessible from inside Settings; surfaced in
+        // the menu for fast sign-in/out without opening the window.
         let signInItem = NSMenuItem(title: "Sign in to Sutando…", action: #selector(cloudSignIn), keyEquivalent: "")
         let signOutItem = NSMenuItem(title: "Sign out of Sutando", action: #selector(cloudSignOut), keyEquivalent: "")
         menu.addItem(signInItem)
@@ -318,7 +396,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Hide whichever item doesn't match the current state.
         DispatchQueue.main.async { [self] in updateCloudMenuItems() }
         menu.addItem(NSMenuItem.separator())
-        // LaunchAgent install/uninstall (only meaningful from the .app bundle).
+        // LaunchAgent install/uninstall (also accessible from inside Settings).
         let installItem = NSMenuItem(title: "Install Background Services…", action: #selector(installLaunchAgents), keyEquivalent: "")
         let uninstallItem = NSMenuItem(title: "Uninstall Background Services", action: #selector(uninstallLaunchAgents), keyEquivalent: "")
         menu.addItem(installItem)
@@ -1568,19 +1646,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let installer = LaunchAgentInstaller()
             let paths = LaunchAgentInstaller.defaultPaths(workspace: workspace)
             do {
-                let installed = try installer.install(paths: paths)
-                logToFile("installLaunchAgents: installed \(installed.joined(separator: ", "))")
+                let summary = try installer.install(paths: paths)
+                logToFile("installLaunchAgents: installed=\(summary.installed.joined(separator: ",")) skipped=\(summary.skippedDisabled.joined(separator: ",")) failed=\(summary.failed.map { $0.label }.joined(separator: ","))")
                 DispatchQueue.main.async { [self] in
-                    notify("Sutando", "Installed \(installed.count) services. They'll auto-start on login.")
+                    if summary.failed.isEmpty {
+                        notify("Sutando", "Installed \(summary.installed.count) services. They'll auto-start on login.")
+                    } else {
+                        notify("Sutando", "Installed \(summary.installed.count). \(summary.failed.count) failed — see Settings.")
+                    }
                 }
             } catch LaunchAgentError.bundleResourcesMissing {
                 DispatchQueue.main.async { [self] in
                     notify("Sutando", "LaunchAgent templates not found. Run from .app bundle.")
-                }
-            } catch let LaunchAgentError.launchctlFailed(label, status, output) {
-                logToFile("installLaunchAgents: \(label) bootstrap failed status=\(status): \(output)")
-                DispatchQueue.main.async { [self] in
-                    notify("Sutando", "\(label) failed to load. See logs.")
                 }
             } catch {
                 logToFile("installLaunchAgents: error \(error)")

@@ -23,6 +23,21 @@ enum LaunchAgentError: Error {
     case launchctlFailed(label: String, status: Int32, output: String)
 }
 
+/// Result of an install pass. `installed` is the set of agents successfully
+/// loaded into launchd. `skippedDisabled` is the set of agents whose
+/// templates carry `Disabled=true` — we write the plist (so the user can
+/// flip it later via launchctl) but never call `launchctl bootstrap`,
+/// which errors with code 5 on Disabled plists. `failed` is everything
+/// else that errored. The installer collects rather than throws so a
+/// single broken plist doesn't block the rest.
+struct LaunchAgentInstallSummary {
+    var installed: [String] = []
+    var skippedDisabled: [String] = []
+    var failed: [(label: String, message: String)] = []
+
+    var isClean: Bool { failed.isEmpty }
+}
+
 struct LaunchAgentPaths {
     let repoDir: String
     let sutandoHome: String
@@ -113,9 +128,10 @@ class LaunchAgentInstaller {
 
     /// Install the LaunchAgent set. Reads templates, substitutes
     /// placeholders, writes plists to ~/Library/LaunchAgents, and bootstraps
-    /// each one. Returns the list of installed labels.
+    /// each one that isn't marked `Disabled=true`. Continues past
+    /// individual failures so one broken plist doesn't block the rest.
     @discardableResult
-    func install(paths: LaunchAgentPaths, templatesDirOverride: String? = nil) throws -> [String] {
+    func install(paths: LaunchAgentPaths, templatesDirOverride: String? = nil) throws -> LaunchAgentInstallSummary {
         let templatesDir = templatesDirOverride ?? bundleTemplatesDir ?? (paths.repoDir + "/app/LaunchAgents")
         guard FileManager.default.fileExists(atPath: templatesDir) else {
             throw LaunchAgentError.bundleResourcesMissing
@@ -127,18 +143,53 @@ class LaunchAgentInstaller {
 
         let phs = placeholders(paths)
         let files = try FileManager.default.contentsOfDirectory(atPath: templatesDir)
-        var installed: [String] = []
+        var summary = LaunchAgentInstallSummary()
         for file in files where file.hasSuffix(".plist.template") {
             let label = String(file.dropLast(".plist.template".count))
             let templatePath = templatesDir + "/" + file
-            guard let template = try? String(contentsOfFile: templatePath, encoding: .utf8) else { continue }
+            guard let template = try? String(contentsOfFile: templatePath, encoding: .utf8) else {
+                summary.failed.append((label, "could not read template at \(templatePath)"))
+                continue
+            }
             let rendered = render(template, placeholders: phs)
             let destPath = userLaunchAgentsDir + "/" + label + ".plist"
-            try rendered.write(toFile: destPath, atomically: true, encoding: .utf8)
-            try bootstrap(label: label, plistPath: destPath)
-            installed.append(label)
+            do {
+                try rendered.write(toFile: destPath, atomically: true, encoding: .utf8)
+            } catch {
+                summary.failed.append((label, "write failed: \(error.localizedDescription)"))
+                continue
+            }
+
+            // Skip bootstrap for plists with Disabled=true. launchctl
+            // returns code 5 ("Input/output error") on those, which used
+            // to abort the entire install. Writing the plist still lets
+            // the user opt in later via `launchctl enable + bootstrap`.
+            if isDisabled(template: rendered) {
+                summary.skippedDisabled.append(label)
+                continue
+            }
+
+            do {
+                try bootstrap(label: label, plistPath: destPath)
+                summary.installed.append(label)
+            } catch let LaunchAgentError.launchctlFailed(_, status, output) {
+                let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+                summary.failed.append((label, "launchctl bootstrap \(status): \(trimmed)"))
+            } catch {
+                summary.failed.append((label, error.localizedDescription))
+            }
         }
-        return installed
+        return summary
+    }
+
+    /// Match `<key>Disabled</key>` followed by `<true/>` (allowing whitespace).
+    private func isDisabled(template: String) -> Bool {
+        guard let range = template.range(of: "<key>Disabled</key>") else { return false }
+        let after = template[range.upperBound...]
+        // Look for the next plist value tag — true or false.
+        guard let truePos = after.range(of: "<true/>") else { return false }
+        guard let falsePos = after.range(of: "<false/>") else { return true }
+        return truePos.lowerBound < falsePos.lowerBound
     }
 
     /// Bootout + bootstrap an agent. Idempotent — bootout first to avoid
