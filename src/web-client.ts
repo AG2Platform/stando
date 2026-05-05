@@ -11,6 +11,7 @@
 import { createServer } from 'node:http';
 import { writeFileSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { readTmuxStatus } from './tmux-status.js';
+import { statePath } from './util_paths.js';
 
 const HTTP_PORT = Number(process.env.CLIENT_PORT) || 8080;
 const HTTP_HOST = process.env.CLIENT_HOST || '0.0.0.0'; // '0.0.0.0' binds to all interfaces for EC2
@@ -2613,13 +2614,13 @@ let _seeingUntil = 0;
 const CORE_STATUS_STALE_SECONDS = 60;
 function readCoreStatus(): { running: boolean; step: string; stale: boolean } {
 	try {
-		const url = new URL('../core-status.json', import.meta.url);
-		const raw = readFileSync(url, 'utf-8');
+		const statusFile = statePath('core-status.json');
+		const raw = readFileSync(statusFile, 'utf-8');
 		const s = JSON.parse(raw) as { status?: string; ts?: number; step?: string };
 		const nowSec = Date.now() / 1000;
 		let stale = false;
 		try {
-			const mtimeSec = statSync(url).mtimeMs / 1000;
+			const mtimeSec = statSync(statusFile).mtimeMs / 1000;
 			if (nowSec - mtimeSec > CORE_STATUS_STALE_SECONDS) stale = true;
 		} catch { stale = true; }
 		// "Running with old ts" → loop likely crashed mid-pass, treat as stale.
@@ -2770,7 +2771,7 @@ const server = createServer((req, res) => {
 	if (url.pathname === '/voice-mode') {
 		let mode = 'active';
 		try {
-			const raw = readFileSync('state/voice-mode.txt', 'utf-8').trim();
+			const raw = readFileSync(statePath('state/voice-mode.txt'), 'utf-8').trim();
 			if (raw === 'meeting' || raw === 'active') mode = raw;
 		} catch {}
 		res.writeHead(200, { 'Content-Type': 'application/json' });

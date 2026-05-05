@@ -26,8 +26,8 @@ REPO_DIR = Path(__file__).parent.parent
 # Personal-asset path resolver — see src/util_paths.py. Used for /avatar
 # and /stand-identity endpoints so they prefer per-machine private dir.
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import personal_path, shared_personal_path  # noqa: E402
-PORT = 7844
+from util_paths import personal_path, shared_personal_path, state_path  # noqa: E402
+PORT = int(os.environ.get("DASHBOARD_PORT", "7844"))
 
 
 def _resolve_note_path(raw_slug: str):
@@ -107,7 +107,7 @@ def get_pending_count() -> dict:
 
 
 def get_score() -> str:
-    build_log = REPO_DIR / "build_log.md"
+    build_log = Path(shared_personal_path("build_log.md", REPO_DIR))
     if not build_log.exists():
         return "?"
     content = build_log.read_text()
@@ -117,7 +117,7 @@ def get_score() -> str:
 
 def get_quota_status() -> dict:
     """Read quota state from quota-state.json (written by credential proxy)."""
-    quota_file = REPO_DIR / "quota-state.json"
+    quota_file = state_path("quota-state.json")
     if not quota_file.exists():
         quota_file = REPO_DIR / "skills" / "quota-tracker" / "quota-state.json"
     if not quota_file.exists():
@@ -228,7 +228,7 @@ TESTED_USE_CASES = {
 }
 
 def get_use_case_matrix() -> str:
-    build_log = REPO_DIR / "build_log.md"
+    build_log = Path(shared_personal_path("build_log.md", REPO_DIR))
     if not build_log.exists():
         return ""
     content = build_log.read_text()

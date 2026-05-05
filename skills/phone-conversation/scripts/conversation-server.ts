@@ -42,10 +42,19 @@
  *   - Transcript persistence
  */
 
-// Load .env from the project root (3 levels up from this script), not cwd —
-// override: true ensures .env values win over stale shell env vars
+// Layered .env loader: repo .env first (dev fallback), then $SUTANDO_HOME/.env
+// (per-machine config managed by the .app bundle). Both load with override:true
+// so .env values win over stale shell env vars.
 import { config as _dotenvConfig } from 'dotenv';
+import { existsSync as _existsSync } from 'node:fs';
+import { join as _join } from 'node:path';
 _dotenvConfig({ path: new URL('../../../.env', import.meta.url).pathname, override: true });
+const _sutandoHome = process.env.SUTANDO_HOME;
+if (_sutandoHome) {
+	const _expanded = _sutandoHome.replace(/^~/, process.env.HOME || '');
+	const _homeEnv = _join(_expanded, '.env');
+	if (_existsSync(_homeEnv)) _dotenvConfig({ path: _homeEnv, override: true });
+}
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdirSync, writeFileSync, appendFileSync, unlinkSync, existsSync, readFileSync, readdirSync, symlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';

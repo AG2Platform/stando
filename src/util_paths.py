@@ -6,10 +6,18 @@ so they live with the rest of the per-machine memory under the private
 sync repo. Public-workspace fallback is preserved so existing installs
 keep working until they migrate.
 
+This module also provides `state_path()` / `state_dir()` for per-machine
+runtime state (tasks/, results/, state/, logs/, core-status.json, etc.).
+That tier resolves to `$SUTANDO_HOME/<name>` when SUTANDO_HOME is set
+(the .app bundle points it at ~/Library/Application Support/Sutando),
+otherwise falls back to `<REPO_DIR>/<name>` for backwards compatibility.
+
 Usage:
-    from util_paths import personal_path
+    from util_paths import personal_path, state_path, state_dir
     si = personal_path("stand-identity.json")
     avatar = personal_path("stand-avatar.png")  # also tries assets/ in public
+    tasks_dir = state_dir("tasks")               # ensures it exists
+    status = state_path("core-status.json")      # parent dir guaranteed to exist
 """
 from __future__ import annotations
 import os
@@ -17,6 +25,30 @@ import socket
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent.parent
+
+
+def _state_root() -> Path:
+    home = os.environ.get("SUTANDO_HOME")
+    if home:
+        return Path(os.path.expanduser(home))
+    return REPO_DIR
+
+
+def state_path(name: str) -> Path:
+    """Per-machine runtime state path. Resolves to `$SUTANDO_HOME/<name>` when
+    SUTANDO_HOME is set, else `<REPO_DIR>/<name>` for backwards compatibility.
+    Ensures the parent directory exists.
+    """
+    p = _state_root() / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def state_dir(name: str) -> Path:
+    """Like state_path() but ensures the path itself exists as a directory."""
+    p = _state_root() / name
+    p.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 def _private_machine_dir() -> Path | None:

@@ -83,21 +83,19 @@ def validate_twilio_signature(handler, body: str) -> bool:
 
 
 REPO_DIR = Path(__file__).parent.parent
-TASK_DIR = REPO_DIR / "tasks"
-PORT = 7843
+PORT = int(os.environ.get("AGENT_API_PORT", "7843"))
 
-# Personal-asset path resolver — see src/util_paths.py. Imported here so the
-# /avatar and /stand-identity endpoints prefer the per-machine private dir
-# over the public workspace.
+# Personal-asset + state-path resolvers — see src/util_paths.py. Imported here
+# so /avatar and /stand-identity endpoints prefer the per-machine private dir,
+# and tasks/results live under SUTANDO_HOME when the .app bundle sets it.
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import personal_path  # noqa: E402
+from util_paths import personal_path, state_dir, state_path  # noqa: E402
 
 # Simple token auth — set SUTANDO_API_TOKEN in .env for remote access security
 API_TOKEN = os.environ.get("SUTANDO_API_TOKEN", "")
 
-RESULT_DIR = REPO_DIR / "results"
-TASK_DIR.mkdir(exist_ok=True)
-RESULT_DIR.mkdir(exist_ok=True)
+TASK_DIR = state_dir("tasks")
+RESULT_DIR = state_dir("results")
 
 # In-memory task history (survives file cleanup, lost on restart)
 # {task_id: {status, text, time, result}}
@@ -272,7 +270,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, {"pong": True})
         elif path == "/core-status":
             # Read loop status file for web UI
-            status_file = REPO_DIR / "core-status.json"
+            status_file = state_path("core-status.json")
             if status_file.exists():
                 import json as _json
                 try:
@@ -422,7 +420,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pass
             # Recent results
             try:
-                results_dir = REPO_DIR / "results"
+                results_dir = RESULT_DIR
                 result_files = sorted(results_dir.glob("task-*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:5]
                 for f in result_files:
                     content = f.read_text()[:200]
@@ -431,7 +429,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pass
             self.send_json(200, {"activity": activity})
         elif path == "/contextual-chips":
-            chips_file = REPO_DIR / "contextual-chips.json"
+            chips_file = state_path("contextual-chips.json")
             if chips_file.exists():
                 try:
                     data = json.loads(chips_file.read_text())
@@ -441,7 +439,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_json(200, {"chips": []})
         elif path == "/dynamic-content":
-            dc_file = REPO_DIR / "dynamic-content.json"
+            dc_file = state_path("dynamic-content.json")
             if dc_file.exists():
                 try:
                     data = json.loads(dc_file.read_text())
@@ -491,7 +489,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(media_path.read_bytes())
         elif path == "/logs/voice":
             # Return last 30 lines of voice-agent.log for debugging
-            log_file = REPO_DIR / "src" / "voice-agent.log"
+            log_file = state_path("logs/voice-agent.log")
             if log_file.exists():
                 lines = log_file.read_text().splitlines()[-30:]
                 self.send_json(200, {"lines": lines})
@@ -710,7 +708,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             # os.path.realpath + str.startswith is the CodeQL-recognized
                             # path-injection sanitizer pair (Path::PathNormalization
                             # + Path::SafeAccessCheck in semmle.python).
-                            task_dir_real = os.path.realpath(REPO_DIR / "tasks")
+                            task_dir_real = os.path.realpath(TASK_DIR)
                             task_file_str = os.path.realpath(
                                 os.path.join(task_dir_real, f"answer-{safe_qid}-{ts}.txt")
                             )

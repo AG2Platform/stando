@@ -7,6 +7,24 @@ set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
+# Per-machine runtime state. Falls back to REPO so dev installs keep working
+# without setting SUTANDO_HOME. The .app bundle sets it to
+# ~/Library/Application Support/Sutando.
+STATE_ROOT="${SUTANDO_HOME:-$REPO}"
+LOGS_DIR="$STATE_ROOT/logs"
+mkdir -p "$LOGS_DIR"
+
+# Layered .env: load $SUTANDO_HOME/.env when set, so its values take
+# precedence over the repo .env. Python services inherit these via the
+# child process environment; Node services additionally re-load via
+# src/load-env.ts at import time.
+if [ -n "${SUTANDO_HOME:-}" ] && [ -f "$STATE_ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$STATE_ROOT/.env"
+  set +a
+fi
+
 # Auto-bootstrap: create-if-missing files and dirs that the agent + skills
 # expect to exist (logs, state, tasks, results, notes, contextual-chips.json,
 # pending-questions.md, build_log.md, crons.json, …). Idempotent — safe to
@@ -97,8 +115,8 @@ echo ""
 # Install Claude Code skills (runs every startup, idempotent)
 bash "$REPO/skills/install.sh" 2>/dev/null || true
 
-# Create tasks/ and results/ directories
-mkdir -p tasks results data
+# Create tasks/ and results/ directories under SUTANDO_HOME (or repo fallback)
+mkdir -p "$STATE_ROOT/tasks" "$STATE_ROOT/results" "$STATE_ROOT/data"
 
 # Archive stale results/*.txt (>24h) BEFORE any service starts iterating
 # results/. Prevents the 2026-04-15 DM-flood class of incidents where a
@@ -126,7 +144,7 @@ fi
 # 1. Voice agent (Gemini Live on port 9900)
 if ! lsof -i :9900 > /dev/null 2>&1; then
   echo "  Starting voice agent (port 9900)..."
-  npx tsx src/voice-agent.ts > logs/voice-agent.log 2>&1 &
+  npx tsx src/voice-agent.ts > "$LOGS_DIR/voice-agent.log" 2>&1 &
   echo "  ✓ voice agent"
 else
   echo "  ✓ voice agent (already running)"
@@ -135,7 +153,7 @@ fi
 # 2. Web client (port 8080)
 if ! lsof -i :8080 > /dev/null 2>&1; then
   echo "  Starting web client (port 8080)..."
-  npx tsx src/web-client.ts > logs/web-client.log 2>&1 &
+  npx tsx src/web-client.ts > "$LOGS_DIR/web-client.log" 2>&1 &
   echo "  ✓ web client"
 else
   echo "  ✓ web client (already running)"
@@ -144,7 +162,7 @@ fi
 # 3. Dashboard (port 7844)
 if ! lsof -i :7844 > /dev/null 2>&1; then
   echo "  Starting dashboard (port 7844)..."
-  python3 src/dashboard.py > logs/dashboard.log 2>&1 &
+  python3 src/dashboard.py > "$LOGS_DIR/dashboard.log" 2>&1 &
   echo "  ✓ dashboard"
 else
   echo "  ✓ dashboard (already running)"
@@ -153,7 +171,7 @@ fi
 # 4. Agent API (port 7843)
 if ! lsof -i :7843 > /dev/null 2>&1; then
   echo "  Starting agent API (port 7843)..."
-  python3 src/agent-api.py > logs/agent-api.log 2>&1 &
+  python3 src/agent-api.py > "$LOGS_DIR/agent-api.log" 2>&1 &
   echo "  ✓ agent API"
 else
   echo "  ✓ agent API (already running)"
@@ -162,7 +180,7 @@ fi
 # 5. Screen capture server (port 7845)
 if ! lsof -i :7845 > /dev/null 2>&1; then
   echo "  Starting screen capture (port 7845)..."
-  python3 src/screen-capture-server.py > logs/screen-capture.log 2>&1 &
+  python3 src/screen-capture-server.py > "$LOGS_DIR/screen-capture.log" 2>&1 &
   echo "  ✓ screen capture"
 else
   echo "  ✓ screen capture (already running)"
@@ -213,7 +231,7 @@ if [ "${SKIP_TELEGRAM:-}" = "1" ]; then
 elif [ -f "$HOME/.claude/channels/telegram/.env" ] && grep -q "TELEGRAM_BOT_TOKEN=" "$HOME/.claude/channels/telegram/.env" 2>/dev/null; then
   if ! pgrep -f "telegram-bridge" > /dev/null 2>&1; then
     echo "  Starting Telegram bridge..."
-    python3 src/telegram-bridge.py > logs/telegram-bridge.log 2>&1 &
+    python3 src/telegram-bridge.py > "$LOGS_DIR/telegram-bridge.log" 2>&1 &
     echo "  ✓ telegram bridge"
   else
     echo "  ✓ telegram bridge (already running)"
@@ -228,7 +246,7 @@ if [ -f "$HOME/.claude/channels/discord/.env" ] && grep -q "DISCORD_BOT_TOKEN=" 
     echo "  ~ discord bridge (needs: pip3 install discord.py)"
   elif ! pgrep -f "discord-bridge" > /dev/null 2>&1; then
     echo "  Starting Discord bridge..."
-    python3 src/discord-bridge.py > logs/discord-bridge.log 2>&1 &
+    python3 src/discord-bridge.py > "$LOGS_DIR/discord-bridge.log" 2>&1 &
     echo "  ✓ discord bridge"
   else
     echo "  ✓ discord bridge (already running)"
@@ -303,7 +321,7 @@ for port_name in $VERIFY_PORTS; do
   if lsof -i :"$port" > /dev/null 2>&1; then
     echo "  ✓ $name (port $port)"
   else
-    echo "  ✗ $name (port $port) — check logs/${name}.log"
+    echo "  ✗ $name (port $port) — check $LOGS_DIR/${name}.log"
   fi
 done
 echo ""
