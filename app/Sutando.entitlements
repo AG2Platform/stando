@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Apple Events: Sutando drives Chrome, Zoom, QuickTime, System Events,
+         Finder, Mail, etc. via osascript-style scripting throughout
+         inline-tools.ts and browser-tools.ts. -->
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
+
+    <!-- Microphone: voice agent. -->
+    <key>com.apple.security.device.microphone</key>
+    <true/>
+
+    <!-- Camera: optional, for meeting joins. -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
+
+    <!-- File access: the launcher reads/writes outside the bundle (the
+         bundled repo is read-only, but state lives in
+         ~/Library/Application Support/Sutando, and users drop files from
+         arbitrary Finder paths). -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+
+    <!-- Network: the bundled services bind to localhost ports
+         (8080, 9900, 7843–7846, 3100) and connect to Gemini/Twilio/Claude. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+
+    <!-- Hardened runtime needs library validation off because we exec
+         bundled Node + Python from Resources/runtime/, which load dylibs
+         that are not signed by Apple or the same team. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- Allow JIT for V8 (Node) and PyPy-style bytecode caches. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- Allow exec of bundled binaries (node, python3, fswatch, ffmpeg)
+         and of `claude` from /usr/local/bin or ~/.local/bin. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

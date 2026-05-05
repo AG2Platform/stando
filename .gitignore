@@ -73,3 +73,5 @@ done/
 
 # Runtime state file written by the voice client. Pure cruft, no commit value.
 voice-state.json
+# Phase 1 build artifact — large, regenerable
+/app/build/

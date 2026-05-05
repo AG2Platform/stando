@@ -13,21 +13,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var hotKeyRefs: [EventHotKeyRef?] = []  // one entry per registered hotkey
     var hotKeyActions: [UInt32: String] = [:]  // hotkey id → action name
     var lastDropTime: Date = .distantPast
+    /// Read-only repo root. Resolution order:
+    ///   1. `.app` bundle: `Bundle.main.resourcePath/repo` (when bundled by
+    ///      `app/build-app.sh` — the staged `src/` + `skills/` tree).
+    ///   2. Raw-binary dev workflow: walk up from
+    ///      `ProcessInfo.processInfo.arguments[0]` looking for `CLAUDE.md`.
+    ///   3. Last-resort fallback: 3 levels up from the binary
+    ///      (matches the original behavior for raw-binary `src/Sutando/Sutando`).
     let workspace: String = {
-        // Derive from binary location → repo root
-        // Raw binary: src/Sutando/Sutando (3 levels up)
-        // .app bundle: src/Sutando/Sutando.app/Contents/MacOS/Sutando (5 levels up)
+        // 1. Bundled .app — repo lives under Resources/repo
+        if let resourcePath = Bundle.main.resourcePath {
+            let bundledRepo = resourcePath + "/repo"
+            if FileManager.default.fileExists(atPath: bundledRepo + "/CLAUDE.md") {
+                return bundledRepo
+            }
+        }
+        // 2. Raw-binary dev: walk up looking for CLAUDE.md
         var url = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).resolvingSymlinksInPath()
-        // Walk up until we find CLAUDE.md (repo root marker)
         for _ in 0..<8 {
             url = url.deletingLastPathComponent()
             if FileManager.default.fileExists(atPath: url.appendingPathComponent("CLAUDE.md").path) {
                 return url.path
             }
         }
-        // Fallback: 3 levels up from binary
+        // 3. Last-resort fallback: 3 levels up from binary
         let fallback = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).resolvingSymlinksInPath()
         return fallback.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path
+    }()
+
+    /// Per-machine runtime state root. Reads `$SUTANDO_HOME` from the
+    /// environment if set (the .app bundle exports it pointing at
+    /// `~/Library/Application Support/Sutando`); otherwise falls back to
+    /// `workspace` so the raw-binary dev workflow continues to write
+    /// state into the repo cwd. Mirrors `statePath()` in
+    /// `src/util_paths.ts` and `state_path()` in `src/util_paths.py`.
+    lazy var stateRoot: String = {
+        if let home = ProcessInfo.processInfo.environment["SUTANDO_HOME"], !home.isEmpty {
+            return (home as NSString).expandingTildeInPath
+        }
+        return workspace
     }()
 
     var resultWatchSource: DispatchSourceFileSystemObject?
@@ -67,11 +91,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // plagued 2026-04-21 morning (3 instances accumulated + user saw
         // duplicate icons). Matches path via pgrep $-anchored pattern — same
         // pattern used by health-check.py per feedback_pkill_then_open_race.
+        // Pattern covers both raw-binary (`src/Sutando/Sutando`) and bundled
+        // (`Sutando.app/Contents/MacOS/Sutando`) layouts.
         let myPid = ProcessInfo.processInfo.processIdentifier
         let myPath = ProcessInfo.processInfo.arguments[0]
         let pgrep = Process()
         pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        pgrep.arguments = ["-f", "Sutando/Sutando$"]
+        pgrep.arguments = ["-f", "(Sutando|MacOS)/Sutando$"]
         let pipe = Pipe()
         pgrep.standardOutput = pipe
         pgrep.standardError = FileHandle.nullDevice
@@ -101,7 +127,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Result notifications (when voice is not connected)
     func watchResults() {
-        let resultsPath = workspace + "/results"
+        let resultsPath = stateRoot + "/results"
         let fd = open(resultsPath, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: DispatchQueue.global(qos: .utility))
@@ -113,7 +139,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func countResults() -> Int {
-        let files = (try? FileManager.default.contentsOfDirectory(atPath: workspace + "/results")
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: stateRoot + "/results")
             .filter { $0.hasPrefix("task-") && $0.hasSuffix(".txt") }) ?? []
         return files.count
     }
@@ -124,7 +150,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         lastResultCount = newCount
         // Only notify if voice is NOT connected
         if !isVoiceConnected() {
-            let resultsPath = workspace + "/results"
+            let resultsPath = stateRoot + "/results"
             if let files = try? FileManager.default.contentsOfDirectory(atPath: resultsPath)
                 .filter({ $0.hasPrefix("task-") && $0.hasSuffix(".txt") })
                 .sorted(by: >),
@@ -212,6 +238,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Restart All Services", action: #selector(restartServices), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Stop All Services", action: #selector(stopServices), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Restart Sutando App", action: #selector(restartSelf), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
+        // LaunchAgent install/uninstall (only meaningful from the .app bundle).
+        let installItem = NSMenuItem(title: "Install Background Services…", action: #selector(installLaunchAgents), keyEquivalent: "")
+        let uninstallItem = NSMenuItem(title: "Uninstall Background Services", action: #selector(uninstallLaunchAgents), keyEquivalent: "")
+        menu.addItem(installItem)
+        menu.addItem(uninstallItem)
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
 
@@ -246,8 +279,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // poll (see voice-agent.ts applyModeRequest). Nil-safe if workspace
     // derivation failed — the app just logs and the user retries.
     func requestVoiceMode(_ mode: String) {
-        let path = workspace + "/state/voice-mode.request"
-        let dir = workspace + "/state"
+        let path = stateRoot + "/state/voice-mode.request"
+        let dir = stateRoot + "/state"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         do {
             try mode.write(toFile: path, atomically: true, encoding: .utf8)
@@ -325,7 +358,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func pollVoiceMode() {
         // Read state/voice-mode.txt sentinel written by voice-agent.ts.
         // Falls back to "active" if file missing (first boot / voice-agent down).
-        let sentinel = workspace + "/state/voice-mode.txt"
+        let sentinel = stateRoot + "/state/voice-mode.txt"
         var newMode = "active"
         if let contents = try? String(contentsOfFile: sentinel, encoding: .utf8) {
             let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -999,8 +1032,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         lastDropTime = now
 
         let timestamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withFullDate, .withTime, .withSpaceBetweenDateAndTime, .withColonSeparatorInTime])
-        let logFile = workspace + "/logs/context-drop.log"
-        let tasksDir = workspace + "/tasks"
+        let logFile = stateRoot + "/logs/context-drop.log"
+        let tasksDir = stateRoot + "/tasks"
         let epoch = Int(Date().timeIntervalSince1970 * 1000)
         let dropImage = tasksDir + "/image-\(epoch).png"
 
@@ -1114,8 +1147,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         lastDropTime = now
 
         let timestamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withFullDate, .withTime, .withSpaceBetweenDateAndTime, .withColonSeparatorInTime])
-        let logFile = workspace + "/logs/context-drop.log"
-        let tasksDir = workspace + "/tasks"
+        let logFile = stateRoot + "/logs/context-drop.log"
+        let tasksDir = stateRoot + "/tasks"
 
         // Call screen-capture-server to capture the screen and get the file path back.
         // Server runs at localhost:7845, default capture is the main display.
@@ -1339,7 +1372,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func logToFile(_ msg: String) {
-        let path = workspace + "/logs/sutando-app-debug.log"
+        let dir = stateRoot + "/logs"
+        let path = dir + "/sutando-app-debug.log"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
         if let fh = FileHandle(forWritingAtPath: path) {
             fh.seekToEndOfFile()
@@ -1443,6 +1478,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .utility).async {
             try? proc.run()
             proc.waitUntilExit()
+        }
+    }
+
+    @objc func installLaunchAgents() {
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let installer = LaunchAgentInstaller()
+            let paths = LaunchAgentInstaller.defaultPaths(workspace: workspace)
+            do {
+                let installed = try installer.install(paths: paths)
+                logToFile("installLaunchAgents: installed \(installed.joined(separator: ", "))")
+                DispatchQueue.main.async { [self] in
+                    notify("Sutando", "Installed \(installed.count) services. They'll auto-start on login.")
+                }
+            } catch LaunchAgentError.bundleResourcesMissing {
+                DispatchQueue.main.async { [self] in
+                    notify("Sutando", "LaunchAgent templates not found. Run from .app bundle.")
+                }
+            } catch let LaunchAgentError.launchctlFailed(label, status, output) {
+                logToFile("installLaunchAgents: \(label) bootstrap failed status=\(status): \(output)")
+                DispatchQueue.main.async { [self] in
+                    notify("Sutando", "\(label) failed to load. See logs.")
+                }
+            } catch {
+                logToFile("installLaunchAgents: error \(error)")
+                DispatchQueue.main.async { [self] in
+                    notify("Sutando", "Install failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    @objc func uninstallLaunchAgents() {
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let installer = LaunchAgentInstaller()
+            let removed = installer.uninstall()
+            logToFile("uninstallLaunchAgents: removed \(removed.joined(separator: ", "))")
+            DispatchQueue.main.async { [self] in
+                notify("Sutando", "Removed \(removed.count) services.")
+            }
         }
     }
 

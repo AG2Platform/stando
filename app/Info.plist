@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Sutando</string>
+    <key>CFBundleExecutable</key>
+    <string>Sutando</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.sutando.app</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Sutando</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+
+    <!-- Menu-bar app: hide the Dock icon. -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+
+    <!-- TCC usage descriptions. macOS shows these to the user when the
+         corresponding permission is requested. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Sutando uses Apple Events to control Chrome, Zoom, and other apps you ask it to drive.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Sutando captures your screen when you ask it to describe or act on what you're looking at.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Sutando uses your microphone for the voice agent.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Sutando uses the camera when joining video meetings on your behalf.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>Sutando looks up contacts when you ask it to call or message someone by name.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Sutando reads your calendar when answering questions about your schedule or joining meetings.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Sutando reads and updates your reminders when you ask.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Sutando reads files from the Desktop when you drop them as context.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Sutando reads files from Documents when you drop them as context.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Sutando reads files from Downloads when you drop them as context.</string>
+
+    <!-- Custom URL scheme for cloud-account login callback. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.sutando.app.auth</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>sutando</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>

@@ -187,14 +187,24 @@ else
 fi
 
 # 5b. Sutando context drop app (global hotkey ⌃C)
-SUT_SRC="$REPO/src/Sutando/main.swift"
-SUT_BIN="$REPO/src/Sutando/Sutando"
+SUT_SRC_DIR="$REPO/src/Sutando"
+SUT_BIN="$SUT_SRC_DIR/Sutando"
+SUT_SRC_FILES=("$SUT_SRC_DIR/main.swift" "$SUT_SRC_DIR/LaunchAgentInstaller.swift")
 
-# Rebuild if source is newer than binary, or binary is missing.
+# Rebuild if any source file is newer than binary, or binary is missing.
+sut_needs_build=0
+if [ ! -f "$SUT_BIN" ]; then
+  sut_needs_build=1
+else
+  for f in "${SUT_SRC_FILES[@]}"; do
+    if [ -f "$f" ] && [ "$f" -nt "$SUT_BIN" ]; then sut_needs_build=1; break; fi
+  done
+fi
+
 # Kill any running instance so the fresh binary can take over.
-if [ -f "$SUT_SRC" ] && { [ ! -f "$SUT_BIN" ] || [ "$SUT_SRC" -nt "$SUT_BIN" ]; }; then
+if [ "$sut_needs_build" = "1" ]; then
   echo "  Compiling Sutando (source newer than binary)..."
-  if (cd "$REPO/src/Sutando" && swiftc -O -o Sutando main.swift -framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation 2>/dev/null); then
+  if (cd "$SUT_SRC_DIR" && swiftc -O -o Sutando "${SUT_SRC_FILES[@]##*/}" -framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation 2>/dev/null); then
     echo "  ✓ Sutando compiled"
     if pgrep -f "src/Sutando/Sutando" > /dev/null 2>&1; then
       pkill -f "src/Sutando/Sutando" 2>/dev/null || true

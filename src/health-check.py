@@ -712,7 +712,7 @@ def run_all_checks() -> list[dict]:
     sutando_bin = REPO_DIR / "src" / "Sutando" / "Sutando"
     if sutando_bin.exists():
         try:
-            result = subprocess.run(["pgrep", "-f", "Sutando/Sutando"], capture_output=True, text=True)
+            result = subprocess.run(["pgrep", "-f", "(Sutando|MacOS)/Sutando"], capture_output=True, text=True)
             pids = [p for p in result.stdout.strip().split("\n") if p]
         except:
             pids = []
