@@ -1,0 +1,198 @@
+name: release
+
+# Build, sign, notarize, and publish a Sutando.app/.dmg release.
+#
+# Triggered by:
+#   - Pushing a tag matching `v*` (e.g. v0.2.0). The tag becomes the
+#     release version.
+#   - Manual workflow_dispatch with explicit version + channel.
+#
+# Required GitHub Secrets (set in Settings → Secrets and variables →
+# Actions). Until these are configured, the workflow will fail at the
+# signing step — the build/test portions are still useful for CI even
+# without secrets.
+#
+#   APPLE_DEVELOPER_ID_CERT_P12_BASE64
+#       Developer ID Application certificate + private key exported as
+#       a .p12 from Keychain Access, then `base64 -i cert.p12`.
+#   APPLE_DEVELOPER_ID_CERT_PASSWORD
+#       Password for the .p12.
+#   APPLE_ID
+#       Apple ID email (the developer account, not a team alias).
+#   APPLE_TEAM_ID
+#       10-character team ID (developer.apple.com → Membership).
+#   APPLE_APP_SPECIFIC_PASSWORD
+#       App-specific password from appleid.apple.com.
+#   SPARKLE_PRIVATE_KEY_BASE64
+#       EdDSA private key (run `bash app/sparkle/generate-keys.sh -x file`
+#       and base64 the file). Used to sign the appcast at release time.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (e.g. 0.2.0)"
+        required: true
+      channel:
+        description: "Release channel"
+        required: true
+        default: internal
+        type: choice
+        options: [internal, beta, stable]
+
+permissions:
+  contents: write  # creating releases
+
+jobs:
+  build:
+    runs-on: macos-14  # M-series runner
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve version + channel
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            CHANNEL="${{ inputs.channel }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+            # Default tag-driven channel: internal until we ship publicly.
+            CHANNEL="internal"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "Building Sutando $VERSION on $CHANNEL channel"
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Typecheck + tests
+        run: |
+          npm run typecheck
+          npm test
+
+      - name: Bump CFBundleShortVersionString
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.meta.outputs.version }}" app/Info.plist
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${{ steps.meta.outputs.version }}" app/Info.plist
+
+      - name: Fetch Sparkle.framework
+        run: bash app/sparkle/fetch-sparkle.sh
+
+      - name: Set up signing keychain
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          if [ -z "$CERT_P12_BASE64" ]; then
+            echo "::warning::APPLE_DEVELOPER_ID_CERT_P12_BASE64 not set — falling back to ad-hoc signing. The artifact will not pass Gatekeeper."
+            echo "SIGNING_IDENTITY=-" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/sutando.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk '{print $2}')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::No Developer ID Application identity found in the imported certificate."
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Configure Sparkle private key
+        env:
+          SPARKLE_PRIVATE_KEY_BASE64: ${{ secrets.SPARKLE_PRIVATE_KEY_BASE64 }}
+        run: |
+          if [ -n "$SPARKLE_PRIVATE_KEY_BASE64" ]; then
+            mkdir -p "$RUNNER_TEMP/sparkle"
+            echo "$SPARKLE_PRIVATE_KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/sparkle/sparkle.priv"
+            chmod 600 "$RUNNER_TEMP/sparkle/sparkle.priv"
+            echo "SPARKLE_PRIVATE_KEY_FILE=$RUNNER_TEMP/sparkle/sparkle.priv" >> "$GITHUB_ENV"
+          else
+            echo "::warning::SPARKLE_PRIVATE_KEY_BASE64 not set — appcast will not be signed."
+          fi
+
+      - name: Build Sutando.app
+        env:
+          ENABLE_SPARKLE: "1"
+          SPARKLE_FRAMEWORK: ${{ github.workspace }}/app/vendor/Sparkle.framework
+        run: bash app/build-app.sh
+
+      - name: Notarize Sutando.app
+        if: env.SIGNING_IDENTITY != '-'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: bash app/notarize.sh "$GITHUB_WORKSPACE/app/build/Sutando.app"
+
+      - name: Build Sutando.dmg
+        run: bash app/build-dmg.sh
+
+      - name: Notarize Sutando.dmg
+        if: env.SIGNING_IDENTITY != '-'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: bash app/notarize.sh "$GITHUB_WORKSPACE/app/build/Sutando.dmg"
+
+      - name: Generate signed appcast
+        if: env.SPARKLE_PRIVATE_KEY_FILE != ''
+        env:
+          SPARKLE_CHANNEL: ${{ steps.meta.outputs.channel }}
+        run: bash app/sparkle/generate-appcast.sh "$GITHUB_WORKSPACE/app/build"
+
+      - name: Rename artifacts with version
+        run: |
+          cd "$GITHUB_WORKSPACE/app/build"
+          if [ -f Sutando.dmg ]; then
+            mv Sutando.dmg "Sutando-${{ steps.meta.outputs.version }}.dmg"
+          fi
+
+      - name: Upload artifacts to job
+        uses: actions/upload-artifact@v4
+        with:
+          name: sutando-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.channel }}
+          path: |
+            app/build/Sutando-*.dmg
+            app/build/appcast*.xml
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Sutando ${{ steps.meta.outputs.version }}
+          prerelease: ${{ steps.meta.outputs.channel != 'stable' }}
+          files: |
+            app/build/Sutando-*.dmg
+            app/build/appcast*.xml
+          body: |
+            **Sutando ${{ steps.meta.outputs.version }}** — ${{ steps.meta.outputs.channel }} channel
+
+            Drag `Sutando-${{ steps.meta.outputs.version }}.dmg` to `/Applications`,
+            then open Sutando from the menu bar.
+
+            See [DISTRIBUTION.md](DISTRIBUTION.md) for the full plan.

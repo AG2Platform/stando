@@ -75,3 +75,10 @@ done/
 voice-state.json
 # Phase 1 build artifact — large, regenerable
 /app/build/
+
+# Phase 2 vendored Sparkle.framework — fetched via app/sparkle/fetch-sparkle.sh
+/app/vendor/
+
+# Sparkle private key file (if exported via generate_keys -x). The keychain
+# entry is the canonical store; this is a backup that should never be committed.
+/app/sparkle/sparkle.priv

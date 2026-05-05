@@ -77,6 +77,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     weak var modeMeetingMenuItem: NSMenuItem?
     weak var modePresenterMenuItem: NSMenuItem?
 
+    /// Sparkle auto-updater. Real implementation when built with
+    /// `ENABLE_SPARKLE=1` (links Sparkle.framework); no-op stub
+    /// otherwise. See src/Sutando/SparkleUpdater.swift.
+    let sparkle = SparkleUpdater()
+
     /// Fixed tmux socket path for the sutando-core session. The shell
     /// (via startup.sh -S flag) and the app (launched by macOS with a
     /// different TMPDIR due to sandboxing) must target the same socket
@@ -244,6 +249,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let uninstallItem = NSMenuItem(title: "Uninstall Background Services", action: #selector(uninstallLaunchAgents), keyEquivalent: "")
         menu.addItem(installItem)
         menu.addItem(uninstallItem)
+        menu.addItem(NSMenuItem.separator())
+        // Sparkle auto-update.
+        menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
@@ -1507,6 +1515,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    @objc func checkForUpdates() {
+        sparkle.checkForUpdates()
     }
 
     @objc func uninstallLaunchAgents() {

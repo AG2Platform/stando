@@ -5,21 +5,26 @@
 #   bash app/build-app.sh                       # build to app/build/Sutando.app
 #   bash app/build-app.sh /path/to/output       # build to a specific dir
 #
-# This builds a structurally complete .app: Info.plist, entitlements, the
-# Swift launcher binary, LaunchAgent templates, and (when the source tree is
-# present) a copy of the runtime repo. It does NOT yet bundle Node, Python,
-# fswatch, or ffmpeg — that's Phase 1.5. It does NOT yet sign or notarize —
-# that's Phase 2.
-#
-# For Phase 0 / 1.1, the goal is "the .app launches, hits the menu bar, and
-# the launcher's bundle-aware path resolution works". Bundled runtimes,
-# first-launch wizard, and signing land in subsequent steps.
+# Environment variables:
+#   SIGNING_IDENTITY   "-" for ad-hoc (default), or a Developer ID Application
+#                      identity name like "Developer ID Application: Sutando
+#                      Inc. (ABCDE12345)". Set to a Developer ID for releases
+#                      that need to pass Gatekeeper without right-click → Open.
+#   SPARKLE_FRAMEWORK  Path to a vendored Sparkle.framework directory. When
+#                      present, gets copied into Contents/Frameworks/ and the
+#                      launcher links against it. See app/sparkle/fetch-sparkle.sh.
+#   ENABLE_SPARKLE     "1" to compile against Sparkle (requires SPARKLE_FRAMEWORK
+#                      to point at a valid framework). Default off so the dev
+#                      build doesn't need the framework on disk.
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${1:-$REPO/app/build}"
 APP="$OUT_DIR/Sutando.app"
+SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
+ENABLE_SPARKLE="${ENABLE_SPARKLE:-0}"
+SPARKLE_FRAMEWORK="${SPARKLE_FRAMEWORK:-$REPO/app/vendor/Sparkle.framework}"
 
 echo "Building Sutando.app → $APP"
 
@@ -30,16 +35,37 @@ mkdir -p "$APP/Contents/Resources/repo"
 
 # 1. Compile the Swift launcher into Contents/MacOS/Sutando.
 # Sources are listed explicitly so we can split the launcher across files
-# without relying on a Swift Package or Xcode project (Phase 1.x).
+# without relying on a Swift Package or Xcode project.
 echo "  Compiling launcher..."
-swiftc -O \
-    -o "$APP/Contents/MacOS/Sutando" \
-    "$REPO/src/Sutando/main.swift" \
-    "$REPO/src/Sutando/LaunchAgentInstaller.swift" \
-    -framework Cocoa \
-    -framework Carbon \
-    -framework ApplicationServices \
-    -framework AVFoundation
+# SparkleUpdater.swift is always compiled — it ships both the real
+# Sparkle-backed implementation (gated by `#if ENABLE_SPARKLE`) AND a
+# no-op stub used by the dev build. main.swift references the type
+# unconditionally, so the file must be in SWIFT_SOURCES regardless of
+# ENABLE_SPARKLE.
+SWIFT_SOURCES=(
+    "$REPO/src/Sutando/main.swift"
+    "$REPO/src/Sutando/LaunchAgentInstaller.swift"
+    "$REPO/src/Sutando/SparkleUpdater.swift"
+)
+SWIFT_FRAMEWORKS=(-framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation)
+SWIFT_FLAGS=(-O -o "$APP/Contents/MacOS/Sutando")
+
+# Optional Sparkle linking. When ENABLE_SPARKLE=1 the launcher links
+# against the framework and the Sparkle import inside SparkleUpdater.swift
+# is enabled. The default (off) keeps the dev build self-contained.
+if [ "$ENABLE_SPARKLE" = "1" ]; then
+    if [ ! -d "$SPARKLE_FRAMEWORK" ]; then
+        echo "  ✗ ENABLE_SPARKLE=1 but Sparkle.framework not at $SPARKLE_FRAMEWORK"
+        echo "    Run: bash app/sparkle/fetch-sparkle.sh"
+        exit 1
+    fi
+    SPARKLE_DIR="$(dirname "$SPARKLE_FRAMEWORK")"
+    SWIFT_FLAGS+=(-F "$SPARKLE_DIR" -Xlinker -rpath -Xlinker "@executable_path/../Frameworks")
+    SWIFT_FRAMEWORKS+=(-framework Sparkle)
+    SWIFT_FLAGS+=(-DENABLE_SPARKLE)
+fi
+
+swiftc "${SWIFT_FLAGS[@]}" "${SWIFT_SOURCES[@]}" "${SWIFT_FRAMEWORKS[@]}"
 
 # 2. Copy Info.plist + entitlements into the bundle
 echo "  Copying Info.plist..."
@@ -87,21 +113,55 @@ else
     echo "  ⚠ node_modules not found — first launch will need 'npm install'"
 fi
 
-# 6. Ad-hoc sign so Gatekeeper at least lets users open it after the
-# right-click → Open dance. Real Developer ID signing + notarization is
-# Phase 2. The "-" identity is the ad-hoc identity.
-echo "  Ad-hoc signing..."
-codesign --force --sign - \
+# 6. Optional: copy Sparkle.framework into Contents/Frameworks/. Must
+# happen before signing so the framework can be signed as part of the
+# bundle.
+if [ "$ENABLE_SPARKLE" = "1" ]; then
+    echo "  Copying Sparkle.framework..."
+    mkdir -p "$APP/Contents/Frameworks"
+    rsync -a --delete "$SPARKLE_FRAMEWORK/" "$APP/Contents/Frameworks/Sparkle.framework/"
+fi
+
+# 7. Sign. Identity "-" = ad-hoc (Phase 1 default; Gatekeeper requires
+# right-click → Open). Identity "Developer ID Application: …" produces a
+# distributable signature. Sign nested bundles (Sparkle.framework with its
+# helper tools — Autoupdate, Updater.app, etc.) before the outer bundle.
+echo "  Signing ($SIGNING_IDENTITY)..."
+
+# Nested signing — Sparkle ships an XPC service + helper apps that need
+# to be signed individually with the same identity.
+if [ "$ENABLE_SPARKLE" = "1" ] && [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
+    # Sign Sparkle's bundled helpers from the inside out. Sparkle's
+    # framework already ships pre-signed by the Sparkle Project — re-signing
+    # with --deep would invalidate inner signatures, so target each piece.
+    SPARKLE_HELPERS=(
+        "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Updater.app"
+        "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
+        "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
+        "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
+    )
+    for helper in "${SPARKLE_HELPERS[@]}"; do
+        [ -e "$helper" ] || continue
+        codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp=none "$helper" 2>/dev/null || true
+    done
+    codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp=none \
+        "$APP/Contents/Frameworks/Sparkle.framework" 2>/dev/null || true
+fi
+
+codesign --force --sign "$SIGNING_IDENTITY" \
     --entitlements "$REPO/app/Sutando.entitlements" \
     --options runtime \
-    --deep \
     "$APP" 2>&1 | grep -v "replacing existing signature" || true
 
-# 7. Verify
+# 8. Verify.
 echo "  Verifying..."
-codesign --verify --verbose=2 "$APP" 2>&1 | tail -3 || echo "  (verification warning — expected for ad-hoc, will be clean under Developer ID)"
+codesign --verify --verbose=2 "$APP" 2>&1 | tail -3 || \
+    echo "  (verification warning — expected for ad-hoc, will be clean under Developer ID)"
 
 ls -la "$APP/Contents/"
 echo ""
 echo "Built: $APP"
 echo "Run with: open $APP"
+if [ "$SIGNING_IDENTITY" != "-" ]; then
+    echo "To notarize: bash app/notarize.sh \"$APP\""
+fi

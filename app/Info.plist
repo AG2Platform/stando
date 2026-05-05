@@ -58,6 +58,23 @@
     <key>NSDownloadsFolderUsageDescription</key>
     <string>Sutando reads files from Downloads when you drop them as context.</string>
 
+    <!-- Sparkle auto-update keys. SUFeedURL is read by SparkleUpdater
+         dynamically per channel; this static value is the fallback when
+         the user hasn't selected a channel via SUSelectedChannel. The
+         SUPublicEDKey value below is a placeholder — replace with the
+         actual public EdDSA key from `bash app/sparkle/generate-keys.sh`
+         before producing a release build. -->
+    <key>SUFeedURL</key>
+    <string>https://updates.sutando.ai/internal/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>REPLACE_WITH_PUBLIC_ED_KEY</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>3600</integer>
+    <key>SUEnableInstallerLauncherService</key>
+    <true/>
+
     <!-- Custom URL scheme for cloud-account login callback. -->
     <key>CFBundleURLTypes</key>
     <array>
