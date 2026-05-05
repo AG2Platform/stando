@@ -23,6 +23,7 @@
 import Cartesia from '@cartesia/cartesia-js';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { recordEvent as cloudRecordEvent } from './cloud-client.js';
 
 const getCartesiaApiKey = () => process.env.CARTESIA_API_KEY || '';
 const getCartesiaVoiceId = () => process.env.CARTESIA_VOICE_ID || 'f786b574-daa5-4673-aa0c-cbe3e8534c02';
@@ -96,6 +97,17 @@ export async function generateSpeech(
 		const pcm = Buffer.concat(chunks);
 		const header = createWavHeader(pcm.length, SAMPLE_RATE, CHANNELS, BIT_DEPTH);
 		writeFileSync(outPath, Buffer.concat([header, pcm]));
+
+		// Cloud telemetry: emit one tts.cartesia event per generation. Audio
+		// duration = pcm.length / (sample_rate * channels * bytes_per_sample).
+		const durationSec = pcm.length / (SAMPLE_RATE * CHANNELS * (BIT_DEPTH / 8));
+		if (durationSec > 0.05) {
+			cloudRecordEvent({
+				kind: 'tts.cartesia',
+				units: durationSec,
+				metadata: { model: 'sonic-3', category, label },
+			});
+		}
 		return outPath;
 	} finally {
 		ws.close();

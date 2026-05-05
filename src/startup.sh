@@ -189,7 +189,7 @@ fi
 # 5b. Sutando context drop app (global hotkey ⌃C)
 SUT_SRC_DIR="$REPO/src/Sutando"
 SUT_BIN="$SUT_SRC_DIR/Sutando"
-SUT_SRC_FILES=("$SUT_SRC_DIR/main.swift" "$SUT_SRC_DIR/LaunchAgentInstaller.swift" "$SUT_SRC_DIR/SparkleUpdater.swift")
+SUT_SRC_FILES=("$SUT_SRC_DIR/main.swift" "$SUT_SRC_DIR/LaunchAgentInstaller.swift" "$SUT_SRC_DIR/SparkleUpdater.swift" "$SUT_SRC_DIR/CloudAuth.swift")
 
 # Rebuild if any source file is newer than binary, or binary is missing.
 sut_needs_build=0

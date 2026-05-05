@@ -126,8 +126,72 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             setupMenuBar()
             registerHotKey()
             watchResults()
+            registerURLSchemeHandler()
+            startCloudHeartbeat()
             logToFile("App started, workspace=\(workspace)")
         }
+    }
+
+    // MARK: - Cloud auth: sutando:// URL scheme + heartbeat
+
+    /// Register the `sutando://` URL handler. macOS routes `sutando://auth?…`
+    /// callbacks from the cli-login flow here; CloudAuth.handle(url:) does
+    /// the validation + token persistence.
+    func registerURLSchemeHandler() {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleAppleEventURL(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
+    }
+
+    @objc func handleAppleEventURL(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let urlString = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
+              let url = URL(string: urlString) else { return }
+        let handled = CloudAuth.shared.handle(url: url)
+        if handled {
+            logToFile("CloudAuth: handled \(url.scheme ?? "?")://\(url.host ?? "?")\(url.path)")
+            DispatchQueue.main.async { [self] in
+                updateCloudMenuItems()
+                if CloudAuth.shared.isSignedIn {
+                    notify("Sutando", "Signed in to cloud account.")
+                }
+            }
+        }
+    }
+
+    /// Heartbeat to /api/devices on launch, then every 5 minutes thereafter.
+    /// No-op when signed out.
+    func startCloudHeartbeat() {
+        DispatchQueue.global(qos: .utility).async {
+            CloudAuth.shared.heartbeat()
+        }
+        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
+            DispatchQueue.global(qos: .utility).async {
+                CloudAuth.shared.heartbeat()
+            }
+        }
+    }
+
+    weak var signInMenuItem: NSMenuItem?
+    weak var signOutMenuItem: NSMenuItem?
+
+    func updateCloudMenuItems() {
+        let signedIn = CloudAuth.shared.isSignedIn
+        signInMenuItem?.isHidden = signedIn
+        signOutMenuItem?.isHidden = !signedIn
+    }
+
+    @objc func cloudSignIn() {
+        let challenge = CloudAuth.shared.startSignIn()
+        logToFile("CloudAuth: started sign-in flow, challenge=\(challenge.prefix(8))…")
+    }
+
+    @objc func cloudSignOut() {
+        CloudAuth.shared.signOut()
+        updateCloudMenuItems()
+        notify("Sutando", "Signed out of cloud account.")
     }
 
     // MARK: - Result notifications (when voice is not connected)
@@ -243,6 +307,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Restart All Services", action: #selector(restartServices), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Stop All Services", action: #selector(stopServices), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Restart Sutando App", action: #selector(restartSelf), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
+        // Cloud account.
+        let signInItem = NSMenuItem(title: "Sign in to Sutando…", action: #selector(cloudSignIn), keyEquivalent: "")
+        let signOutItem = NSMenuItem(title: "Sign out of Sutando", action: #selector(cloudSignOut), keyEquivalent: "")
+        menu.addItem(signInItem)
+        menu.addItem(signOutItem)
+        signInMenuItem = signInItem
+        signOutMenuItem = signOutItem
+        // Hide whichever item doesn't match the current state.
+        DispatchQueue.main.async { [self] in updateCloudMenuItems() }
         menu.addItem(NSMenuItem.separator())
         // LaunchAgent install/uninstall (only meaningful from the .app bundle).
         let installItem = NSMenuItem(title: "Install Background Services…", action: #selector(installLaunchAgents), keyEquivalent: "")

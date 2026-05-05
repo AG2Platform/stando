@@ -38,6 +38,7 @@ import { buildSutandoSystemPrompt, buildVoiceAgentContext } from './voice-contex
 import { classifyTransportClose, type ClassifiedClose } from './voice-error-classifier.js';
 
 import { personalPath, sharedPersonalPath, statePath, stateDir } from './util_paths.js';
+import { recordEvent as cloudRecordEvent } from './cloud-client.js';
 
 // Cartesia is loaded dynamically at the bottom of the config section so
 // the `@cartesia/cartesia-js` package is only required when the user has
@@ -780,12 +781,13 @@ async function main() {
 	function writeVoiceMetrics() {
 		if (metricsWritten) return;
 		metricsWritten = true;
+		const durationMs = Date.now() - voiceSessionStart;
 		try {
 			const metrics = {
 				timestamp: new Date().toISOString(),
 				sessionId: SESSION_ID,
 				source: 'voice',
-				durationMs: Date.now() - voiceSessionStart,
+				durationMs,
 				transcriptLines: voiceTranscript.length,
 				toolCalls: voiceToolCalls,
 				toolCount: voiceToolCalls.length,
@@ -795,6 +797,21 @@ async function main() {
 			console.log(`${ts()} [Observability] Wrote voice metrics: ${voiceToolCalls.length} tools, ${voiceEvents.length} events, ${voiceTranscript.length} transcript lines`);
 		} catch (err) {
 			console.log(`${ts()} [Observability] Failed to write metrics: ${err}`);
+		}
+		// Cloud telemetry (Phase 4): emit one voice.gemini event per session
+		// with the elapsed duration. No-op when the user isn't signed in.
+		// Skip zero-length sessions — these are spurious disconnects.
+		const durationSeconds = durationMs / 1000;
+		if (durationSeconds >= 1) {
+			cloudRecordEvent({
+				kind: 'voice.gemini',
+				units: durationSeconds,
+				metadata: {
+					sessionId: SESSION_ID,
+					model: VOICE_NATIVE_AUDIO_MODEL,
+					toolCalls: voiceToolCalls.length,
+				},
+			});
 		}
 	}
 

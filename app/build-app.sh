@@ -46,6 +46,7 @@ SWIFT_SOURCES=(
     "$REPO/src/Sutando/main.swift"
     "$REPO/src/Sutando/LaunchAgentInstaller.swift"
     "$REPO/src/Sutando/SparkleUpdater.swift"
+    "$REPO/src/Sutando/CloudAuth.swift"
 )
 SWIFT_FRAMEWORKS=(-framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation)
 SWIFT_FLAGS=(-O -o "$APP/Contents/MacOS/Sutando")
