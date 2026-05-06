@@ -42,8 +42,8 @@
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
 
-    <!-- Allow exec of bundled binaries (node, python3, fswatch, ffmpeg)
-         and of `claude` from /usr/local/bin or ~/.local/bin. -->
+    <!-- Allow exec of bundled binaries (node, tmux, system python3) and
+         of `claude` from /usr/local/bin or ~/.local/bin. -->
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
 </dict>

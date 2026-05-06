@@ -32,29 +32,36 @@ The build script:
 
 ## Prerequisites on the target Mac
 
-For the internal release (Phase 1) the .app does **not** bundle the
-runtime — it relies on the user already having these installed via
-Homebrew or equivalent:
+For internal + public release the .app bundles its runtime. The only
+thing the user has to install separately is Claude Code itself (the
+`claude` CLI), since Anthropic's terms don't allow redistributing it.
 
-- **Node.js 22+** (`brew install node`)
-- **Python 3.10+** (system `/usr/bin/python3` on macOS 15 works, or
-  `brew install python@3.11`)
-- **fswatch** (`brew install fswatch`)
 - **claude** (Claude Code CLI — install per
-  https://docs.anthropic.com/en/docs/claude-code/getting-started)
-- **ffmpeg** (optional, for screen-record / video skills:
-  `brew install ffmpeg`)
+  https://docs.anthropic.com/en/docs/claude-code/getting-started, then
+  run `claude auth login` once)
+
+Bundled inside `Sutando.app/Contents/Resources/runtime/`:
+
+- **node** (static Node 22 from the official macOS tarball)
+- **tmux** (Homebrew tmux + libevent/libncurses dylibs, rpaths
+  rewritten to `@executable_path/../lib`)
+
+Bundled inside `Sutando.app/Contents/Resources/repo/node_modules/`:
+
+- **tsx**, **chokidar**, etc. — every npm dep the services need.
+
+System-provided (always available on macOS 15+):
+
+- **python3** (`/usr/bin/python3`)
 
 `LaunchAgentInstaller.placeholders()` (in
-`src/Sutando/LaunchAgentInstaller.swift`) falls back to common system
-paths (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`) when the
-bundled runtime is absent, so the .app works as soon as the user has
-those tools on their PATH.
+`src/Sutando/LaunchAgentInstaller.swift`) prefers the bundled runtime
+and falls back to `/opt/homebrew/bin` / `/usr/local/bin` for the dev
+workflow (where the .app is built straight from the repo and the
+bundled runtime hasn't been staged).
 
-Phase 1.5-full (post-internal release) replaces the Homebrew dependency
-with statically-linked Node from the official tarball + a bundled
-fswatch — at which point the .app becomes single-step-installable on a
-fresh Mac.
+Optional Homebrew installs (only matter if you use the matching skill):
+ffmpeg for screen-record + video skills.
 
 ## Running
 

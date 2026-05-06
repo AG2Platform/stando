@@ -35,12 +35,6 @@ else
   fail "Claude Code CLI not found (npm install -g @anthropic-ai/claude-code)"
 fi
 
-if command -v fswatch &>/dev/null; then
-  pass "fswatch"
-else
-  fail "fswatch not found (brew install fswatch)"
-fi
-
 if command -v python3 &>/dev/null; then
   pass "Python3 $(python3 --version 2>&1 | sed 's/Python //')"
 else

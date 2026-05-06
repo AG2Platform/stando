@@ -105,7 +105,6 @@ Voice agent and conversation server handle conversation-scope actions with **inl
 - macOS 15+
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code/getting-started) (run `claude` once to complete login)
 - Node.js 22+ (`brew install node`)
-- fswatch (`brew install fswatch`)
 - [Gemini API key](https://ai.google.dev) (click "Get API key")
 - *(optional, for phone calls)* [Twilio account](https://www.twilio.com/) + [ngrok](https://ngrok.com/) — Sutando can answer inbound calls and make outbound calls; you can run the browser + Telegram + Discord paths without them.
 - *(optional, for video/audio)* ffmpeg (`brew install ffmpeg`) — used by subtitle-burn, video-concat, and recording handoff.

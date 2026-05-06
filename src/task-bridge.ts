@@ -2,8 +2,9 @@
  * Voice → Claude Code session bridge.
  *
  * work writes task file directly (inline, no subagent).
- * The main Claude Code session picks it up via fswatch, executes with
- * full permissions, and writes result file.
+ * The main Claude Code session picks it up via watch-tasks-stream.mjs
+ * (fs.watch on the tasks/ dir), executes with full permissions, and
+ * writes result file.
  * The voice agent's node process watches for result file and
  * injects the result into the Gemini conversation.
  */

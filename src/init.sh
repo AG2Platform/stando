@@ -160,7 +160,7 @@ preflight() {
   fi
 
   # CLI tools
-  for tool in node npx python3 fswatch claude gh; do
+  for tool in node npx python3 claude gh; do
     if ! command -v "$tool" > /dev/null 2>&1; then
       cli_missing+=("$tool")
     fi

@@ -87,6 +87,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// in-flight edits.
     var settingsWindow: SettingsWindowController?
 
+    /// In-app WKWebView windows hosting the voice client (localhost:8080)
+    /// and the dashboard (localhost:7844). Replaces the old AppleScript
+    /// path that opened these in Chrome — see WebWindow.swift for why.
+    var voiceWindow: WebWindowController?
+    var dashboardWindow: WebWindowController?
+
     /// Fixed tmux socket path for the sutando-core session. The shell
     /// (via startup.sh -S flag) and the app (launched by macOS with a
     /// different TMPDIR due to sandboxing) must target the same socket
@@ -1362,9 +1368,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let task = URLSession.shared.dataTask(with: url) { data, response, error in
             if let error = error {
                 NSLog("Sutando: \(endpoint) failed: \(error.localizedDescription)")
-                // Fallback: open the web UI so user can toggle manually
+                // Fallback: open the in-app voice window so the user can
+                // toggle manually + see why the service isn't responding.
                 DispatchQueue.main.async {
-                    self.notify("Sutando", "Web client not reachable — open localhost:8080")
+                    self.notify("Sutando", "Voice service not reachable — opening voice window")
+                    self.openWebUI()
                 }
                 return
             }
@@ -1378,41 +1386,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openWebUI() {
         NSLog("Sutando: openWebUI called")
-        // Switch to existing localhost:8080 tab or open new one
-        let script = NSAppleScript(source: """
-        tell application "Google Chrome"
-            activate
-            set found to false
-            repeat with w in windows
-                set tabList to tabs of w
-                repeat with i from 1 to count of tabList
-                    if URL of item i of tabList contains "localhost:8080" then
-                        set active tab index of w to i
-                        set index of w to 1
-                        set found to true
-                        exit repeat
-                    end if
-                end repeat
-                if found then exit repeat
-            end repeat
-            if not found then
-                open location "http://localhost:8080"
-            end if
-        end tell
-        """)
-        var error: NSDictionary?
-        script?.executeAndReturnError(&error)
-        if let error = error {
-            let msg = error[NSAppleScript.errorMessage] as? String ?? "unknown error"
-            if msg.contains("not allowed") || msg.contains("permission") {
-                notify("Sutando", "Open Web UI needs: System Settings → Privacy & Security → Automation → allow Sutando to control Chrome")
-            } else {
-                // Fallback: just open the URL directly
-                if let url = URL(string: "http://localhost:8080") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
+        if voiceWindow == nil {
+            let url = URL(string: "http://localhost:8080")!
+            voiceWindow = WebWindowController(
+                title: "Sutando — Voice",
+                url: url,
+                allowMedia: true,
+                autosaveName: "SutandoVoiceWindow",
+                contentSize: NSSize(width: 1100, height: 720)
+            )
         }
+        voiceWindow?.showAndFocus()
     }
 
     @objc func openCore() {
@@ -1433,28 +1417,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openDashboard() {
-        let script = NSAppleScript(source: """
-        tell application "Google Chrome"
-            activate
-            set found to false
-            repeat with w in windows
-                set tabList to tabs of w
-                repeat with i from 1 to count of tabList
-                    if URL of item i of tabList contains "localhost:7844" then
-                        set active tab index of w to i
-                        set index of w to 1
-                        set found to true
-                        exit repeat
-                    end if
-                end repeat
-                if found then exit repeat
-            end repeat
-            if not found then
-                open location "http://localhost:7844"
-            end if
-        end tell
-        """)
-        script?.executeAndReturnError(nil)
+        NSLog("Sutando: openDashboard called")
+        if dashboardWindow == nil {
+            let url = URL(string: "http://localhost:7844")!
+            dashboardWindow = WebWindowController(
+                title: "Sutando — Dashboard",
+                url: url,
+                allowMedia: false,
+                autosaveName: "SutandoDashboardWindow",
+                contentSize: NSSize(width: 1100, height: 720)
+            )
+        }
+        dashboardWindow?.showAndFocus()
     }
 
     // MARK: - Helpers

@@ -128,6 +128,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var advancedDisclosure: NSButton?
     private var advancedContainer: NSView?
     private var statusBanner: NSTextField?
+    private var claudeStatusLabel: NSTextField?
+    private var claudeActionButton: NSButton?
+    private var claudeSpinner: NSProgressIndicator?
+    private var stepperContainer: NSStackView?
+    private var stepperDots: [NSTextField] = []
+    private var stepperLabels: [NSTextField] = []
 
     private weak var appDelegate: AppDelegate?
 
@@ -192,6 +198,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         statusBanner = banner
         stack.addArrangedSubview(banner)
 
+        // First-launch stepper. Visible until the user has saved at least
+        // once (which writes $SUTANDO_HOME/.firstrun-complete). Shows
+        // progress through the 4 setup steps so a non-technical user knows
+        // what to do and what's already done.
+        let stepper = buildStepperView()
+        stepperContainer = stepper
+        stepper.isHidden = FileManager.default.fileExists(atPath: firstRunCompleteMarker())
+        stack.addArrangedSubview(stepper)
+
         // Cloud account section
         stack.addArrangedSubview(sectionHeader("Sutando Cloud"))
         stack.addArrangedSubview(cloudAccountRow())
@@ -223,6 +238,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         advancedStack.isHidden = true
         advancedContainer = advancedStack
         stack.addArrangedSubview(advancedStack)
+
+        // Claude Code (prereq for the core-agent service)
+        stack.addArrangedSubview(sectionHeader("Claude Code"))
+        stack.addArrangedSubview(claudeCodeRow())
 
         // Permissions
         stack.addArrangedSubview(sectionHeader("System permissions"))
@@ -392,6 +411,221 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         return row
     }
 
+    // MARK: - First-launch stepper
+
+    private static let stepNames = ["API key", "Claude Code", "Permissions", "Background services"]
+
+    private func buildStepperView() -> NSStackView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        for (i, name) in Self.stepNames.enumerated() {
+            let dot = NSTextField(labelWithString: "○")
+            dot.font = .systemFont(ofSize: 13, weight: .bold)
+            stepperDots.append(dot)
+            row.addArrangedSubview(dot)
+
+            let label = NSTextField(labelWithString: "\(i + 1). \(name)")
+            label.font = .systemFont(ofSize: 12, weight: .medium)
+            label.textColor = .secondaryLabelColor
+            stepperLabels.append(label)
+            row.addArrangedSubview(label)
+
+            if i < Self.stepNames.count - 1 {
+                let sep = NSTextField(labelWithString: "›")
+                sep.font = .systemFont(ofSize: 13)
+                sep.textColor = .tertiaryLabelColor
+                row.addArrangedSubview(sep)
+            }
+        }
+        refreshStepperUI()
+        return row
+    }
+
+    /// Step state. Index matches `stepNames`.
+    private func stepperStatus() -> [Bool] {
+        // 1. API key — Gemini set in env (in-memory edit OR on-disk).
+        let inFlightKey = fieldEditors[.GEMINI_API_KEY]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let onDiskKey = EnvFile.at(envFilePath()).value(for: SettingsField.GEMINI_API_KEY.rawValue) ?? ""
+        let apiKeyDone = !inFlightKey.isEmpty || !onDiskKey.isEmpty
+
+        // 2. Claude Code — installed (we can't detect signed-in without
+        //    running it, so this only checks for the binary).
+        let claudeDone = claudeCodePath() != nil
+
+        // 3. Permissions — all required ones granted.
+        let permissionsDone = SystemPermission.allCases.allSatisfy { $0.status() == .granted }
+
+        // 4. Background services — at least 5 of the 7 expected agents loaded.
+        let loaded = LaunchAgentInstaller().loadedLabels().count
+        let servicesDone = loaded >= 5
+
+        return [apiKeyDone, claudeDone, permissionsDone, servicesDone]
+    }
+
+    private func refreshStepperUI() {
+        guard !stepperDots.isEmpty else { return }
+        let states = stepperStatus()
+        for (i, done) in states.enumerated() {
+            let dot = stepperDots[i]
+            let label = stepperLabels[i]
+            dot.stringValue = done ? "✓" : "○"
+            dot.textColor = done ? .systemGreen : .tertiaryLabelColor
+            label.textColor = done ? .labelColor : .secondaryLabelColor
+        }
+    }
+
+    private func claudeCodeRow() -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+
+        let status = NSTextField(labelWithString: "Checking…")
+        status.font = .systemFont(ofSize: 12)
+        status.lineBreakMode = .byWordWrapping
+        status.maximumNumberOfLines = 2
+        status.cell?.wraps = true
+        claudeStatusLabel = status
+        row.addArrangedSubview(status)
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        row.addArrangedSubview(spacer)
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        spinner.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        claudeSpinner = spinner
+        row.addArrangedSubview(spinner)
+
+        let button = NSButton(title: "…", target: self, action: #selector(claudeCodeAction))
+        button.bezelStyle = .rounded
+        claudeActionButton = button
+        row.addArrangedSubview(button)
+
+        refreshClaudeCodeUI()
+        return row
+    }
+
+    /// Resolve `claude` on PATH or in well-known install locations.
+    /// Settings inherits a sparse PATH from launchd, so we also look in
+    /// the standard places where `claude.ai/install.sh` and Homebrew
+    /// drop the binary.
+    private func claudeCodePath() -> String? {
+        var dirs = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":").map(String.init)
+        dirs.append(contentsOf: [
+            NSHomeDirectory() + "/.local/bin",
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            NSHomeDirectory() + "/.npm-global/bin",
+        ])
+        for dir in dirs where !dir.isEmpty {
+            let path = dir + "/claude"
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
+    }
+
+    private func refreshClaudeCodeUI() {
+        if let path = claudeCodePath() {
+            let homeRel = path.hasPrefix(NSHomeDirectory())
+                ? "~" + path.dropFirst(NSHomeDirectory().count)
+                : path
+            claudeStatusLabel?.stringValue =
+                "Installed at \(homeRel). If you haven't authenticated, click Sign in."
+            claudeStatusLabel?.textColor = .labelColor
+            claudeActionButton?.title = "Sign in…"
+        } else {
+            claudeStatusLabel?.stringValue =
+                "Not installed. Required for the core agent (proactive loop, voice tasks)."
+            claudeStatusLabel?.textColor = .secondaryLabelColor
+            claudeActionButton?.title = "Install"
+        }
+    }
+
+    @objc private func claudeCodeAction() {
+        if claudeCodePath() != nil {
+            // Installed → open Terminal so the user can run `claude auth login`
+            // interactively. We can't drive the auth flow from inside the app
+            // because Anthropic's flow opens a browser + reads stdin.
+            openTerminalRunning("claude auth login")
+        } else {
+            runClaudeCodeInstaller()
+        }
+    }
+
+    /// Open Terminal.app with a one-shot command. Falls back to a
+    /// notification if Terminal automation is denied.
+    private func openTerminalRunning(_ command: String) {
+        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\")
+                             .replacingOccurrences(of: "\"", with: "\\\"")
+        let source = """
+        tell application "Terminal"
+            activate
+            do script "\(escaped)"
+        end tell
+        """
+        var err: NSDictionary?
+        NSAppleScript(source: source)?.executeAndReturnError(&err)
+        if err != nil {
+            showBanner("Open Terminal and run: \(command)", color: .systemOrange)
+        }
+    }
+
+    /// Run `curl -fsSL https://claude.ai/install.sh | bash` via NSTask.
+    /// The official installer lands the binary at ~/.local/bin/claude (no
+    /// sudo needed) and updates the user's shell rc.
+    private func runClaudeCodeInstaller() {
+        claudeActionButton?.isEnabled = false
+        claudeSpinner?.startAnimation(nil)
+        claudeStatusLabel?.stringValue = "Installing Claude Code…"
+        claudeStatusLabel?.textColor = .secondaryLabelColor
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            // -l so the installer's PATH lookups (curl, install -d, etc.)
+            // pick up Homebrew + system paths cleanly; -c for the inline
+            // pipeline.
+            proc.arguments = ["-lc", "curl -fsSL https://claude.ai/install.sh | bash"]
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            var output = ""
+            var success = false
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                output = String(data: data, encoding: .utf8) ?? ""
+                success = proc.terminationStatus == 0
+            } catch {
+                output = error.localizedDescription
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.claudeSpinner?.stopAnimation(nil)
+                self.claudeActionButton?.isEnabled = true
+                self.refreshClaudeCodeUI()
+                if success && self.claudeCodePath() != nil {
+                    self.showBanner("Installed Claude Code. Click Sign in to authenticate.", color: .systemGreen)
+                } else {
+                    let snippet = output.split(separator: "\n").suffix(3).joined(separator: " · ")
+                    self.showBanner("Install failed: \(snippet.prefix(220))", color: .systemRed)
+                }
+            }
+        }
+    }
+
     private func servicesRow() -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
@@ -428,6 +662,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             try env.write(to: envFilePath())
             // Mark first-launch complete so we don't auto-open next time.
             FileManager.default.createFile(atPath: firstRunCompleteMarker(), contents: Data())
+            // Hide the first-launch stepper now that the user has saved
+            // (the marker file is the source of truth for "are we still
+            // onboarding").
+            stepperContainer?.isHidden = true
             showBanner("Saved. Background services will pick up the new settings on next restart.", color: .systemGreen)
         } catch {
             showBanner("Failed to save: \(error.localizedDescription)", color: .systemRed)
@@ -515,8 +753,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private func startStatusPolling() {
         updatePermissionUI()
         updateCloudUI()
-        // Refresh permission + cloud status while the window is open so
-        // returning from System Settings reflects the new state.
+        refreshClaudeCodeUI()
+        refreshStepperUI()
+        // Refresh permission + cloud + Claude Code + stepper status while
+        // the window is open so returning from System Settings, a Terminal
+        // install, or a Background Services Install reflects the new state.
         Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
             guard let self = self, let window = self.window, window.isVisible else {
                 timer.invalidate()
@@ -524,6 +765,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             }
             self.updatePermissionUI()
             self.updateCloudUI()
+            self.refreshClaudeCodeUI()
+            self.refreshStepperUI()
         }
     }
 

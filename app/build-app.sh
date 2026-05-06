@@ -28,10 +28,20 @@ SPARKLE_FRAMEWORK="${SPARKLE_FRAMEWORK:-$REPO/app/vendor/Sparkle.framework}"
 
 echo "Building Sutando.app → $APP"
 
+# 0. Make sure the bundled runtime exists. bundle-runtime.sh stages
+#    node + tmux + terminfo into app/vendor/runtime/. Skipped if already
+#    present and SKIP_BUNDLE_RUNTIME=1 (set by CI when it's already done
+#    a clean fetch). Without this, the .app would have no node and rely
+#    on Homebrew on the target Mac — the whole point of bundling.
+if [ "${SKIP_BUNDLE_RUNTIME:-0}" != "1" ] || [ ! -f "$REPO/app/vendor/runtime/bin/node" ]; then
+    bash "$REPO/app/bundle-runtime.sh"
+fi
+
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 mkdir -p "$APP/Contents/Resources/LaunchAgents"
 mkdir -p "$APP/Contents/Resources/repo"
+mkdir -p "$APP/Contents/Resources/runtime"
 
 # 1. Compile the Swift launcher into Contents/MacOS/Sutando.
 # Sources are listed explicitly so we can split the launcher across files
@@ -50,8 +60,9 @@ SWIFT_SOURCES=(
     "$REPO/src/Sutando/EnvFile.swift"
     "$REPO/src/Sutando/Permissions.swift"
     "$REPO/src/Sutando/SettingsWindow.swift"
+    "$REPO/src/Sutando/WebWindow.swift"
 )
-SWIFT_FRAMEWORKS=(-framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation)
+SWIFT_FRAMEWORKS=(-framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation -framework WebKit)
 SWIFT_FLAGS=(-O -o "$APP/Contents/MacOS/Sutando")
 
 # Optional Sparkle linking. When ENABLE_SPARKLE=1 the launcher links
@@ -116,6 +127,13 @@ if [ -d "$REPO/node_modules" ]; then
 else
     echo "  ⚠ node_modules not found — first launch will need 'npm install'"
 fi
+
+# 5b. Stage the bundled runtime (node + tmux + terminfo) into the .app.
+# LaunchAgentInstaller.placeholders() resolves {{NODE_BIN}} etc. to
+# Bundle.main.resourcePath/runtime/bin/* when this directory exists.
+echo "  Staging runtime ($(du -sh "$REPO/app/vendor/runtime" | cut -f1))..."
+rsync -a --delete \
+    "$REPO/app/vendor/runtime/" "$APP/Contents/Resources/runtime/"
 
 # 6. Optional: copy Sparkle.framework into Contents/Frameworks/. Must
 # happen before signing so the framework can be signed as part of the

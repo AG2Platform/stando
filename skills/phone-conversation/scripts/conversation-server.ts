@@ -20,7 +20,7 @@
  *
  *   Caller speaks → Gemini invokes 'work' tool → delegateTask()
  *     → writes tasks/task-phone-{ts}.txt (resolves immediately)
- *     → Claude (fswatch) reads task, decides action, writes results/task-phone-{ts}.txt
+ *     → Claude (watch-tasks-stream) reads task, decides action, writes results/task-phone-{ts}.txt
  *     → Server polls result, injects into Gemini via sendContent → Gemini speaks result
  *
  * ## Concurrent call chain

@@ -27,8 +27,24 @@ SOCKET=/tmp/sutando-tmux.sock
 SESSION=sutando-core
 SUTANDO_HOME="${SUTANDO_HOME:-$HOME/Library/Application Support/Sutando}"
 
-# Extend PATH so launchd can find Homebrew binaries.
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+# Self-detect the bundled runtime and prepend it to PATH. When run from
+# inside Sutando.app, $SCRIPT_DIR is Resources/repo/src and the bundled
+# runtime lives at Resources/runtime/. Falls through harmlessly in the
+# dev workflow where no bundled runtime exists.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BUNDLED_RUNTIME="$SCRIPT_DIR/../../runtime"
+if [ -d "$BUNDLED_RUNTIME/bin" ]; then
+    export PATH="$BUNDLED_RUNTIME/bin:$PATH"
+fi
+if [ -d "$BUNDLED_RUNTIME/share/terminfo" ]; then
+    # tmux compiled against Homebrew ncurses bakes /opt/homebrew/share/terminfo
+    # as its lookup path. On a fresh Mac without Homebrew that path doesn't
+    # exist, so we point tmux at the bundled terminfo explicitly.
+    export TERMINFO_DIRS="$BUNDLED_RUNTIME/share/terminfo"
+fi
+
+# Extend PATH so launchd can find Homebrew binaries (dev workflow + claude).
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
 
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 

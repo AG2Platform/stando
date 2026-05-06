@@ -50,10 +50,12 @@ To install:
      This sets up the launchd agents for the voice agent, web client,
      dashboard, and bridges.
 
-Prerequisites (install once via Homebrew if you haven't already):
-  brew install node fswatch
-  Install Claude Code:
+Prerequisites:
+  Install Claude Code (the only thing Sutando.app can't bundle):
      https://docs.anthropic.com/en/docs/claude-code/getting-started
+  Then run `claude auth login` once to authenticate.
+
+  Everything else (Node runtime, tmux) is bundled inside Sutando.app.
 
 Configuration:
   ~/Library/Application Support/Sutando/.env  — your API keys and settings
