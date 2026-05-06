@@ -134,6 +134,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var stepperContainer: NSStackView?
     private var stepperDots: [NSTextField] = []
     private var stepperLabels: [NSTextField] = []
+    /// Onboarding steps already emitted this app launch. Server enforces
+    /// uniqueness too (unique index on user_id+step), but checking here
+    /// avoids HTTP round trips from the 1.5s status-polling loop.
+    private var emittedOnboardingSteps: Set<String> = []
 
     private weak var appDelegate: AppDelegate?
 
@@ -544,6 +548,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 "Installed at \(homeRel). If you haven't authenticated, click Sign in."
             claudeStatusLabel?.textColor = .labelColor
             claudeActionButton?.title = "Sign in…"
+            emitOnboardingOnce("claude_installed")
         } else {
             claudeStatusLabel?.stringValue =
                 "Not installed. Required for the core agent (proactive loop, voice tasks)."
@@ -666,10 +671,27 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             // (the marker file is the source of truth for "are we still
             // onboarding").
             stepperContainer?.isHidden = true
+            // Activation telemetry. The Gemini key is the single
+            // gate-keeper checkpoint — without it nothing else can run.
+            // Save also closes out first-run for the funnel.
+            let geminiKey = env.value(for: SettingsField.GEMINI_API_KEY.rawValue) ?? ""
+            if !geminiKey.isEmpty {
+                emitOnboardingOnce("gemini_key_set")
+            }
+            emitOnboardingOnce("firstrun_complete")
             showBanner("Saved. Background services will pick up the new settings on next restart.", color: .systemGreen)
         } catch {
             showBanner("Failed to save: \(error.localizedDescription)", color: .systemRed)
         }
+    }
+
+    /// Emit an onboarding milestone exactly once per app launch.
+    /// Server-side dedup is on (user_id, step) so retries are safe; this
+    /// guard just avoids the HTTP round trip from the polling loop.
+    private func emitOnboardingOnce(_ step: String) {
+        if emittedOnboardingSteps.contains(step) { return }
+        emittedOnboardingSteps.insert(step)
+        CloudClient.recordOnboarding(step)
     }
 
     @objc private func closeWindow() { window?.close() }
@@ -743,19 +765,38 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             let paths = LaunchAgentInstaller.defaultPaths(workspace: appDelegate?.workspace ?? "")
             do {
                 let summary = try installer.install(paths: paths)
-                DispatchQueue.main.async { [self] in
-                    if summary.failed.isEmpty {
+                // Per-service failure → cloud reliability board. Lets us
+                // catch regressions like the Phase 4-bug Disabled=true
+                // crash before the next user hits it.
+                for failure in summary.failed {
+                    CloudClient.recordError(
+                        kind: "launchd.bootstrap_fail",
+                        severity: .error,
+                        message: "\(failure.label): \(failure.message)",
+                        metadata: ["label": failure.label]
+                    )
+                }
+                if summary.failed.isEmpty {
+                    DispatchQueue.main.async { [self] in
                         var msg = "Installed \(summary.installed.count) services."
                         if !summary.skippedDisabled.isEmpty {
                             msg += " Skipped \(summary.skippedDisabled.joined(separator: ", ")) (disabled)."
                         }
                         showBanner(msg, color: .systemGreen)
-                    } else {
-                        let errs = summary.failed.map { "\($0.label): \($0.message)" }.joined(separator: "; ")
+                        emitOnboardingOnce("services_installed")
+                    }
+                } else {
+                    let errs = summary.failed.map { "\($0.label): \($0.message)" }.joined(separator: "; ")
+                    DispatchQueue.main.async { [self] in
                         showBanner("Installed \(summary.installed.count). Failed: \(errs)", color: .systemOrange)
                     }
                 }
             } catch {
+                CloudClient.recordError(
+                    kind: "launchd.install_failed",
+                    severity: .fatal,
+                    message: error.localizedDescription
+                )
                 DispatchQueue.main.async { [self] in
                     showBanner("Install failed: \(error.localizedDescription)", color: .systemRed)
                 }
@@ -802,12 +843,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func updatePermissionUI() {
+        var allGranted = true
         for perm in SystemPermission.allCases {
             let status = perm.status()
+            if status != .granted { allGranted = false }
             if let label = permissionStatusLabels[perm] {
                 label.stringValue = status.symbol
                 label.textColor = status.color
             }
+        }
+        if allGranted {
+            emitOnboardingOnce("perms_granted")
         }
     }
 

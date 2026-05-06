@@ -26,10 +26,69 @@ from typing import Any
 from urllib import request as urlrequest
 from urllib.error import HTTPError, URLError
 
-__all__ = ["record_event", "is_cloud_signed_in", "load_cloud_auth"]
+__all__ = [
+    "record_event",
+    "record_error",
+    "record_onboarding",
+    "is_cloud_signed_in",
+    "load_cloud_auth",
+]
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 _TIMEOUT_SECONDS = 5.0
+_app_version_cache: str | None = None
+
+
+def _read_app_version() -> str:
+    """Read CFBundleShortVersionString from the bundled Info.plist
+    (when running inside Sutando.app) or fall back to package.json."""
+    global _app_version_cache
+    if _app_version_cache is not None:
+        return _app_version_cache
+    # Bundled .app: Info.plist sits at Contents/Info.plist; this file is
+    # at Contents/Resources/repo/src/cloud_metrics.py.
+    info_plist = REPO_DIR.parent.parent / "Info.plist"
+    if info_plist.exists():
+        try:
+            text = info_plist.read_text()
+            import re
+
+            m = re.search(
+                r"<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>",
+                text,
+            )
+            if m:
+                _app_version_cache = m.group(1)
+                return _app_version_cache
+        except OSError:
+            pass
+    # Dev workflow: package.json next to src/.
+    pkg = REPO_DIR / "package.json"
+    if pkg.exists():
+        try:
+            data = json.loads(pkg.read_text())
+            if isinstance(data, dict) and isinstance(data.get("version"), str):
+                _app_version_cache = data["version"]
+                return _app_version_cache
+        except (json.JSONDecodeError, OSError):
+            pass
+    _app_version_cache = "0.0.0"
+    return _app_version_cache
+
+
+_KNOWN_ONBOARDING_STEPS = frozenset(
+    {
+        "gemini_key_set",
+        "claude_installed",
+        "perms_granted",
+        "services_installed",
+        "firstrun_complete",
+        "first_voice",
+        "first_task",
+        "first_phone",
+        "first_image",
+    }
+)
 
 
 def _state_root() -> Path:
@@ -61,13 +120,13 @@ def is_cloud_signed_in() -> bool:
     return load_cloud_auth() is not None
 
 
-def _send(auth: dict[str, Any], events: list[dict[str, Any]]) -> None:
+def _post_json(auth: dict[str, Any], path: str, body: dict[str, Any]) -> None:
     """Background-thread sender. Silent on all errors."""
     try:
-        body = json.dumps({"events": events}).encode("utf-8")
+        data = json.dumps(body).encode("utf-8")
         req = urlrequest.Request(
-            f"{auth['apiBase'].rstrip('/')}/api/usage",
-            data=body,
+            f"{auth['apiBase'].rstrip('/')}{path}",
+            data=data,
             method="POST",
             headers={
                 "Authorization": f"Bearer {auth['token']}",
@@ -78,9 +137,14 @@ def _send(auth: dict[str, Any], events: list[dict[str, Any]]) -> None:
             pass
     except (HTTPError, URLError, OSError, TimeoutError) as e:
         try:
-            print(f"cloud_metrics: send failed: {e}", file=sys.stderr)
+            print(f"cloud_metrics: send to {path} failed: {e}", file=sys.stderr)
         except Exception:  # noqa: BLE001
             pass
+
+
+def _send(auth: dict[str, Any], events: list[dict[str, Any]]) -> None:
+    """Legacy alias retained for /api/usage callers."""
+    _post_json(auth, "/api/usage", {"events": events})
 
 
 def record_event(
@@ -103,11 +167,65 @@ def record_event(
     auth = load_cloud_auth()
     if auth is None:
         return
-    event: dict[str, Any] = {"kind": kind, "units": units}
+    event: dict[str, Any] = {
+        "kind": kind,
+        "units": units,
+        "appVersion": _read_app_version(),
+    }
     if cost_cents is not None:
         event["costCents"] = cost_cents
     if metadata:
         event["metadata"] = metadata
 
     t = threading.Thread(target=_send, args=(auth, [event]), daemon=True)
+    t.start()
+
+
+def record_error(
+    kind: str,
+    severity: str,
+    message: str,
+    stack: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Report an error to the cloud reliability board. Fire-and-forget."""
+    if severity not in ("info", "warn", "error", "fatal"):
+        return
+    auth = load_cloud_auth()
+    if auth is None:
+        return
+    event: dict[str, Any] = {
+        "kind": kind,
+        "severity": severity,
+        "message": str(message)[:2000],
+        "appVersion": _read_app_version(),
+    }
+    if stack:
+        event["stack"] = str(stack)[:20000]
+    if metadata:
+        event["metadata"] = metadata
+    t = threading.Thread(
+        target=_post_json,
+        args=(auth, "/api/errors", {"events": [event]}),
+        daemon=True,
+    )
+    t.start()
+
+
+def record_onboarding(step: str, metadata: dict[str, Any] | None = None) -> None:
+    """Record an onboarding milestone. Idempotent on the server side
+    (unique index on user_id+step). Fire-and-forget."""
+    if step not in _KNOWN_ONBOARDING_STEPS:
+        return
+    auth = load_cloud_auth()
+    if auth is None:
+        return
+    event: dict[str, Any] = {"step": step}
+    if metadata:
+        event["metadata"] = metadata
+    t = threading.Thread(
+        target=_post_json,
+        args=(auth, "/api/onboarding", {"events": [event]}),
+        daemon=True,
+    )
     t.start()

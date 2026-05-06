@@ -38,7 +38,12 @@ import { buildSutandoSystemPrompt, buildVoiceAgentContext } from './voice-contex
 import { classifyTransportClose, type ClassifiedClose } from './voice-error-classifier.js';
 
 import { personalPath, sharedPersonalPath, statePath, stateDir } from './util_paths.js';
-import { recordEvent as cloudRecordEvent } from './cloud-client.js';
+import {
+	recordEvent as cloudRecordEvent,
+	startSession as cloudStartSession,
+	endSession as cloudEndSession,
+	recordError as cloudRecordError,
+} from './cloud-client.js';
 
 // Cartesia is loaded dynamically at the bottom of the config section so
 // the `@cartesia/cartesia-js` package is only required when the user has
@@ -778,6 +783,39 @@ async function main() {
 		}
 	}
 
+	// Cloud session id from /api/sessions POST. Held across the
+	// VoiceSession lifecycle so onSessionEnd can PATCH the same row.
+	// `cloudSessionPromise` is the in-flight POST during the window
+	// between start and end — onSessionEnd awaits it before PATCHing.
+	let cloudSessionId: string | null = null;
+	let cloudSessionPromise: Promise<string | null> | null = null;
+
+	function mapEndedReason(reason: string | undefined): 'user' | 'timeout' | 'error' | 'system' {
+		if (!reason) return 'system';
+		const r = reason.toLowerCase();
+		if (r.includes('user')) return 'user';
+		if (r.includes('timeout') || r.includes('idle')) return 'timeout';
+		if (r.includes('error') || r.includes('fail') || r.includes('disconnect')) return 'error';
+		return 'system';
+	}
+
+	function closeCloudSession(endedReason: 'user' | 'timeout' | 'error' | 'system') {
+		// Capture refs before the start-promise resolves; the PATCH
+		// runs after start completes so we always close the correct row.
+		const promise = cloudSessionPromise;
+		const turnCount = userTurnCount;
+		const toolsUsed: Record<string, number> = {};
+		for (const tc of voiceToolCalls) {
+			toolsUsed[tc.name] = (toolsUsed[tc.name] ?? 0) + 1;
+		}
+		cloudSessionId = null;
+		cloudSessionPromise = null;
+		void (async () => {
+			const id = promise ? await promise : null;
+			await cloudEndSession(id, { turnCount, toolsUsed, endedReason });
+		})();
+	}
+
 	function writeVoiceMetrics() {
 		if (metricsWritten) return;
 		metricsWritten = true;
@@ -834,11 +872,23 @@ async function main() {
 				voiceEvents.length = 0; voiceToolCalls.length = 0; voiceTranscript.length = 0;
 				voiceEvents.push({ event: 'session_started', timestamp: new Date().toISOString() });
 				console.log(`${ts()} [Session] Started: ${e.sessionId}`);
+				// Cloud session lifecycle. Independent of writeVoiceMetrics
+				// (which emits the voice.gemini usage_event) — this row in
+				// `sessions` carries turn count, tools used, ended reason.
+				cloudSessionId = null;
+				cloudSessionPromise = cloudStartSession({
+					kind: 'voice',
+					metadata: { sessionId: e.sessionId, model: VOICE_NATIVE_AUDIO_MODEL },
+				}).then((id) => {
+					cloudSessionId = id;
+					return id;
+				});
 			},
 			onSessionEnd: (e) => {
 				voiceEvents.push({ event: `session_ended:${e.reason}`, timestamp: new Date().toISOString() });
 				console.log(`${ts()} [Session] Ended: ${e.sessionId} (${e.reason})`);
 				writeVoiceMetrics();
+				closeCloudSession(mapEndedReason(e.reason));
 			},
 			onToolCall: (e) => {
 				voiceToolIdMap.set(e.toolCallId, e.toolName);
@@ -871,6 +921,13 @@ async function main() {
 			onError: (e) => {
 				voiceEvents.push({ event: `error:${e.component}:${e.error.message}`, timestamp: new Date().toISOString() });
 				console.error(`${ts()} [Error] ${e.component}: ${e.error.message} (${e.severity})`);
+				cloudRecordError({
+					kind: `voice.${e.component}`,
+					severity: e.severity === 'fatal' ? 'fatal' : 'error',
+					message: e.error.message,
+					stack: e.error.stack,
+					metadata: { sessionId: SESSION_ID, component: e.component },
+				});
 			},
 		},
 	});
@@ -897,6 +954,14 @@ async function main() {
 			if (notifiedCategories.has(c.category)) return;
 			notifiedCategories.add(c.category);
 			console.error(`${ts()} [VoiceFailure] ${c.category}: ${c.userMessage} (raw="${c.rawReason}")`);
+			// Cloud reliability board — non-retryable transport closes are
+			// the most actionable failure signal we have for voice.
+			cloudRecordError({
+				kind: `voice.transport.${c.category}`,
+				severity: 'error',
+				message: c.userMessage,
+				metadata: { rawReason: c.rawReason, userActionUrl: c.userActionUrl },
+			});
 			// Surface via proactive-result channel — picked up by web-client
 			// task feed and the Discord/Telegram bridges if configured.
 			try {

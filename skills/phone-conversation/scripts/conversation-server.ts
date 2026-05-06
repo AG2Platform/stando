@@ -78,6 +78,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { z } from 'zod';
 import { inlineTools, anyCallerTools, ownerOnlyTools, configurableTools } from '../../../src/inline-tools.js';
+import {
+	startSession as cloudStartSession,
+	endSession as cloudEndSession,
+	recordError as cloudRecordError,
+} from '../../../src/cloud-client.js';
 
 // --- Config ---
 
@@ -1015,14 +1020,32 @@ function cleanupCall(callSid: string): void {
 // --- Twilio REST API ---
 // Used by goodbye detection and API endpoints to control calls.
 
+/// callSid → in-flight cloud session id promise. twilioHangup awaits
+/// this so the PATCH always lands on the row twilioCall opened, even
+/// if hangup fires before startSession resolves.
+const _cloudSessionPromiseByCallSid = new Map<string, Promise<string | null>>();
+
 // [Goodbye chain] Final step — tells Twilio to end the call
 async function twilioHangup(callSid: string): Promise<void> {
 	const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
-	await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`, {
-		method: 'POST',
-		body: new URLSearchParams({ Status: 'completed' }).toString(),
-		headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-	});
+	const sessionPromise = _cloudSessionPromiseByCallSid.get(callSid);
+	_cloudSessionPromiseByCallSid.delete(callSid);
+	try {
+		await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`, {
+			method: 'POST',
+			body: new URLSearchParams({ Status: 'completed' }).toString(),
+			headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+		});
+	} finally {
+		// Close the cloud session row even if the Twilio API failed —
+		// the call really did end on our side.
+		if (sessionPromise) {
+			void (async () => {
+				const id = await sessionPromise;
+				await cloudEndSession(id, { endedReason: 'user' });
+			})();
+		}
+	}
 }
 
 // [Concurrent call chain] Creates outbound Twilio call — used by /call, /concurrent-call, /meeting
@@ -1038,8 +1061,28 @@ async function twilioCall(to: string, twimlUrl: string, sendDigits?: string): Pr
 		method: 'POST', body: body.toString(),
 		headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
 	});
-	if (!res.ok) throw new Error(`Twilio error ${res.status}: ${await res.text()}`);
-	return ((await res.json()) as { sid: string }).sid;
+	if (!res.ok) {
+		const errText = await res.text();
+		cloudRecordError({
+			kind: 'phone.twilio.call_failed',
+			severity: 'error',
+			message: `Twilio ${res.status}: ${errText}`,
+			metadata: { to: to.slice(0, 4) + '…', status: res.status },
+		});
+		throw new Error(`Twilio error ${res.status}: ${errText}`);
+	}
+	const sid = ((await res.json()) as { sid: string }).sid;
+	// Open the cloud session row — closed by twilioHangup. Don't ship
+	// the full destination number; the leading 4 chars are enough for
+	// region-level analysis.
+	_cloudSessionPromiseByCallSid.set(
+		sid,
+		cloudStartSession({
+			kind: 'phone.outbound',
+			metadata: { callSid: sid, to: to.slice(0, 4) + '…' },
+		}),
+	);
+	return sid;
 }
 
 // --- HTTP helpers ---

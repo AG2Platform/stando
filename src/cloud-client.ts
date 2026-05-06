@@ -6,14 +6,19 @@
 //      machineId + apiBase. Re-read on every call so a sign-in/sign-out
 //      from the menu bar takes effect without restarting services.
 //   2. Provide `cloudFetch(path, init)` that injects Bearer auth.
-//   3. Provide `recordEvent({...})` that buffers events in memory and
+//   3. Provide `recordEvent({...})` that buffers usage events and
 //      flushes every 60s (or when the buffer hits 200 events).
+//   4. Provide one-shot helpers for the lower-frequency event streams
+//      that admin views consume: onboarding milestones, error reports,
+//      session start/end. These are fire-and-forget — failure never
+//      crashes the caller, and "not signed in" is a silent no-op.
 //
 // Behaviour when not signed in:
 //   - `cloudFetch` returns null (callers must handle it).
-//   - `recordEvent` is a no-op — events are discarded silently. The
-//     desktop is the source of truth for "what is being used"; if no
-//     account is signed in, that's the user's choice.
+//   - `recordEvent` / `recordOnboarding` / `recordError` / `startSession`
+//     / `endSession` are no-ops. The desktop is the source of truth for
+//     "what is being used"; if no account is signed in, that's the
+//     user's choice.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,6 +39,29 @@ export interface UsageEventInput {
 	ts?: Date;
 }
 
+export interface ErrorEventInput {
+	kind: string;
+	severity: 'info' | 'warn' | 'error' | 'fatal';
+	message: string;
+	stack?: string;
+	metadata?: Record<string, unknown>;
+	ts?: Date;
+}
+
+export interface SessionStartInput {
+	kind: 'voice' | 'phone.outbound' | 'phone.inbound';
+	startedAt?: Date;
+	metadata?: Record<string, unknown>;
+}
+
+export interface SessionEndInput {
+	turnCount?: number;
+	toolsUsed?: Record<string, number>;
+	endedReason?: 'user' | 'timeout' | 'error' | 'system';
+	endedAt?: Date;
+	metadata?: Record<string, unknown>;
+}
+
 const FLUSH_INTERVAL_MS = 60_000;
 const FLUSH_THRESHOLD = 200;
 const QUEUE_CAP = 5_000;
@@ -41,6 +69,48 @@ const QUEUE_CAP = 5_000;
 let _queue: UsageEventInput[] = [];
 let _flushTimer: NodeJS.Timeout | null = null;
 let _flushing = false;
+
+// Cached app version. Read once from the bundled Info.plist or
+// package.json at first use and stamped onto every event so the cloud
+// admin views can do release-vs-release regression analysis.
+let _appVersion: string | null = null;
+
+function readAppVersion(): string {
+	if (_appVersion !== null) return _appVersion;
+	// 1. Bundled .app — Info.plist sits alongside MacOS/Sutando, two
+	//    levels up from $resourcePath/repo/src/cloud-client.{ts,js}.
+	try {
+		const infoPlist = new URL('../../../Info.plist', import.meta.url).pathname;
+		if (existsSync(infoPlist)) {
+			const text = readFileSync(infoPlist, 'utf-8');
+			const m = text.match(
+				/<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/,
+			);
+			if (m && m[1]) {
+				_appVersion = m[1];
+				return _appVersion;
+			}
+		}
+	} catch {
+		// fall through to package.json
+	}
+	// 2. Dev workflow — package.json next to src/.
+	try {
+		const pkg = new URL('../package.json', import.meta.url).pathname;
+		if (existsSync(pkg)) {
+			const text = readFileSync(pkg, 'utf-8');
+			const parsed = JSON.parse(text) as { version?: string };
+			if (parsed.version) {
+				_appVersion = parsed.version;
+				return _appVersion;
+			}
+		}
+	} catch {
+		// fall through to default
+	}
+	_appVersion = '0.0.0';
+	return _appVersion;
+}
 
 function expandHome(p: string): string {
 	return p.replace(/^~/, process.env.HOME || '');
@@ -109,6 +179,7 @@ export async function flush(): Promise<void> {
 	_flushing = true;
 	const batch = _queue.splice(0, _queue.length);
 	try {
+		const appVersion = readAppVersion();
 		const res = await cloudFetch('/api/usage', {
 			method: 'POST',
 			body: JSON.stringify({
@@ -117,6 +188,7 @@ export async function flush(): Promise<void> {
 					units: e.units,
 					costCents: e.costCents,
 					metadata: e.metadata,
+					appVersion,
 					ts: e.ts ? e.ts.toISOString() : undefined,
 				})),
 			}),
@@ -156,4 +228,134 @@ export function _resetForTests(): void {
 	}
 	_queue = [];
 	_flushing = false;
+	_appVersion = null;
+}
+
+// ============================================================
+// Onboarding events
+// ============================================================
+// Fired at each Settings stepper checkpoint + first-skill-success
+// derivations the desktop wants to attribute. Server enforces
+// uniqueness on (user_id, step) so retries are safe.
+
+const KNOWN_ONBOARDING_STEPS = new Set([
+	'gemini_key_set',
+	'claude_installed',
+	'perms_granted',
+	'services_installed',
+	'firstrun_complete',
+	'first_voice',
+	'first_task',
+	'first_phone',
+	'first_image',
+]);
+
+/** Record an onboarding milestone. Idempotent on the server side
+ * (unique index on user_id+step). Fire-and-forget — never throws.
+ *
+ * Steps `signup` / `device_linked` / `subscribed` are server-emitted
+ * from `users` / `devices` / Stripe webhooks; emitting them from the
+ * desktop is harmless but redundant. */
+export function recordOnboarding(step: string, metadata?: Record<string, unknown>): void {
+	if (!isCloudSignedIn()) return;
+	if (!KNOWN_ONBOARDING_STEPS.has(step)) {
+		// Refuse silently rather than ship typos to the cloud filter.
+		return;
+	}
+	void (async () => {
+		try {
+			await cloudFetch('/api/onboarding', {
+				method: 'POST',
+				body: JSON.stringify({
+					events: [{ step, metadata, ts: new Date().toISOString() }],
+				}),
+			});
+		} catch {
+			// telemetry must never crash the caller
+		}
+	})();
+}
+
+// ============================================================
+// Error events
+// ============================================================
+
+/** Report a recoverable or fatal error to the cloud reliability board.
+ * Fire-and-forget. Don't include PII in `message` — the admin panel
+ * surfaces it raw. */
+export function recordError(input: ErrorEventInput): void {
+	if (!isCloudSignedIn()) return;
+	void (async () => {
+		try {
+			const appVersion = readAppVersion();
+			await cloudFetch('/api/errors', {
+				method: 'POST',
+				body: JSON.stringify({
+					events: [
+						{
+							kind: input.kind,
+							severity: input.severity,
+							message: input.message.slice(0, 2000),
+							stack: input.stack ? input.stack.slice(0, 20000) : undefined,
+							appVersion,
+							metadata: input.metadata,
+							ts: (input.ts ?? new Date()).toISOString(),
+						},
+					],
+				}),
+			});
+		} catch {
+			// Errors emitting errors. Drop.
+		}
+	})();
+}
+
+// ============================================================
+// Sessions (voice / phone)
+// ============================================================
+
+/** Begin a session. Returns the server-assigned id, or null when not
+ * signed in / network failed. The caller should keep the id and pass
+ * it to `endSession`; if it's null, just skip the close call. */
+export async function startSession(input: SessionStartInput): Promise<string | null> {
+	if (!isCloudSignedIn()) return null;
+	try {
+		const appVersion = readAppVersion();
+		const res = await cloudFetch('/api/sessions', {
+			method: 'POST',
+			body: JSON.stringify({
+				kind: input.kind,
+				startedAt: (input.startedAt ?? new Date()).toISOString(),
+				appVersion,
+				metadata: input.metadata,
+			}),
+		});
+		if (!res || !res.ok) return null;
+		const body = (await res.json()) as { id?: string };
+		return body.id ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/** Close a session. Tolerates a null id (no-op) so callers don't have
+ * to branch when sign-in failed at start time. */
+export async function endSession(id: string | null, input: SessionEndInput = {}): Promise<void> {
+	if (!id) return;
+	if (!isCloudSignedIn()) return;
+	try {
+		await cloudFetch('/api/sessions', {
+			method: 'PATCH',
+			body: JSON.stringify({
+				id,
+				endedAt: (input.endedAt ?? new Date()).toISOString(),
+				turnCount: input.turnCount,
+				toolsUsed: input.toolsUsed,
+				endedReason: input.endedReason,
+				metadata: input.metadata,
+			}),
+		});
+	} catch {
+		// Drop.
+	}
 }

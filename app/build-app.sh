@@ -57,6 +57,7 @@ SWIFT_SOURCES=(
     "$REPO/src/Sutando/LaunchAgentInstaller.swift"
     "$REPO/src/Sutando/SparkleUpdater.swift"
     "$REPO/src/Sutando/CloudAuth.swift"
+    "$REPO/src/Sutando/CloudClient.swift"
     "$REPO/src/Sutando/EnvFile.swift"
     "$REPO/src/Sutando/Permissions.swift"
     "$REPO/src/Sutando/SettingsWindow.swift"
