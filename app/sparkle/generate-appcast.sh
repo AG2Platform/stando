@@ -55,4 +55,4 @@ echo "Generating appcast (channel=$CHANNEL) in $DIR..."
 ls -la "$DIR/appcast"*.xml 2>/dev/null || true
 echo ""
 echo "Upload appcast.xml + the .dmg files to your Sparkle host"
-echo "(updates.sutando.ai/<channel>/appcast.xml + the binaries)."
+echo "(ag2.ai/sutando/updates/<channel>/appcast.xml + the binaries)."

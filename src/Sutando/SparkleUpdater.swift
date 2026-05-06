@@ -4,7 +4,7 @@
 // build (no Sparkle.framework) compiling cleanly.
 //
 // Phase 2 plan:
-//   - SUFeedURL → updates.sutando.ai/<channel>/appcast.xml
+//   - SUFeedURL → ag2.ai/sutando/updates/<channel>/appcast.xml
 //   - SUPublicEDKey → embedded in Info.plist
 //   - Channel: read from SUSelectedChannel or default "internal"
 //   - "Check for Updates…" menu item
@@ -47,7 +47,7 @@ final class SparkleUpdater: NSObject, SPUUpdaterDelegate {
     /// UserDefaults (e.g. via a hidden menu item).
     func feedURLString(for updater: SPUUpdater) -> String? {
         let channel = UserDefaults.standard.string(forKey: "SUSelectedChannel") ?? "internal"
-        return "https://updates.sutando.ai/\(channel)/appcast.xml"
+        return "https://ag2.ai/sutando/updates/\(channel)/appcast.xml"
     }
 }
 

@@ -77,7 +77,7 @@ private func apiBaseURL() -> String {
        !plistBase.isEmpty {
         return plistBase
     }
-    return "https://sutando.ai"
+    return "https://sutando.ag2.ai"
 }
 
 private func loginURL(challenge: String) -> URL? {

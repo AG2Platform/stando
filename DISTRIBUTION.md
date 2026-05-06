@@ -45,7 +45,7 @@ on a different network. Phase 4.10 below sequences exactly that.
 
 Operational gaps before we can hand a build to an external internal user:
 
-- **Cloud production deploy** to `app.sutando.ai` (Vercel) with prod
+- **Cloud production deploy** to `sutando.ag2.ai` (Vercel) with prod
   Neon branch, Clerk production instance, Stripe live mode + webhook,
   Cloudflare R2. (Phase 4.10 Track 1.)
 - **Signing + notarization secrets** in GitHub Actions: Developer ID
@@ -53,7 +53,7 @@ Operational gaps before we can hand a build to an external internal user:
   password, Sparkle EdDSA private key. (Phase 4.10 Track 2.)
 - **Bake `apiBase` into the .app** — `CloudAuth.swift` currently keeps
   whatever was typed at sign-in; production builds need a default of
-  `https://app.sutando.ai`. (Phase 4.10 Track 2.)
+  `https://sutando.ag2.ai`. (Phase 4.10 Track 2.)
 - **Desktop-side emission** of the new admin telemetry — DONE. See
   Phase 4.10 Track 4 below for the surfaces wired (Swift onboarding/error
   emitters, voice + phone session lifecycle, `appVersion` injection on
@@ -234,10 +234,10 @@ EdDSA-signed appcast and uploads to GitHub Releases.
             → xcrun notarytool submit --wait
             → stapler staple
             → create-dmg
-            → upload to GitHub Releases (or sutando.ai CDN)
+            → upload to GitHub Releases (or ag2.ai/sutando CDN)
   ```
 - **Sparkle 2** with EdDSA-signed appcast hosted at
-  `updates.sutando.ai/appcast.xml`. Channels:
+  `ag2.ai/sutando/updates/<channel>/appcast.xml`. Channels:
   - `internal` — internal release, gated by user account flag
   - `beta` — opt-in for friendly users
   - `stable` — public default (later)
@@ -257,7 +257,7 @@ EdDSA-signed appcast and uploads to GitHub Releases.
 ### Architecture
 
 ```
-       ┌──── sutando.ai (marketing + login) ────┐
+       ┌──── sutando.ag2.ai (auth + dashboard) ────┐
        │                                         │
        │   /api/auth         → Clerk             │
        │   /api/billing      → Stripe webhooks   │
@@ -348,7 +348,7 @@ api_keys (
 
 ### Auth flow
 
-1. App opens `https://sutando.ai/cli-login?challenge={nonce}` in default
+1. App opens `https://sutando.ag2.ai/cli-login?challenge={nonce}` in default
    browser.
 2. User authenticates via Clerk.
 3. Cloud POSTs token back to a one-shot localhost listener the app raised.
@@ -634,7 +634,7 @@ secret plumbing rather than a multi-day membership wait.
 
 ### Track 1 — Cloud production deploy
 
-Goal: `app.sutando.ai` reachable from any browser, accepting heartbeats
+Goal: `sutando.ag2.ai` reachable from any browser, accepting heartbeats
 and usage events from the desktop, with Stripe webhooks landing.
 
 1. **Provision production secrets** (separate from dev):
@@ -642,16 +642,16 @@ and usage events from the desktop, with Stripe webhooks landing.
      dev branch for `localhost`. Capture both `DATABASE_URL` (pooled,
      for runtime) and `DATABASE_URL_UNPOOLED` (for migrations).
    - Clerk: new production instance. Generate publishable + secret keys.
-     Configure allowed redirect URLs to include `app.sutando.ai`.
+     Configure allowed redirect URLs to include `sutando.ag2.ai`.
    - Stripe: live mode. Create products for Plus + Pro, capture price
      IDs into `STRIPE_PRICE_PLUS_MONTHLY` / `STRIPE_PRICE_PRO_MONTHLY`.
    - Cloudflare R2: bucket for transcripts/blobs. Capture access keys.
 2. **Vercel deploy.** `vercel --prod` from `agent-universe` repo. Bind
-   `app.sutando.ai` (or `sutando.ai/app` — pick once). Set every env
-   var in the Vercel project, including the Sparkle public key path.
+   `sutando.ag2.ai` as the production domain. Set every env var in the
+   Vercel project, including the Sparkle public key path.
 3. **Run migrations.** `DATABASE_URL=$PROD_UNPOOLED npm run db:migrate`
    from a local checkout. Confirms `0001_admin_panel.sql` lands.
-4. **Stripe webhook.** Create endpoint `https://app.sutando.ai/api/billing/webhook`
+4. **Stripe webhook.** Create endpoint `https://sutando.ag2.ai/api/billing/webhook`
    in Stripe live mode, copy the signing secret into `STRIPE_WEBHOOK_SECRET`,
    redeploy, fire a `checkout.session.completed` test event, confirm a
    row updates in `users`.
@@ -659,7 +659,7 @@ and usage events from the desktop, with Stripe webhooks landing.
    `UPDATE users SET is_admin = true WHERE email = 'rickedwardboss@gmail.com';`
    (Won't work until your account exists in prod — sign in once first.)
 6. **Smoke test from current Mac against prod.** Sign out of dev, edit
-   `cloud-auth.json` `apiBase` to point at `https://app.sutando.ai`,
+   `cloud-auth.json` `apiBase` to point at `https://sutando.ag2.ai`,
    sign in via prod Clerk, talk to voice agent, confirm a `voice.gemini`
    event lands in prod Neon within a minute. `/admin` page renders.
 
@@ -685,7 +685,7 @@ Mac (no right-click-Open dance).
    change.
 4. **Bake prod `apiBase` into the .app.** `CloudAuth.swift` currently
    reads whatever `apiBase` was set during sign-in. Add a compile-time
-   default of `https://app.sutando.ai`, override-able via
+   default of `https://sutando.ag2.ai`, override-able via
    `SUTANDO_CLOUD_BASE` env var for dev. Without this the second Mac
    has nothing to sign in against on first launch.
 5. **Tag a release.** `git tag v0.2.0 && git push --tags`. The

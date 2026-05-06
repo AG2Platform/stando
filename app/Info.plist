@@ -65,7 +65,7 @@
          actual public EdDSA key from `bash app/sparkle/generate-keys.sh`
          before producing a release build. -->
     <key>SUFeedURL</key>
-    <string>https://updates.sutando.ai/internal/appcast.xml</string>
+    <string>https://ag2.ai/sutando/updates/internal/appcast.xml</string>
     <key>SUPublicEDKey</key>
     <string>REPLACE_WITH_PUBLIC_ED_KEY</string>
     <key>SUEnableAutomaticChecks</key>
