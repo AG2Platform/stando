@@ -47,7 +47,7 @@ Operational gaps before we can hand a build to an external internal user:
 
 - **Cloud production deploy** to `sutando.ag2.ai` (Vercel) with prod
   Neon branch, Clerk production instance, Stripe live mode + webhook,
-  Cloudflare R2. (Phase 4.10 Track 1.)
+  Tigris. (Phase 4.10 Track 1.)
 - **Signing + notarization secrets** in GitHub Actions: Developer ID
   Application cert .p12 (we have the Apple account), app-specific
   password, Sparkle EdDSA private key. (Phase 4.10 Track 2.)
@@ -80,7 +80,7 @@ Two repos with independent release cadence:
 | Repo | Path | Owns |
 |---|---|---|
 | `sutando` | `/Users/lianghaochen/stando` | Everything desktop-side: core agent code, skills, Swift launcher, Xcode project, signing/notarization CI. The current `src/Sutando/main.swift` becomes the launcher source inside the Xcode project. New top-level `app/` directory holds `Sutando.xcodeproj`, `Info.plist`, `entitlements.plist`, icons, Sparkle config. |
-| `agent-universe` | `/Users/lianghaochen/agent-universe` | Cloud control plane. Next.js + Neon + Clerk + Stripe + Cloudflare R2. Owns auth, billing, usage aggregation, dashboard, hosted relays. |
+| `agent-universe` | `/Users/lianghaochen/agent-universe` | Cloud control plane. Next.js + Neon + Clerk + Stripe + Tigris. Owns auth, billing, usage aggregation, dashboard, hosted relays. |
 
 Why no separate `sutando-app` repo:
 
@@ -103,7 +103,7 @@ Why no separate `sutando-app` repo:
 | Database | Neon Postgres |
 | Auth | Clerk |
 | Billing | Stripe |
-| Object store | Cloudflare R2 (transcripts, blobs) |
+| Object store | Tigris (transcripts, blobs) — S3-compatible, zero egress, partnership |
 | Claude Code model | BYO subscription (user provides their own) |
 | Phone | Hosted Twilio relay (we operate the account) |
 
@@ -645,7 +645,10 @@ and usage events from the desktop, with Stripe webhooks landing.
      Configure allowed redirect URLs to include `sutando.ag2.ai`.
    - Stripe: live mode. Create products for Plus + Pro, capture price
      IDs into `STRIPE_PRICE_PLUS_MONTHLY` / `STRIPE_PRICE_PRO_MONTHLY`.
-   - Cloudflare R2: bucket for transcripts/blobs. Capture access keys.
+   - Tigris: bucket for transcripts/blobs. Capture access key id +
+     secret + endpoint URL. S3-compatible — `@aws-sdk/client-s3` works
+     unchanged. Defer until the transcripts feature actually ships;
+     not on the critical path for the first internal user.
 2. **Vercel deploy.** `vercel --prod` from `agent-universe` repo. Bind
    `sutando.ag2.ai` as the production domain. Set every env var in the
    Vercel project, including the Sparkle public key path.
@@ -916,7 +919,7 @@ packaged."
 | Hosted voice (Gemini gateway) | Free tier 15 req/min rate-limits heavy users mid-call. We provide a paid Gemini key, smooth quotas. | `voice-agent.ts:141`, `cartesia-tts.ts` | Included in tier ($0.05/min over quota) |
 | Image / video generation | Veo 3.1 ~$0.30/min of video. Modest markup. | `image-generation/scripts/generate.py` | $0.10/image, $0.50/sec of video |
 | Cloud sync + memory | Replaces BYO-private-GitHub-repo (`SUTANDO_MEMORY_REPO`) and SSH+rsync `cross-node-sync` skill. | New service | Included in paid tier |
-| Cloud dashboard + transcripts | Watch your Sutando from your phone, search transcripts, export. | `event_log.py` cloud sink + R2 | Included; retention by tier |
+| Cloud dashboard + transcripts | Watch your Sutando from your phone, search transcripts, export. | `event_log.py` cloud sink + Tigris | Included; retention by tier |
 | Auto-update + signed releases | Friction-kill. Drives adoption. | Sparkle | Free for everyone |
 | Premium TTS (Cartesia) | Better voice than Gemini's. | `cartesia-tts.ts:52` | Included in Pro |
 
@@ -993,7 +996,7 @@ to "operational provisioning".
 | Phase 1 .app bundle [DONE] | Stripe products + webhooks; `/api/auth`, `/api/usage` [DONE] | `voice.gemini`, `tts.cartesia`, `image.gen` instrumentation [DONE] |
 | Phase 2 signing + notarization + Sparkle [DONE — needs secrets] | Cloud dashboard MVP [DONE] | End-to-end event flow [DONE — verified locally] |
 | Phase 4.7 Settings + first-launch [DONE] | Manual-override Plus subscriptions [PENDING] | — |
-| Phase 4-bug installer hardening [DONE] | Phase 4.10 Track 1 — production deploy (Vercel + DNS + prod Neon/Clerk/Stripe/R2) [PENDING] | Phase 4.10 Track 4 — onboarding/error/session emission [DONE] |
+| Phase 4-bug installer hardening [DONE] | Phase 4.10 Track 1 — production deploy (Vercel + DNS + prod Neon/Clerk/Stripe; Tigris deferred) [PENDING] | Phase 4.10 Track 4 — onboarding/error/session emission [DONE] |
 | Phase 4-core-agent claude wrapper [DONE] | Phase 4.11 admin panel [DONE — needs migration applied + admin flag set] | Per-skill `skill.run` metadata emission [PENDING — deferred] |
 | Phase 4.8 bundled runtime + WKWebView + Claude Code installer + stepper [DONE] | Server-side rate sheet for `provider_cost_cents` [PENDING] | — |
 | Phase 4.9 fresh-Mac install fixes [DONE] | Phone relay [PENDING — paid tier] | — |
