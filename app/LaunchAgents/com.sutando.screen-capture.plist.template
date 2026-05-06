@@ -19,7 +19,7 @@
         <key>SUTANDO_HOME</key>
         <string>{{SUTANDO_HOME}}</string>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin</string>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin</string>
     </dict>
 
     <key>StandardOutPath</key>

@@ -8,7 +8,12 @@
     <key>com.apple.security.automation.apple-events</key>
     <true/>
 
-    <!-- Microphone: voice agent. -->
+    <!-- Microphone: voice agent. Hardened-runtime requires the
+         `audio-input` key; the `microphone` key is the sandbox-era name
+         and macOS tccd will refuse to prompt without `audio-input`
+         present. We keep both for forward/back compatibility. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
     <key>com.apple.security.device.microphone</key>
     <true/>
 

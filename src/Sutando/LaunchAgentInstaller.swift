@@ -141,6 +141,23 @@ class LaunchAgentInstaller {
         try FileManager.default.createDirectory(atPath: userLaunchAgentsDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(atPath: paths.sutandoHome + "/logs", withIntermediateDirectories: true)
 
+        // Install Sutando skills into ~/.claude/skills/. Skills are required
+        // for the core-agent service: claude looks them up by name when it
+        // sees `/proactive-loop` (or any other skill slash command), and
+        // without them in `~/.claude/skills/` the core-agent crash-loops.
+        // The install.sh in the bundled skills/ dir creates idempotent
+        // symlinks, so re-running on every install is safe.
+        let skillsScript = paths.repoDir + "/skills/install.sh"
+        if FileManager.default.fileExists(atPath: skillsScript) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = [skillsScript]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            try? proc.run()
+            proc.waitUntilExit()
+        }
+
         let phs = placeholders(paths)
         let files = try FileManager.default.contentsOfDirectory(atPath: templatesDir)
         var summary = LaunchAgentInstallSummary()

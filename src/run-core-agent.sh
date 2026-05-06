@@ -64,16 +64,42 @@ fi
 # Create the session if it doesn't exist. `-d` = detached (no TTY needed,
 # which is required under launchd). `-A` = attach if exists, but with -d
 # it has no effect — we already check existence above.
+LOG_DIR="${LOG_DIR:-$SUTANDO_HOME/logs}"
+PANE_LOG="$LOG_DIR/core-agent.pane.log"
+
+# Always kill any pre-existing session first. We used to skip recreation
+# when a session existed, but the bypass-permissions warning prompt that
+# Claude 2.1.x shows on launch means a stuck session can sit at "1. No,
+# exit" forever — and the wrapper's has-session check would happily
+# treat that zombie as "alive". Killing always recreates from a clean
+# state. ~5s downtime worst case is fine; this only runs on launchd
+# restarts (rare).
+tmux -S "$SOCKET" kill-session -t "$SESSION" 2>/dev/null || true
+
+echo "$(ts) [core-agent] starting tmux session $SESSION"
+tmux -S "$SOCKET" new-session -d -s "$SESSION" -- \
+    claude --dangerously-skip-permissions --add-dir "$HOME" -- "/proactive-loop"
 if ! tmux -S "$SOCKET" has-session -t "$SESSION" 2>/dev/null; then
-    echo "$(ts) [core-agent] starting tmux session $SESSION"
-    tmux -S "$SOCKET" new-session -d -s "$SESSION" -- \
-        claude --name "$SESSION" --dangerously-skip-permissions --add-dir "$HOME" -- "/proactive-loop"
-    if ! tmux -S "$SOCKET" has-session -t "$SESSION" 2>/dev/null; then
-        echo "$(ts) [core-agent] tmux new-session failed — sleeping before retry"
-        sleep 60
-        exit 1
-    fi
+    echo "$(ts) [core-agent] tmux new-session failed — sleeping before retry"
+    sleep 60
+    exit 1
 fi
+
+# Pipe the claude pane to a log file so we can debug crashes / unknown
+# slash commands / auth prompts. Without this the pane output dies with
+# the session and we can only guess.
+echo "$(ts) [pane] === session $SESSION started ===" >> "$PANE_LOG"
+tmux -S "$SOCKET" pipe-pane -t "$SESSION" -o "cat >> '$PANE_LOG'" 2>/dev/null || true
+
+# Auto-accept the "Bypass Permissions mode" warning that Claude Code
+# 2.1.x shows on every launch. The default selection is "1. No, exit"
+# — without this, the session would idle on the warning until claude
+# times out and exits, and launchd would crash-loop us forever.
+# Down + Enter selects "2. Yes, I accept". The 2-second wait gives the
+# TUI time to render before keystrokes arrive (sending too early
+# silently no-ops because the prompt isn't focused yet).
+sleep 2
+tmux -S "$SOCKET" send-keys -t "$SESSION" Down Enter 2>/dev/null || true
 
 # Block until the session exits. tmux's wait-for would be ideal but it
 # requires the channel to have been signaled; instead poll has-session

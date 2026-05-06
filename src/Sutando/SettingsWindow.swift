@@ -700,10 +700,41 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     @objc private func grantPermission(_ sender: NSButton) {
         guard let raw = sender.identifier?.rawValue,
               let perm = SystemPermission(rawValue: raw) else { return }
-        // Always open System Settings so the user can flip the toggle.
-        if let url = perm.systemSettingsURL { NSWorkspace.shared.open(url) }
-        // Also fire the system request when applicable.
-        perm.request { [weak self] _ in self?.updatePermissionUI() }
+        if perm == .microphone {
+            // Mic-only path: fire the AVCaptureDevice prompt FIRST so macOS
+            // can register Sutando in the TCC database. Opening System
+            // Settings before the prompt steals focus and macOS suppresses
+            // prompts from non-frontmost apps — the result is that the user
+            // sees an empty Microphone list and Sutando never gets added.
+            // Only fall through to System Settings if the user denied.
+            //
+            // Sutando is LSUIElement (menu-bar app, no Dock icon). Apps in
+            // .accessory activation policy can have their TCC prompts
+            // silently dropped by macOS — the IPC fires but no UI surfaces.
+            // Promoting to .regular for the duration of the prompt forces
+            // macOS to treat Sutando like any other foreground app.
+            let priorPolicy = NSApp.activationPolicy()
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            window?.makeKeyAndOrderFront(nil)
+
+            perm.request { [weak self] status in
+                DispatchQueue.main.async {
+                    NSApp.setActivationPolicy(priorPolicy)
+                    self?.updatePermissionUI()
+                    if status != .granted, let url = perm.systemSettingsURL {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+        } else {
+            // Accessibility + Screen Recording: macOS doesn't show a useful
+            // in-app prompt for these — the request just nudges the system
+            // to add an entry. Opening Settings is the meaningful action,
+            // so do it first.
+            if let url = perm.systemSettingsURL { NSWorkspace.shared.open(url) }
+            perm.request { [weak self] _ in self?.updatePermissionUI() }
+        }
     }
 
     @objc private func installServices() {
