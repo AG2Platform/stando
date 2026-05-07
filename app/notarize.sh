@@ -61,18 +61,61 @@ else
     SUBMIT_TARGET="$ARTIFACT"
 fi
 
+# Submit without --wait, then poll. Apple's notary occasionally routes
+# submissions into an undocumented "in-depth analysis" path that can
+# stretch from minutes to days (forum thread 707377). `--wait` will
+# block indefinitely in that case, so we cap with NOTARY_MAX_WAIT_SEC
+# (default 1800s = 30 min) and exit non-zero with the submission ID
+# preserved so a follow-up workflow can resume via
+# `notarytool info <id>` + `stapler staple` when Apple eventually
+# returns a verdict.
 echo "  Submitting $SUBMIT_TARGET to Apple notary service..."
-# Capture submission output so we can fetch the log on failure.
-SUBMIT_OUTPUT=$(xcrun notarytool submit "$SUBMIT_TARGET" "${NOTARY_AUTH[@]}" --wait 2>&1 | tee /dev/stderr)
-SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | awk '/^  id:/ { print $2; exit }')
-SUBMISSION_STATUS=$(echo "$SUBMIT_OUTPUT" | awk '/^  status:/ { print $2 }' | tail -1)
+SUBMIT_JSON=$(xcrun notarytool submit "$SUBMIT_TARGET" "${NOTARY_AUTH[@]}" --output-format json 2>&1)
+echo "$SUBMIT_JSON"
+SUBMISSION_ID=$(echo "$SUBMIT_JSON" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("id",""))
+except Exception: pass' 2>/dev/null || true)
+if [ -z "$SUBMISSION_ID" ]; then
+    echo "✗ Could not extract submission ID — upload likely failed."
+    exit 1
+fi
+echo "  Submission ID: $SUBMISSION_ID"
+
+MAX_WAIT="${NOTARY_MAX_WAIT_SEC:-1800}"
+START=$(date +%s)
+SUBMISSION_STATUS="In Progress"
+echo "  Polling notary (max ${MAX_WAIT}s)..."
+while true; do
+    ELAPSED=$(( $(date +%s) - START ))
+    if [ "$ELAPSED" -ge "$MAX_WAIT" ]; then
+        break
+    fi
+    sleep 30
+    INFO_JSON=$(xcrun notarytool info "$SUBMISSION_ID" "${NOTARY_AUTH[@]}" --output-format json 2>&1 || true)
+    SUBMISSION_STATUS=$(echo "$INFO_JSON" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("status",""))
+except Exception: pass' 2>/dev/null || true)
+    echo "    [${ELAPSED}s/${MAX_WAIT}s] status: ${SUBMISSION_STATUS:-unknown}"
+    case "$SUBMISSION_STATUS" in
+        Accepted|Invalid|Rejected) break ;;
+    esac
+done
 
 if [ "$SUBMISSION_STATUS" != "Accepted" ]; then
     echo ""
-    echo "✗ Notarization status: $SUBMISSION_STATUS"
-    if [ -n "$SUBMISSION_ID" ]; then
-        echo "  Fetching detailed log for submission $SUBMISSION_ID..."
+    echo "✗ Notarization status: ${SUBMISSION_STATUS:-In Progress (timed out)}"
+    echo "  Submission ID: $SUBMISSION_ID"
+    if [ "$SUBMISSION_STATUS" = "Invalid" ] || [ "$SUBMISSION_STATUS" = "Rejected" ]; then
+        echo "  Fetching detailed log..."
         xcrun notarytool log "$SUBMISSION_ID" "${NOTARY_AUTH[@]}" || true
+    else
+        echo ""
+        echo "  Submission stuck in Apple's notary queue (>${MAX_WAIT}s)."
+        echo "  This is an Apple-side condition — see"
+        echo "    https://developer.apple.com/forums/thread/707377"
+        echo "  Resume later with:"
+        echo "    xcrun notarytool info $SUBMISSION_ID ${NOTARYTOOL_PROFILE:+--keychain-profile $NOTARYTOOL_PROFILE}"
+        echo "    xcrun stapler staple \"$ARTIFACT\"   # once Accepted"
     fi
     exit 1
 fi

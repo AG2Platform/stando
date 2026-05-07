@@ -175,7 +175,7 @@ if [ "$SIGNING_IDENTITY" != "-" ]; then
     SIGN_FLAGS+=(--timestamp)
 fi
 
-# 7a. Re-sign every Mach-O ANYWHERE under Contents/Resources/ — covers
+# 7a. Re-sign every Mach-O under Contents/Resources/ — covers
 # bundle-runtime.sh's ad-hoc signed binaries (node, tmux, dylibs) AND
 # the pre-built native binaries that npm packages ship inside
 # node_modules (ripgrep, fsevents, sharp, esbuild, libvips, etc.) AND
@@ -190,36 +190,48 @@ fi
 # disable-library-validation + allow-dyld-environment-variables) are
 # applied to all of them — node binaries need JIT, native node-addons
 # need library-validation off to load alongside non-Apple-signed dylibs.
+#
+# Frameworks/ is handled separately in 7b — applying our runtime
+# entitlements to Sparkle's helpers (especially Downloader.xpc, which
+# ships its own sandbox entitlements) breaks Sparkle at runtime AND
+# raises notarization scrutiny. Keep the two passes apart.
 RUNTIME_ENTITLEMENTS="$REPO/app/Sutando-runtime.entitlements"
 RUNTIME_SIGN_FLAGS=("${SIGN_FLAGS[@]}" --entitlements "$RUNTIME_ENTITLEMENTS")
 SIGNED_COUNT=0
-for SCAN_DIR in "$APP/Contents/Resources" "$APP/Contents/Frameworks"; do
-    [ -d "$SCAN_DIR" ] || continue
-    while IFS= read -r -d '' bin; do
-        # `file` reliably distinguishes Mach-O (binaries, dylibs, bundles,
-        # .node addons) from text. Skip everything that isn't Mach-O.
-        if file "$bin" 2>/dev/null | grep -qE 'Mach-O|dynamically linked shared library'; then
-            codesign "${RUNTIME_SIGN_FLAGS[@]}" "$bin" 2>&1 | grep -v "replacing existing signature" || true
-            SIGNED_COUNT=$((SIGNED_COUNT + 1))
-        fi
-    done < <(find "$SCAN_DIR" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' -o -name '*.node' \) -print0)
-done
-echo "  Re-signed $SIGNED_COUNT bundled Mach-O binaries (Resources/ + Frameworks/)"
+SCAN_DIR="$APP/Contents/Resources"
+while IFS= read -r -d '' bin; do
+    # `file` reliably distinguishes Mach-O (binaries, dylibs, bundles,
+    # .node addons) from text. Skip everything that isn't Mach-O.
+    if file "$bin" 2>/dev/null | grep -qE 'Mach-O|dynamically linked shared library'; then
+        codesign "${RUNTIME_SIGN_FLAGS[@]}" "$bin" 2>&1 | grep -v "replacing existing signature" || true
+        SIGNED_COUNT=$((SIGNED_COUNT + 1))
+    fi
+done < <(find "$SCAN_DIR" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' -o -name '*.node' \) -print0)
+echo "  Re-signed $SIGNED_COUNT bundled Mach-O binaries (Resources/)"
 
-# 7b. Sparkle helpers — sign each XPC + helper before sealing the framework.
-# Sparkle ships pre-signed by the Sparkle Project; we MUST re-sign with our
-# identity so the chain validates against our cert.
+# 7b. Sparkle.framework — sign deepest-first per Sparkle's codesigning
+# guide: https://sparkle-project.org/documentation/sandboxing/
+# Sparkle ships pre-signed by the Sparkle Project; we MUST re-sign with
+# our identity so the chain validates against our cert.
+#
+# Order matters: nested helpers first, then the framework that seals
+# them. Inside helpers also use the actual on-disk paths
+# (Versions/B/Updater.app — NOT Versions/B/Resources/Updater.app, which
+# is what Sparkle 1.x had). Downloader.xpc's own sandbox entitlements
+# must be preserved or Sparkle's privilege-separated download breaks at
+# runtime; --preserve-metadata=entitlements keeps them.
 if [ "$ENABLE_SPARKLE" = "1" ] && [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
-    SPARKLE_HELPERS=(
-        "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Updater.app"
-        "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
-        "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc"
-        "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"
-    )
-    for helper in "${SPARKLE_HELPERS[@]}"; do
-        [ -e "$helper" ] || continue
-        codesign "${SIGN_FLAGS[@]}" "$helper" 2>&1 | grep -v "replacing existing signature" || true
-    done
+    SPARKLE_VB="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
+    [ -e "$SPARKLE_VB/XPCServices/Installer.xpc" ] && \
+        codesign "${SIGN_FLAGS[@]}" "$SPARKLE_VB/XPCServices/Installer.xpc" 2>&1 | grep -v "replacing existing signature" || true
+    [ -e "$SPARKLE_VB/XPCServices/Downloader.xpc" ] && \
+        codesign "${SIGN_FLAGS[@]}" --preserve-metadata=entitlements "$SPARKLE_VB/XPCServices/Downloader.xpc" 2>&1 | grep -v "replacing existing signature" || true
+    [ -e "$SPARKLE_VB/Autoupdate" ] && \
+        codesign "${SIGN_FLAGS[@]}" "$SPARKLE_VB/Autoupdate" 2>&1 | grep -v "replacing existing signature" || true
+    [ -e "$SPARKLE_VB/Updater.app" ] && \
+        codesign "${SIGN_FLAGS[@]}" "$SPARKLE_VB/Updater.app" 2>&1 | grep -v "replacing existing signature" || true
+    # Framework last — seals over the helpers and the main Sparkle binary
+    # at Versions/B/Sparkle.
     codesign "${SIGN_FLAGS[@]}" "$APP/Contents/Frameworks/Sparkle.framework" 2>&1 | grep -v "replacing existing signature" || true
 fi
 

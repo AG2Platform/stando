@@ -43,13 +43,17 @@
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>
 
-    <!-- Allow JIT for V8 (Node) and PyPy-style bytecode caches. -->
+    <!-- Allow JIT for WKWebView's JavaScript engine in the in-app voice
+         + dashboard windows. The Swift launcher itself doesn't JIT;
+         bundled Node/V8 carries its own JIT entitlement via
+         Sutando-runtime.entitlements (child processes don't inherit
+         the parent's entitlements — they're baked in at codesign time).
+         allow-unsigned-executable-memory is intentionally NOT on the
+         outer .app — it's strictly weaker than allow-jit and triggers
+         Apple's "in-depth analysis" path on notarization. The bundled
+         binaries that actually need it have it via their own
+         entitlements file. -->
     <key>com.apple.security.cs.allow-jit</key>
-    <true/>
-
-    <!-- Allow exec of bundled binaries (node, tmux, system python3) and
-         of `claude` from /usr/local/bin or ~/.local/bin. -->
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
 </dict>
 </plist>
