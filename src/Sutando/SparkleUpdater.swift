@@ -22,19 +22,23 @@ import Sparkle
 /// throughout. When the build excludes Sparkle, the no-op stub below
 /// (compiled in `#else`) keeps the same API.
 final class SparkleUpdater: NSObject, SPUUpdaterDelegate {
-    private let controller: SPUStandardUpdaterController
+    // Implicitly-unwrapped because Sparkle 2's SPUUpdater doesn't expose
+    // `delegate` as a settable property — the delegate has to be passed
+    // at controller-construction time. So we super.init() first to make
+    // `self` valid, then construct the controller with `self` as
+    // updaterDelegate.
+    private var controller: SPUStandardUpdaterController!
 
     override init() {
+        super.init()
         // startingUpdater: true → Sparkle starts background checks.
         // updaterDelegate: self → we control feed-URL channel selection.
         // userDriverDelegate: nil → use the default UI.
         self.controller = SPUStandardUpdaterController(
             startingUpdater: true,
-            updaterDelegate: nil,  // set below after super.init
+            updaterDelegate: self,
             userDriverDelegate: nil
         )
-        super.init()
-        self.controller.updater.delegate = self
     }
 
     /// Trigger the standard update-check UI. Wired to the menu item.
