@@ -32,7 +32,10 @@ from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-RESULTS = REPO / "results"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from util_paths import state_dir  # noqa: E402
+
+RESULTS = state_dir("results")
 
 RETENTION_HOURS = int(os.environ.get("RETENTION_HOURS", "24"))
 # Case-insensitive compare — without `.lower()`, `DRY_RUN=No` or `DRY_RUN=FALSE`

@@ -20,7 +20,7 @@ import discord
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from util_paths import shared_personal_path  # noqa: E402
+from util_paths import shared_personal_path, state_dir, state_path  # noqa: E402
 
 # Load token from channels config
 TOKEN = ""
@@ -34,11 +34,11 @@ if not TOKEN:
     print("DISCORD_BOT_TOKEN not set in ~/.claude/channels/discord/.env")
     exit(1)
 
-TASKS_DIR = REPO / "tasks"
-RESULTS_DIR = REPO / "results"
-STATE_DIR = REPO / "state"
-ARCHIVE_TASKS_DIR = REPO / "tasks" / "archive"
-ARCHIVE_RESULTS_DIR = REPO / "results" / "archive"
+TASKS_DIR = state_dir("tasks")
+RESULTS_DIR = state_dir("results")
+STATE_DIR = state_dir("state")
+ARCHIVE_TASKS_DIR = TASKS_DIR / "archive"
+ARCHIVE_RESULTS_DIR = RESULTS_DIR / "archive"
 OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
 
 # Allowlist for paths that may be attached to outgoing Discord messages.
@@ -46,7 +46,7 @@ OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
 # markers; we only forward paths that resolve under one of these roots.
 # Fail-closed: a non-matching path is reported inline rather than sent.
 SEND_ALLOWED_ROOTS = (
-    str(REPO / "results"),
+    str(RESULTS_DIR),
     str(REPO / "notes"),
     # Notes canonical home (private dir) — once saved by save_note, paths
     # reference the private location. Both old and new paths allowed during
@@ -277,7 +277,7 @@ INBOX_DIR.mkdir(exist_ok=True)
 # ISO-8601 expiry; see scripts/presenter-mode.sh for the contract.
 # Matches the check in src/check-pending-questions.py — both scripts
 # share the same sentinel path + comparison logic.
-PRESENTER_SENTINEL = REPO / "state" / "presenter-mode.sentinel"
+PRESENTER_SENTINEL = STATE_DIR / "presenter-mode.sentinel"
 
 
 def presenter_mode_active():
@@ -864,7 +864,7 @@ async def poll_approved():
         await asyncio.sleep(3)
 
 
-PENDING_REPLIES_FILE = REPO / "state" / "discord-pending-replies.json"
+PENDING_REPLIES_FILE = STATE_DIR / "discord-pending-replies.json"
 
 def save_pending_replies():
     """Persist pending_replies channel IDs to disk for crash recovery."""
@@ -889,7 +889,7 @@ _recovered_replies = load_pending_replies_from_disk()
 async def poll_results():
     """Poll results/ for replies to send back to Discord."""
     global _recovered_replies
-    heartbeat_file = REPO / "state" / "discord-bridge.heartbeat"
+    heartbeat_file = STATE_DIR / "discord-bridge.heartbeat"
     last_heartbeat = 0
     while True:
         # Heartbeat is gated on `client.is_ready()` (Discord gateway WS
