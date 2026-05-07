@@ -117,17 +117,30 @@ cp "$REPO/CLAUDE.md" "$APP/Contents/Resources/repo/CLAUDE.md"
     cp "$REPO/PERSONAL_CLAUDE.md.example" "$APP/Contents/Resources/repo/PERSONAL_CLAUDE.md.example"
 [ -d "$REPO/assets" ] && cp -R "$REPO/assets" "$APP/Contents/Resources/repo/assets"
 
-if [ -d "$REPO/node_modules" ]; then
-    echo "  Staging node_modules ($(du -sh "$REPO/node_modules" | cut -f1))..."
-    # `cp -RL` would dereference symlinks — use plain -R so we keep the
-    # native binary symlinks in node_modules/.bin/. .DS_Store and editor
-    # detritus are skipped.
-    rsync -a --delete \
-        --exclude='.DS_Store' --exclude='*.log' --exclude='.cache' \
-        "$REPO/node_modules/" "$APP/Contents/Resources/repo/node_modules/"
-else
-    echo "  ⚠ node_modules not found — first launch will need 'npm install'"
+# Production-only install directly into the bundle. Skips devDeps
+# (typescript, @types/*) which a runtime never touches. Cuts ~30MB and
+# fewer Mach-O binaries for Apple's notary to scan.
+echo "  Installing production node_modules into bundle..."
+(cd "$APP/Contents/Resources/repo" && npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -3)
+
+# Strip transitive deps with no live callers. These come in via
+# bodhi-realtime-agent's optionalDependencies (or as transitive native
+# binaries) but no Sutando code imports them. Keeping them inflates the
+# bundle by ~80MB and slows notarization scans by ~5x.
+#
+# Verify with: `grep -r '@anthropic-ai\|sharp\|@img' src/ skills/ | grep -v node_modules`
+# Anything that grep finds means a caller has been added — re-evaluate.
+STAGE_NM="$APP/Contents/Resources/repo/node_modules"
+if [ -d "$STAGE_NM/@anthropic-ai" ]; then
+    echo "  Stripping @anthropic-ai/claude-agent-sdk (unused, ~68M)..."
+    rm -rf "$STAGE_NM/@anthropic-ai"
 fi
+if [ -d "$STAGE_NM/@img" ]; then
+    echo "  Stripping @img/sharp-* (unused, ~15M)..."
+    rm -rf "$STAGE_NM/@img"
+fi
+
+echo "  Final node_modules size: $(du -sh "$STAGE_NM" | cut -f1)"
 
 # 5b. Stage the bundled runtime (node + tmux + terminfo) into the .app.
 # LaunchAgentInstaller.placeholders() resolves {{NODE_BIN}} etc. to

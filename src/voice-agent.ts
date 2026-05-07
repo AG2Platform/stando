@@ -816,6 +816,13 @@ async function main() {
 		})();
 	}
 
+	// bodhi declares VoiceSession.clientConnected as `private`, but our
+	// extension hooks need to gate work on whether the WebSocket is alive.
+	// TS 6.0.3 tightened private-property enforcement; bracket-access via a
+	// typed alias keeps the intent visible without spreading `as any` casts.
+	const isClientConnected = (s: VoiceSession): boolean =>
+		(s as unknown as { clientConnected: boolean }).clientConnected;
+
 	function writeVoiceMetrics() {
 		if (metricsWritten) return;
 		metricsWritten = true;
@@ -1028,7 +1035,7 @@ async function main() {
 	// Watch for context drops (keyboard shortcut)
 	// task-bridge always writes to tasks/ for sutando-core; also inject into Gemini if active
 	startContextDropWatcher((content) => {
-		if (session.sessionManager.isActive && session.clientConnected) {
+		if (session.sessionManager.isActive && isClientConnected(session)) {
 			console.log(`${ts()} [ContextDrop] Injecting into Gemini conversation`);
 			injectText(session, `[System: The user just dropped context via keyboard shortcut. Acknowledge briefly that you received it, then call work if it requires action.]\n\n${content}`);
 		}
@@ -1039,7 +1046,7 @@ async function main() {
 	// the path. Silent acknowledgement — unlike context drop this is not an
 	// action, just situational awareness.
 	startNoteViewingWatcher((slug, content) => {
-		if (session.sessionManager.isActive && session.clientConnected) {
+		if (session.sessionManager.isActive && isClientConnected(session)) {
 			// If the note body contains words that match the GOODBYE RULE
 			// trigger list in system instructions, inject METADATA ONLY —
 			// NOT the body. Guard-marker wrappers are not strong enough:
@@ -1075,7 +1082,7 @@ async function main() {
 
 	startResultWatcher((result) => {
 		console.log(`${ts()} [TaskBridge] Delivering result to user`);
-		if (session.sessionManager.isActive && session.clientConnected) {
+		if (session.sessionManager.isActive && isClientConnected(session)) {
 			// Voice is live — let Gemini speak the result conversationally.
 			// Wrap the result in explicit guard language so Gemini doesn't
 			// match trigger words inside the result text (goodbye, stop,
@@ -1100,7 +1107,7 @@ async function main() {
 				console.log(`${ts()} [CartesiaTTS] Audio generated: ${audioPath}`);
 			}).catch(err => console.error(`${ts()} [CartesiaTTS] ${err.message}`));
 		}
-	}, () => session.clientConnected);
+	}, () => isClientConnected(session));
 
 	let lastLoggedIndex = 0;
 	const liveTranscriptPath = '/tmp/sutando-live-transcript-voice.txt';
@@ -1225,7 +1232,7 @@ async function main() {
 	// Watch for phone call results and inject into voice conversation
 	const callResultFile = join(CALL_RESULTS_DIR, 'latest-result.json');
 	setInterval(() => {
-		if (!session.clientConnected || !existsSync(callResultFile)) return;
+		if (!isClientConnected(session) || !existsSync(callResultFile)) return;
 		try {
 			const data = JSON.parse(readFileSync(callResultFile, 'utf-8'));
 			unlinkSync(callResultFile);
@@ -1274,7 +1281,7 @@ async function main() {
 	let lastLoggedStatus = '';
 	setInterval(() => {
 		const state = session.sessionManager.state ?? 'unknown';
-		const clientConnected = session.clientConnected;
+		const clientConnected = isClientConnected(session);
 		// Log only on state changes or non-ACTIVE states — avoid 2,880 lines/day of
 		// "state=ACTIVE client=true" during healthy operation.
 		const status = `state=${state} client=${clientConnected}`;
