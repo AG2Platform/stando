@@ -7,6 +7,24 @@ set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO"
 
+# Per-machine runtime state. Falls back to REPO so dev installs keep working
+# without setting SUTANDO_HOME. The .app bundle sets it to
+# ~/Library/Application Support/Sutando.
+STATE_ROOT="${SUTANDO_HOME:-$REPO}"
+LOGS_DIR="$STATE_ROOT/logs"
+mkdir -p "$LOGS_DIR"
+
+# Layered .env: load $SUTANDO_HOME/.env when set, so its values take
+# precedence over the repo .env. Python services inherit these via the
+# child process environment; Node services additionally re-load via
+# src/load-env.ts at import time.
+if [ -n "${SUTANDO_HOME:-}" ] && [ -f "$STATE_ROOT/.env" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$STATE_ROOT/.env"
+  set +a
+fi
+
 # Auto-bootstrap: create-if-missing files and dirs that the agent + skills
 # expect to exist (logs, state, tasks, results, notes, contextual-chips.json,
 # pending-questions.md, build_log.md, crons.json, …). Idempotent — safe to
@@ -44,19 +62,6 @@ if ! command -v node > /dev/null 2>&1; then echo "  ✗ node not found — brew 
 if ! command -v npx > /dev/null 2>&1; then echo "  ✗ npx not found — comes with node"; missing=1; fi
 if ! command -v python3 > /dev/null 2>&1; then echo "  ✗ python3 not found"; missing=1; fi
 if ! command -v claude > /dev/null 2>&1; then echo "  ✗ claude not found — see https://docs.anthropic.com/en/docs/claude-code/getting-started"; missing=1; fi
-if ! command -v fswatch > /dev/null 2>&1; then
-  if command -v brew > /dev/null 2>&1; then
-    echo "  ⚠ fswatch not found — installing via Homebrew..."
-    brew install fswatch
-    if command -v fswatch > /dev/null 2>&1; then
-      echo "  ✓ fswatch installed"
-    else
-      echo "  ✗ fswatch installation failed"; missing=1
-    fi
-  else
-    echo "  ✗ fswatch not found — brew install fswatch"; missing=1
-  fi
-fi
 if [ ! -f .env ]; then echo "  ✗ .env not found — cp .env.example .env and add your keys"; missing=1; fi
 # Load .env and check required keys
 if [ -f .env ]; then
@@ -97,8 +102,8 @@ echo ""
 # Install Claude Code skills (runs every startup, idempotent)
 bash "$REPO/skills/install.sh" 2>/dev/null || true
 
-# Create tasks/ and results/ directories
-mkdir -p tasks results data
+# Create tasks/ and results/ directories under SUTANDO_HOME (or repo fallback)
+mkdir -p "$STATE_ROOT/tasks" "$STATE_ROOT/results" "$STATE_ROOT/data"
 
 # Archive stale results/*.txt (>24h) BEFORE any service starts iterating
 # results/. Prevents the 2026-04-15 DM-flood class of incidents where a
@@ -126,7 +131,7 @@ fi
 # 1. Voice agent (Gemini Live on port 9900)
 if ! lsof -i :9900 > /dev/null 2>&1; then
   echo "  Starting voice agent (port 9900)..."
-  npx tsx src/voice-agent.ts > logs/voice-agent.log 2>&1 &
+  npx tsx src/voice-agent.ts > "$LOGS_DIR/voice-agent.log" 2>&1 &
   echo "  ✓ voice agent"
 else
   echo "  ✓ voice agent (already running)"
@@ -135,7 +140,7 @@ fi
 # 2. Web client (port 8080)
 if ! lsof -i :8080 > /dev/null 2>&1; then
   echo "  Starting web client (port 8080)..."
-  npx tsx src/web-client.ts > logs/web-client.log 2>&1 &
+  npx tsx src/web-client.ts > "$LOGS_DIR/web-client.log" 2>&1 &
   echo "  ✓ web client"
 else
   echo "  ✓ web client (already running)"
@@ -144,7 +149,7 @@ fi
 # 3. Dashboard (port 7844)
 if ! lsof -i :7844 > /dev/null 2>&1; then
   echo "  Starting dashboard (port 7844)..."
-  python3 src/dashboard.py > logs/dashboard.log 2>&1 &
+  python3 src/dashboard.py > "$LOGS_DIR/dashboard.log" 2>&1 &
   echo "  ✓ dashboard"
 else
   echo "  ✓ dashboard (already running)"
@@ -153,7 +158,7 @@ fi
 # 4. Agent API (port 7843)
 if ! lsof -i :7843 > /dev/null 2>&1; then
   echo "  Starting agent API (port 7843)..."
-  python3 src/agent-api.py > logs/agent-api.log 2>&1 &
+  python3 src/agent-api.py > "$LOGS_DIR/agent-api.log" 2>&1 &
   echo "  ✓ agent API"
 else
   echo "  ✓ agent API (already running)"
@@ -162,21 +167,31 @@ fi
 # 5. Screen capture server (port 7845)
 if ! lsof -i :7845 > /dev/null 2>&1; then
   echo "  Starting screen capture (port 7845)..."
-  python3 src/screen-capture-server.py > logs/screen-capture.log 2>&1 &
+  python3 src/screen-capture-server.py > "$LOGS_DIR/screen-capture.log" 2>&1 &
   echo "  ✓ screen capture"
 else
   echo "  ✓ screen capture (already running)"
 fi
 
 # 5b. Sutando context drop app (global hotkey ⌃C)
-SUT_SRC="$REPO/src/Sutando/main.swift"
-SUT_BIN="$REPO/src/Sutando/Sutando"
+SUT_SRC_DIR="$REPO/src/Sutando"
+SUT_BIN="$SUT_SRC_DIR/Sutando"
+SUT_SRC_FILES=("$SUT_SRC_DIR/main.swift" "$SUT_SRC_DIR/LaunchAgentInstaller.swift" "$SUT_SRC_DIR/SparkleUpdater.swift" "$SUT_SRC_DIR/CloudAuth.swift" "$SUT_SRC_DIR/EnvFile.swift" "$SUT_SRC_DIR/Permissions.swift" "$SUT_SRC_DIR/SettingsWindow.swift")
 
-# Rebuild if source is newer than binary, or binary is missing.
+# Rebuild if any source file is newer than binary, or binary is missing.
+sut_needs_build=0
+if [ ! -f "$SUT_BIN" ]; then
+  sut_needs_build=1
+else
+  for f in "${SUT_SRC_FILES[@]}"; do
+    if [ -f "$f" ] && [ "$f" -nt "$SUT_BIN" ]; then sut_needs_build=1; break; fi
+  done
+fi
+
 # Kill any running instance so the fresh binary can take over.
-if [ -f "$SUT_SRC" ] && { [ ! -f "$SUT_BIN" ] || [ "$SUT_SRC" -nt "$SUT_BIN" ]; }; then
+if [ "$sut_needs_build" = "1" ]; then
   echo "  Compiling Sutando (source newer than binary)..."
-  if (cd "$REPO/src/Sutando" && swiftc -O -o Sutando main.swift -framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation 2>/dev/null); then
+  if (cd "$SUT_SRC_DIR" && swiftc -O -o Sutando "${SUT_SRC_FILES[@]##*/}" -framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation 2>/dev/null); then
     echo "  ✓ Sutando compiled"
     if pgrep -f "src/Sutando/Sutando" > /dev/null 2>&1; then
       pkill -f "src/Sutando/Sutando" 2>/dev/null || true
@@ -213,7 +228,7 @@ if [ "${SKIP_TELEGRAM:-}" = "1" ]; then
 elif [ -f "$HOME/.claude/channels/telegram/.env" ] && grep -q "TELEGRAM_BOT_TOKEN=" "$HOME/.claude/channels/telegram/.env" 2>/dev/null; then
   if ! pgrep -f "telegram-bridge" > /dev/null 2>&1; then
     echo "  Starting Telegram bridge..."
-    python3 src/telegram-bridge.py > logs/telegram-bridge.log 2>&1 &
+    python3 src/telegram-bridge.py > "$LOGS_DIR/telegram-bridge.log" 2>&1 &
     echo "  ✓ telegram bridge"
   else
     echo "  ✓ telegram bridge (already running)"
@@ -228,7 +243,7 @@ if [ -f "$HOME/.claude/channels/discord/.env" ] && grep -q "DISCORD_BOT_TOKEN=" 
     echo "  ~ discord bridge (needs: pip3 install discord.py)"
   elif ! pgrep -f "discord-bridge" > /dev/null 2>&1; then
     echo "  Starting Discord bridge..."
-    python3 src/discord-bridge.py > logs/discord-bridge.log 2>&1 &
+    python3 src/discord-bridge.py > "$LOGS_DIR/discord-bridge.log" 2>&1 &
     echo "  ✓ discord bridge"
   else
     echo "  ✓ discord bridge (already running)"
@@ -303,7 +318,7 @@ for port_name in $VERIFY_PORTS; do
   if lsof -i :"$port" > /dev/null 2>&1; then
     echo "  ✓ $name (port $port)"
   else
-    echo "  ✗ $name (port $port) — check logs/${name}.log"
+    echo "  ✗ $name (port $port) — check $LOGS_DIR/${name}.log"
   fi
 done
 echo ""

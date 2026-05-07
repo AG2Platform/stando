@@ -244,8 +244,19 @@ def main():
 
     client = genai.Client(api_key=api_key)
 
+    # Cloud telemetry: import lazily so missing src/cloud_metrics.py
+    # doesn't break this script for users who haven't pulled main.
+    def _emit_cloud_metric(kind: str, units: float, model: str | None) -> None:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "src"))
+            from cloud_metrics import record_event
+            record_event(kind, units=units, metadata={"model": model} if model else None)
+        except Exception:  # noqa: BLE001 — telemetry must never break the call
+            pass
+
     if args.video:
         generate_video(client, args)
+        _emit_cloud_metric("video.gen", units=1, model=args.model)
     else:
         try:
             from PIL import Image
@@ -253,6 +264,7 @@ def main():
             print("Error: Pillow not installed. Run: pip3 install Pillow", file=sys.stderr)
             sys.exit(1)
         generate_image(client, args)
+        _emit_cloud_metric("image.gen", units=1, model=args.model)
 
 
 if __name__ == "__main__":

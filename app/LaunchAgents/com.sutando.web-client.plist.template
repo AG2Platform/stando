@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutando.web-client</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{NPX_BIN}}</string>
+        <string>tsx</string>
+        <string>{{REPO_DIR}}/src/web-client.ts</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{REPO_DIR}}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SUTANDO_HOME</key>
+        <string>{{SUTANDO_HOME}}</string>
+        <key>PATH</key>
+        <string>{{NODE_BIN_DIR}}:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/web-client.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/web-client.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+</dict>
+</plist>

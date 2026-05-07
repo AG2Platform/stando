@@ -11,6 +11,10 @@
 set -e
 
 REPO="${SUTANDO_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+# Per-machine runtime state. Falls back to REPO so dev installs keep working
+# without setting SUTANDO_HOME. The .app bundle sets it to
+# ~/Library/Application Support/Sutando.
+STATE_ROOT="${SUTANDO_HOME:-$REPO}"
 MODE="${1:-full}"
 
 case "$MODE" in
@@ -23,7 +27,27 @@ log() {
   if [ "$MODE" != "--auto" ]; then echo "$@"; fi
 }
 
-create_file_if_missing() {
+create_state_file_if_missing() {
+  local path="$1"; local body="$2"
+  if [ ! -f "$STATE_ROOT/$path" ]; then
+    mkdir -p "$(dirname "$STATE_ROOT/$path")"
+    printf '%s' "$body" > "$STATE_ROOT/$path"
+    echo "  ✓ created $path"
+  fi
+}
+
+create_state_dir_if_missing() {
+  local path="$1"
+  if [ ! -d "$STATE_ROOT/$path" ]; then
+    mkdir -p "$STATE_ROOT/$path"
+    echo "  ✓ created $path/"
+  fi
+}
+
+create_repo_file_if_missing() {
+  # Cross-fleet-shared files (synced via SUTANDO_PRIVATE_DIR when set) keep
+  # their fallback location in the repo so the agent boots cleanly even
+  # without a private sync repo configured.
   local path="$1"; local body="$2"
   if [ ! -f "$REPO/$path" ]; then
     mkdir -p "$(dirname "$REPO/$path")"
@@ -32,7 +56,7 @@ create_file_if_missing() {
   fi
 }
 
-create_dir_if_missing() {
+create_repo_dir_if_missing() {
   local path="$1"
   if [ ! -d "$REPO/$path" ]; then
     mkdir -p "$REPO/$path"
@@ -52,39 +76,42 @@ copy_if_missing() {
 tier1() {
   log "Tier 1 — auto-bootstrap..."
 
-  # Directories
-  create_dir_if_missing "logs"
-  create_dir_if_missing "state"
-  create_dir_if_missing "tasks"
-  create_dir_if_missing "results"
-  create_dir_if_missing "results/archive"
-  create_dir_if_missing "results/calls"
-  create_dir_if_missing "notes"
-  create_dir_if_missing "data"
+  # Per-machine state directories (under SUTANDO_HOME if set, else repo)
+  create_state_dir_if_missing "logs"
+  create_state_dir_if_missing "state"
+  create_state_dir_if_missing "tasks"
+  create_state_dir_if_missing "results"
+  create_state_dir_if_missing "results/archive"
+  create_state_dir_if_missing "results/calls"
+  create_state_dir_if_missing "data"
 
-  # Files — placeholders only, content added by the agent later
-  create_file_if_missing "build_log.md" \
+  # Cross-fleet-shared dir (notes are synced via SUTANDO_PRIVATE_DIR when set)
+  create_repo_dir_if_missing "notes"
+
+  # Per-machine state files
+  create_state_file_if_missing "contextual-chips.json" \
+    "{\"chips\":[],\"ts\":$(date +%s)}
+"
+
+  create_state_file_if_missing "core-status.json" \
+    "{\"status\":\"idle\",\"ts\":$(date +%s)}
+"
+
+  create_state_file_if_missing "voice-state.json" \
+    "{\"connected\":false,\"ts\":$(date +%s)}
+"
+
+  # Cross-fleet-shared files — placeholders only, content added by the agent
+  create_repo_file_if_missing "build_log.md" \
     "# Sutando build log
 
 Notes on what's built, what's next, and known issues. The proactive loop reads + updates this each pass.
 "
 
-  create_file_if_missing "pending-questions.md" \
+  create_repo_file_if_missing "pending-questions.md" \
     "# Pending Questions
 
 _(none open)_
-"
-
-  create_file_if_missing "contextual-chips.json" \
-    "{\"chips\":[],\"ts\":$(date +%s)}
-"
-
-  create_file_if_missing "core-status.json" \
-    "{\"status\":\"idle\",\"ts\":$(date +%s)}
-"
-
-  create_file_if_missing "voice-state.json" \
-    "{\"connected\":false,\"ts\":$(date +%s)}
 "
 
   # crons.json — copy from the example if present
@@ -133,7 +160,7 @@ preflight() {
   fi
 
   # CLI tools
-  for tool in node npx python3 fswatch claude gh; do
+  for tool in node npx python3 claude gh; do
     if ! command -v "$tool" > /dev/null 2>&1; then
       cli_missing+=("$tool")
     fi

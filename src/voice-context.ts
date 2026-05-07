@@ -6,6 +6,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { sharedPersonalPath, statePath } from './util_paths.js';
 
 function defaultMemoryDir(): string {
     const repo = resolve(join(import.meta.dirname, '..'));
@@ -40,7 +41,7 @@ export function buildVoiceAgentContext(): string {
 	}
 
 	// Read build log summary
-	const buildLog = join(REPO_DIR, 'build_log.md');
+	const buildLog = sharedPersonalPath('build_log.md', REPO_DIR);
 	if (existsSync(buildLog)) {
 		try {
 			const content = readFileSync(buildLog, 'utf-8');
@@ -64,7 +65,7 @@ export function buildVoiceAgentContext(): string {
 	}
 
 	// Read recent phone call summaries (last 3 calls)
-	const callsFile = join(REPO_DIR, 'results', 'calls', 'calls.jsonl');
+	const callsFile = statePath('results/calls/calls.jsonl');
 	if (existsSync(callsFile)) {
 		try {
 			const callLines = readFileSync(callsFile, 'utf-8').trim().split('\n').filter(Boolean);

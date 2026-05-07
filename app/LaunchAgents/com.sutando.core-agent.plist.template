@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutando.core-agent</string>
+
+    <!-- Wrapper script that supervises a tmux session running Claude Code.
+         Lives at src/run-core-agent.sh so the bundled repo includes it
+         (build-app.sh copies the whole src/ tree). Prerequisites: tmux
+         and claude on PATH; claude already authenticated. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>{{REPO_DIR}}/src/run-core-agent.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{SUTANDO_HOME}}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SUTANDO_HOME</key>
+        <string>{{SUTANDO_HOME}}</string>
+        <key>ANTHROPIC_BASE_URL</key>
+        <string>http://localhost:7846</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/core-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/core-agent.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Throttle: claude is heavyweight and authentication failures
+         shouldn't hot-loop us. Wrapper has its own 60s sleeps for hard
+         failures (missing tmux/claude); this guards against rare crashes. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+</dict>
+</plist>

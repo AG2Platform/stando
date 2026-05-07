@@ -2,8 +2,9 @@
  * Voice → Claude Code session bridge.
  *
  * work writes task file directly (inline, no subagent).
- * The main Claude Code session picks it up via fswatch, executes with
- * full permissions, and writes result file.
+ * The main Claude Code session picks it up via watch-tasks-stream.mjs
+ * (fs.watch on the tasks/ dir), executes with full permissions, and
+ * writes result file.
  * The voice agent's node process watches for result file and
  * injects the result into the Gemini conversation.
  */
@@ -12,12 +13,13 @@ import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, readdir
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
+import { stateDir, statePath } from './util_paths.js';
 
 const REPO_DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
-const TASK_DIR = join(REPO_DIR, 'tasks');
-const RESULT_DIR = join(REPO_DIR, 'results');
-const STATE_DIR = join(REPO_DIR, 'state');
-const CONVERSATION_LOG = join(REPO_DIR, 'conversation.log');
+const TASK_DIR = stateDir('tasks');
+const RESULT_DIR = stateDir('results');
+const STATE_DIR = stateDir('state');
+const CONVERSATION_LOG = statePath('conversation.log');
 const OWNER_ACTIVITY_FILE = join(STATE_DIR, 'last-owner-activity.json');
 
 /** Record that the owner was active on <channel> right now. Atomic write
@@ -48,17 +50,14 @@ function archiveFile(srcPath: string, kind: 'tasks' | 'results', taskId: string)
 	try {
 		if (!existsSync(srcPath)) return;
 		const ym = new Date().toISOString().slice(0, 7); // YYYY-MM
-		const destDir = join(REPO_DIR, kind, 'archive', ym);
+		const baseDir = kind === 'tasks' ? TASK_DIR : RESULT_DIR;
+		const destDir = join(baseDir, 'archive', ym);
 		mkdirSync(destDir, { recursive: true });
 		renameSync(srcPath, join(destDir, `${taskId}.txt`));
 	} catch (err) {
 		try { unlinkSync(srcPath); } catch { /* ignore */ }
 	}
 }
-
-// Ensure dirs exist
-mkdirSync(TASK_DIR, { recursive: true });
-mkdirSync(RESULT_DIR, { recursive: true });
 
 function ts(): string { return new Date().toISOString().slice(11, 23); }
 
@@ -306,7 +305,7 @@ export function getRecentConversation(count = 10): string {
 	} catch { return ''; }
 }
 
-const CONTEXT_DROP_FILE = join(REPO_DIR, 'context-drop.txt');
+const CONTEXT_DROP_FILE = statePath('context-drop.txt');
 const NOTE_VIEWING_FILE = '/tmp/sutando-note-viewing.json';
 
 /**

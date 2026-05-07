@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutando.voice-agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{NPX_BIN}}</string>
+        <string>tsx</string>
+        <string>{{REPO_DIR}}/src/voice-agent.ts</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{REPO_DIR}}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SUTANDO_HOME</key>
+        <string>{{SUTANDO_HOME}}</string>
+        <key>ANTHROPIC_BASE_URL</key>
+        <string>http://localhost:7846</string>
+        <key>PATH</key>
+        <string>{{NODE_BIN_DIR}}:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/voice-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/voice-agent.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+</dict>
+</plist>

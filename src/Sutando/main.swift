@@ -13,21 +13,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var hotKeyRefs: [EventHotKeyRef?] = []  // one entry per registered hotkey
     var hotKeyActions: [UInt32: String] = [:]  // hotkey id → action name
     var lastDropTime: Date = .distantPast
+    /// Read-only repo root. Resolution order:
+    ///   1. `.app` bundle: `Bundle.main.resourcePath/repo` (when bundled by
+    ///      `app/build-app.sh` — the staged `src/` + `skills/` tree).
+    ///   2. Raw-binary dev workflow: walk up from
+    ///      `ProcessInfo.processInfo.arguments[0]` looking for `CLAUDE.md`.
+    ///   3. Last-resort fallback: 3 levels up from the binary
+    ///      (matches the original behavior for raw-binary `src/Sutando/Sutando`).
     let workspace: String = {
-        // Derive from binary location → repo root
-        // Raw binary: src/Sutando/Sutando (3 levels up)
-        // .app bundle: src/Sutando/Sutando.app/Contents/MacOS/Sutando (5 levels up)
+        // 1. Bundled .app — repo lives under Resources/repo
+        if let resourcePath = Bundle.main.resourcePath {
+            let bundledRepo = resourcePath + "/repo"
+            if FileManager.default.fileExists(atPath: bundledRepo + "/CLAUDE.md") {
+                return bundledRepo
+            }
+        }
+        // 2. Raw-binary dev: walk up looking for CLAUDE.md
         var url = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).resolvingSymlinksInPath()
-        // Walk up until we find CLAUDE.md (repo root marker)
         for _ in 0..<8 {
             url = url.deletingLastPathComponent()
             if FileManager.default.fileExists(atPath: url.appendingPathComponent("CLAUDE.md").path) {
                 return url.path
             }
         }
-        // Fallback: 3 levels up from binary
+        // 3. Last-resort fallback: 3 levels up from binary
         let fallback = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).resolvingSymlinksInPath()
         return fallback.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path
+    }()
+
+    /// Per-machine runtime state root. Reads `$SUTANDO_HOME` from the
+    /// environment if set (the .app bundle exports it pointing at
+    /// `~/Library/Application Support/Sutando`); otherwise falls back to
+    /// `workspace` so the raw-binary dev workflow continues to write
+    /// state into the repo cwd. Mirrors `statePath()` in
+    /// `src/util_paths.ts` and `state_path()` in `src/util_paths.py`.
+    lazy var stateRoot: String = {
+        if let home = ProcessInfo.processInfo.environment["SUTANDO_HOME"], !home.isEmpty {
+            return (home as NSString).expandingTildeInPath
+        }
+        return workspace
     }()
 
     var resultWatchSource: DispatchSourceFileSystemObject?
@@ -53,6 +77,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     weak var modeMeetingMenuItem: NSMenuItem?
     weak var modePresenterMenuItem: NSMenuItem?
 
+    /// Sparkle auto-updater. Real implementation when built with
+    /// `ENABLE_SPARKLE=1` (links Sparkle.framework); no-op stub
+    /// otherwise. See src/Sutando/SparkleUpdater.swift.
+    let sparkle = SparkleUpdater()
+
+    /// Settings window. Created lazily on first open + retained so each
+    /// "Settings…" menu click brings up the same window with the same
+    /// in-flight edits.
+    var settingsWindow: SettingsWindowController?
+
+    /// In-app WKWebView windows hosting the voice client (localhost:8080)
+    /// and the dashboard (localhost:7844). Replaces the old AppleScript
+    /// path that opened these in Chrome — see WebWindow.swift for why.
+    var voiceWindow: WebWindowController?
+    var dashboardWindow: WebWindowController?
+
     /// Fixed tmux socket path for the sutando-core session. The shell
     /// (via startup.sh -S flag) and the app (launched by macOS with a
     /// different TMPDIR due to sandboxing) must target the same socket
@@ -67,11 +107,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // plagued 2026-04-21 morning (3 instances accumulated + user saw
         // duplicate icons). Matches path via pgrep $-anchored pattern — same
         // pattern used by health-check.py per feedback_pkill_then_open_race.
+        // Pattern covers both raw-binary (`src/Sutando/Sutando`) and bundled
+        // (`Sutando.app/Contents/MacOS/Sutando`) layouts.
         let myPid = ProcessInfo.processInfo.processIdentifier
         let myPath = ProcessInfo.processInfo.arguments[0]
         let pgrep = Process()
         pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-        pgrep.arguments = ["-f", "Sutando/Sutando$"]
+        pgrep.arguments = ["-f", "(Sutando|MacOS)/Sutando$"]
         let pipe = Pipe()
         pgrep.standardOutput = pipe
         pgrep.standardError = FileHandle.nullDevice
@@ -92,16 +134,147 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         DispatchQueue.main.async { [self] in
+            setupMainMenu()
             setupMenuBar()
             registerHotKey()
             watchResults()
+            registerURLSchemeHandler()
+            startCloudHeartbeat()
             logToFile("App started, workspace=\(workspace)")
+            maybeRunFirstLaunchFlow()
         }
+    }
+
+    /// LSUIElement apps don't get a main menu by default, which means ⌘V
+    /// doesn't route to text fields in our Settings window (the Cut /
+    /// Copy / Paste / Select-All actions live on the standard Edit menu
+    /// and reach NSTextField via the responder chain). Provide a minimal
+    /// main menu so paste works when a Settings field is focused.
+    func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        // Application menu (first menu — title is the app name).
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu(title: "Sutando")
+        appMenu.addItem(NSMenuItem(title: "About Sutando", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""))
+        appMenu.addItem(.separator())
+        appMenu.addItem(NSMenuItem(title: "Hide Sutando", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h"))
+        appMenu.addItem(.separator())
+        appMenu.addItem(NSMenuItem(title: "Quit Sutando", action: #selector(quit), keyEquivalent: "q"))
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        // Edit menu — the reason this whole function exists.
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redoItem = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redoItem)
+        editMenu.addItem(.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        // Window menu — provides standard window operations.
+        let windowMenuItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        windowMenu.addItem(NSMenuItem(title: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        windowMenuItem.submenu = windowMenu
+        mainMenu.addItem(windowMenuItem)
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    /// On first launch (no $SUTANDO_HOME/.firstrun-complete + no Gemini key),
+    /// open Settings automatically so the user knows where to go. Idempotent —
+    /// once they save with a key, the marker file blocks future auto-opens.
+    func maybeRunFirstLaunchFlow() {
+        guard SettingsWindowController.needsFirstLaunchSetup else { return }
+        // Tiny delay so the menu bar icon is up before the window appears.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
+            openSettings()
+            logToFile("First-launch: opened Settings (no Gemini key + no marker)")
+        }
+    }
+
+    // MARK: - Cloud auth: sutando:// URL scheme + heartbeat
+
+    /// Register the `sutando://` URL handler. macOS routes `sutando://auth?…`
+    /// callbacks from the cli-login flow here; CloudAuth.handle(url:) does
+    /// the validation + token persistence.
+    func registerURLSchemeHandler() {
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleAppleEventURL(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL)
+        )
+    }
+
+    @objc func handleAppleEventURL(_ event: NSAppleEventDescriptor, withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let urlString = event.paramDescriptor(forKeyword: AEKeyword(keyDirectObject))?.stringValue,
+              let url = URL(string: urlString) else { return }
+        let handled = CloudAuth.shared.handle(url: url)
+        if handled {
+            logToFile("CloudAuth: handled \(url.scheme ?? "?")://\(url.host ?? "?")\(url.path)")
+            DispatchQueue.main.async { [self] in
+                updateCloudMenuItems()
+                if CloudAuth.shared.isSignedIn {
+                    notify("Sutando", "Signed in to cloud account.")
+                }
+            }
+        }
+    }
+
+    /// Heartbeat to /api/devices on launch, then every 5 minutes thereafter.
+    /// No-op when signed out.
+    func startCloudHeartbeat() {
+        DispatchQueue.global(qos: .utility).async {
+            CloudAuth.shared.heartbeat()
+        }
+        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in
+            DispatchQueue.global(qos: .utility).async {
+                CloudAuth.shared.heartbeat()
+            }
+        }
+    }
+
+    weak var signInMenuItem: NSMenuItem?
+    weak var signOutMenuItem: NSMenuItem?
+
+    func updateCloudMenuItems() {
+        let signedIn = CloudAuth.shared.isSignedIn
+        signInMenuItem?.isHidden = signedIn
+        signOutMenuItem?.isHidden = !signedIn
+    }
+
+    @objc func cloudSignIn() {
+        let challenge = CloudAuth.shared.startSignIn()
+        logToFile("CloudAuth: started sign-in flow, challenge=\(challenge.prefix(8))…")
+    }
+
+    @objc func cloudSignOut() {
+        CloudAuth.shared.signOut()
+        updateCloudMenuItems()
+        notify("Sutando", "Signed out of cloud account.")
+    }
+
+    @objc func openSettings() {
+        if settingsWindow == nil {
+            settingsWindow = SettingsWindowController(appDelegate: self)
+        }
+        settingsWindow?.showAndFocus()
     }
 
     // MARK: - Result notifications (when voice is not connected)
     func watchResults() {
-        let resultsPath = workspace + "/results"
+        let resultsPath = stateRoot + "/results"
         let fd = open(resultsPath, O_EVTONLY)
         guard fd >= 0 else { return }
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: .write, queue: DispatchQueue.global(qos: .utility))
@@ -113,7 +286,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func countResults() -> Int {
-        let files = (try? FileManager.default.contentsOfDirectory(atPath: workspace + "/results")
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: stateRoot + "/results")
             .filter { $0.hasPrefix("task-") && $0.hasSuffix(".txt") }) ?? []
         return files.count
     }
@@ -124,7 +297,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         lastResultCount = newCount
         // Only notify if voice is NOT connected
         if !isVoiceConnected() {
-            let resultsPath = workspace + "/results"
+            let resultsPath = stateRoot + "/results"
             if let files = try? FileManager.default.contentsOfDirectory(atPath: resultsPath)
                 .filter({ $0.hasPrefix("task-") && $0.hasSuffix(".txt") })
                 .sorted(by: >),
@@ -212,6 +385,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Restart All Services", action: #selector(restartServices), keyEquivalent: "r"))
         menu.addItem(NSMenuItem(title: "Stop All Services", action: #selector(stopServices), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Restart Sutando App", action: #selector(restartSelf), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
+        // Settings — primary entry point for API keys, cloud account,
+        // permissions, services. Cmd+, follows macOS convention.
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        menu.addItem(settingsItem)
+        menu.addItem(NSMenuItem.separator())
+        // Cloud account — also accessible from inside Settings; surfaced in
+        // the menu for fast sign-in/out without opening the window.
+        let signInItem = NSMenuItem(title: "Sign in to Sutando…", action: #selector(cloudSignIn), keyEquivalent: "")
+        let signOutItem = NSMenuItem(title: "Sign out of Sutando", action: #selector(cloudSignOut), keyEquivalent: "")
+        menu.addItem(signInItem)
+        menu.addItem(signOutItem)
+        signInMenuItem = signInItem
+        signOutMenuItem = signOutItem
+        // Hide whichever item doesn't match the current state.
+        DispatchQueue.main.async { [self] in updateCloudMenuItems() }
+        menu.addItem(NSMenuItem.separator())
+        // LaunchAgent install/uninstall (also accessible from inside Settings).
+        let installItem = NSMenuItem(title: "Install Background Services…", action: #selector(installLaunchAgents), keyEquivalent: "")
+        let uninstallItem = NSMenuItem(title: "Uninstall Background Services", action: #selector(uninstallLaunchAgents), keyEquivalent: "")
+        menu.addItem(installItem)
+        menu.addItem(uninstallItem)
+        menu.addItem(NSMenuItem.separator())
+        // Sparkle auto-update.
+        menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""))
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
 
@@ -246,8 +445,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // poll (see voice-agent.ts applyModeRequest). Nil-safe if workspace
     // derivation failed — the app just logs and the user retries.
     func requestVoiceMode(_ mode: String) {
-        let path = workspace + "/state/voice-mode.request"
-        let dir = workspace + "/state"
+        let path = stateRoot + "/state/voice-mode.request"
+        let dir = stateRoot + "/state"
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         do {
             try mode.write(toFile: path, atomically: true, encoding: .utf8)
@@ -325,7 +524,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func pollVoiceMode() {
         // Read state/voice-mode.txt sentinel written by voice-agent.ts.
         // Falls back to "active" if file missing (first boot / voice-agent down).
-        let sentinel = workspace + "/state/voice-mode.txt"
+        let sentinel = stateRoot + "/state/voice-mode.txt"
         var newMode = "active"
         if let contents = try? String(contentsOfFile: sentinel, encoding: .utf8) {
             let trimmed = contents.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -999,8 +1198,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         lastDropTime = now
 
         let timestamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withFullDate, .withTime, .withSpaceBetweenDateAndTime, .withColonSeparatorInTime])
-        let logFile = workspace + "/logs/context-drop.log"
-        let tasksDir = workspace + "/tasks"
+        let logFile = stateRoot + "/logs/context-drop.log"
+        let tasksDir = stateRoot + "/tasks"
         let epoch = Int(Date().timeIntervalSince1970 * 1000)
         let dropImage = tasksDir + "/image-\(epoch).png"
 
@@ -1114,8 +1313,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         lastDropTime = now
 
         let timestamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withFullDate, .withTime, .withSpaceBetweenDateAndTime, .withColonSeparatorInTime])
-        let logFile = workspace + "/logs/context-drop.log"
-        let tasksDir = workspace + "/tasks"
+        let logFile = stateRoot + "/logs/context-drop.log"
+        let tasksDir = stateRoot + "/tasks"
 
         // Call screen-capture-server to capture the screen and get the file path back.
         // Server runs at localhost:7845, default capture is the main display.
@@ -1169,9 +1368,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let task = URLSession.shared.dataTask(with: url) { data, response, error in
             if let error = error {
                 NSLog("Sutando: \(endpoint) failed: \(error.localizedDescription)")
-                // Fallback: open the web UI so user can toggle manually
+                // Fallback: open the in-app voice window so the user can
+                // toggle manually + see why the service isn't responding.
                 DispatchQueue.main.async {
-                    self.notify("Sutando", "Web client not reachable — open localhost:8080")
+                    self.notify("Sutando", "Voice service not reachable — opening voice window")
+                    self.openWebUI()
                 }
                 return
             }
@@ -1185,41 +1386,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openWebUI() {
         NSLog("Sutando: openWebUI called")
-        // Switch to existing localhost:8080 tab or open new one
-        let script = NSAppleScript(source: """
-        tell application "Google Chrome"
-            activate
-            set found to false
-            repeat with w in windows
-                set tabList to tabs of w
-                repeat with i from 1 to count of tabList
-                    if URL of item i of tabList contains "localhost:8080" then
-                        set active tab index of w to i
-                        set index of w to 1
-                        set found to true
-                        exit repeat
-                    end if
-                end repeat
-                if found then exit repeat
-            end repeat
-            if not found then
-                open location "http://localhost:8080"
-            end if
-        end tell
-        """)
-        var error: NSDictionary?
-        script?.executeAndReturnError(&error)
-        if let error = error {
-            let msg = error[NSAppleScript.errorMessage] as? String ?? "unknown error"
-            if msg.contains("not allowed") || msg.contains("permission") {
-                notify("Sutando", "Open Web UI needs: System Settings → Privacy & Security → Automation → allow Sutando to control Chrome")
-            } else {
-                // Fallback: just open the URL directly
-                if let url = URL(string: "http://localhost:8080") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
+        if voiceWindow == nil {
+            let url = URL(string: "http://localhost:8080")!
+            voiceWindow = WebWindowController(
+                title: "Sutando — Voice",
+                url: url,
+                allowMedia: true,
+                autosaveName: "SutandoVoiceWindow",
+                contentSize: NSSize(width: 1100, height: 720)
+            )
         }
+        voiceWindow?.showAndFocus()
     }
 
     @objc func openCore() {
@@ -1240,28 +1417,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func openDashboard() {
-        let script = NSAppleScript(source: """
-        tell application "Google Chrome"
-            activate
-            set found to false
-            repeat with w in windows
-                set tabList to tabs of w
-                repeat with i from 1 to count of tabList
-                    if URL of item i of tabList contains "localhost:7844" then
-                        set active tab index of w to i
-                        set index of w to 1
-                        set found to true
-                        exit repeat
-                    end if
-                end repeat
-                if found then exit repeat
-            end repeat
-            if not found then
-                open location "http://localhost:7844"
-            end if
-        end tell
-        """)
-        script?.executeAndReturnError(nil)
+        NSLog("Sutando: openDashboard called")
+        if dashboardWindow == nil {
+            let url = URL(string: "http://localhost:7844")!
+            dashboardWindow = WebWindowController(
+                title: "Sutando — Dashboard",
+                url: url,
+                allowMedia: false,
+                autosaveName: "SutandoDashboardWindow",
+                contentSize: NSSize(width: 1100, height: 720)
+            )
+        }
+        dashboardWindow?.showAndFocus()
     }
 
     // MARK: - Helpers
@@ -1339,7 +1506,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func logToFile(_ msg: String) {
-        let path = workspace + "/logs/sutando-app-debug.log"
+        let dir = stateRoot + "/logs"
+        let path = dir + "/sutando-app-debug.log"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
         let line = "\(ISO8601DateFormatter().string(from: Date())) \(msg)\n"
         if let fh = FileHandle(forWritingAtPath: path) {
             fh.seekToEndOfFile()
@@ -1443,6 +1612,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.global(qos: .utility).async {
             try? proc.run()
             proc.waitUntilExit()
+        }
+    }
+
+    @objc func installLaunchAgents() {
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let installer = LaunchAgentInstaller()
+            let paths = LaunchAgentInstaller.defaultPaths(workspace: workspace)
+            do {
+                let summary = try installer.install(paths: paths)
+                logToFile("installLaunchAgents: installed=\(summary.installed.joined(separator: ",")) skipped=\(summary.skippedDisabled.joined(separator: ",")) failed=\(summary.failed.map { $0.label }.joined(separator: ","))")
+                DispatchQueue.main.async { [self] in
+                    if summary.failed.isEmpty {
+                        notify("Sutando", "Installed \(summary.installed.count) services. They'll auto-start on login.")
+                    } else {
+                        notify("Sutando", "Installed \(summary.installed.count). \(summary.failed.count) failed — see Settings.")
+                    }
+                }
+            } catch LaunchAgentError.bundleResourcesMissing {
+                DispatchQueue.main.async { [self] in
+                    notify("Sutando", "LaunchAgent templates not found. Run from .app bundle.")
+                }
+            } catch {
+                logToFile("installLaunchAgents: error \(error)")
+                DispatchQueue.main.async { [self] in
+                    notify("Sutando", "Install failed: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    @objc func checkForUpdates() {
+        sparkle.checkForUpdates()
+    }
+
+    @objc func uninstallLaunchAgents() {
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let installer = LaunchAgentInstaller()
+            let removed = installer.uninstall()
+            logToFile("uninstallLaunchAgents: removed \(removed.joined(separator: ", "))")
+            DispatchQueue.main.async { [self] in
+                notify("Sutando", "Removed \(removed.count) services.")
+            }
         }
     }
 

@@ -138,8 +138,8 @@ which brew >/dev/null 2>&1 && echo "  ✓ Homebrew" || echo "  ✗ Homebrew fail
 
 # ── 2. System packages ──
 echo "Step 2/7: System packages..."
-brew install fswatch ffmpeg python3 2>/dev/null
-echo "  ✓ fswatch, ffmpeg, python3"
+brew install ffmpeg python3 2>/dev/null
+echo "  ✓ ffmpeg, python3"
 
 # ── 3. Node.js via nvm ──
 echo "Step 3/7: Node.js..."
@@ -193,7 +193,7 @@ BUNDLE_DIR="$SAVED"
 # ── Verify all deps ──
 echo ""
 echo "Dependency check:"
-for cmd in brew node npm claude fswatch python3 git; do
+for cmd in brew node npm claude python3 git; do
   which $cmd >/dev/null 2>&1 && echo "  ✓ $cmd" || echo "  ✗ $cmd NOT FOUND"
 done
 echo ""

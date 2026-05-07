@@ -21,7 +21,7 @@
  *   HOST                — Bind address (default: 0.0.0.0)
  */
 
-import 'dotenv/config';
+import './load-env.js';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { z } from 'zod';
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync } from 'node:fs';
@@ -37,7 +37,13 @@ import { workTool, startResultWatcher, startContextDropWatcher, startNoteViewing
 import { buildSutandoSystemPrompt, buildVoiceAgentContext } from './voice-context.js';
 import { classifyTransportClose, type ClassifiedClose } from './voice-error-classifier.js';
 
-import { personalPath, sharedPersonalPath } from './util_paths.js';
+import { personalPath, sharedPersonalPath, statePath, stateDir } from './util_paths.js';
+import {
+	recordEvent as cloudRecordEvent,
+	startSession as cloudStartSession,
+	endSession as cloudEndSession,
+	recordError as cloudRecordError,
+} from './cloud-client.js';
 
 // Cartesia is loaded dynamically at the bottom of the config section so
 // the `@cartesia/cartesia-js` package is only required when the user has
@@ -97,7 +103,7 @@ const DEFAULT_THREAD_KEY = 'sutando_main';
 const SESSION_ID = `session_${Date.now()}`;
 const PHONE_PORT = Number(process.env.PHONE_PORT) || 3100;
 const PHONE_SERVER_URL = `http://localhost:${PHONE_PORT}`;
-const CALL_RESULTS_DIR = join(new URL('.', import.meta.url).pathname, '..', 'results', 'calls');
+const CALL_RESULTS_DIR = join(stateDir('results'), 'calls');
 
 // Model configuration — override via .env for cost/quality tuning
 const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
@@ -181,8 +187,7 @@ let meetingActive = false;
 // Presenter mode is tracked separately by the iclr-highlight server on :7877.
 function writeVoiceModeSentinel() {
 	try {
-		mkdirSync('state', { recursive: true });
-		writeFileSync('state/voice-mode.txt', meetingActive ? 'meeting' : 'active');
+		writeFileSync(statePath('state/voice-mode.txt'), meetingActive ? 'meeting' : 'active');
 	} catch {}
 }
 
@@ -192,8 +197,9 @@ function writeVoiceModeSentinel() {
 // apply so requests don't re-fire.
 function applyModeRequest() {
 	try {
-		const req = readFileSync('state/voice-mode.request', 'utf-8').trim().toLowerCase();
-		unlinkSync('state/voice-mode.request');
+		const reqPath = statePath('state/voice-mode.request');
+		const req = readFileSync(reqPath, 'utf-8').trim().toLowerCase();
+		unlinkSync(reqPath);
 		const want = req === 'meeting';
 		if (meetingActive === want) return; // no-op if already in that mode
 		meetingActive = want;
@@ -304,7 +310,7 @@ const getTaskStatus: ToolDefinition = {
 		// Also check tasks/ directory for queued files waiting for core agent
 		let queuedFiles: string[] = [];
 		try {
-			const tasksDir = join(WORKSPACE_DIR, 'tasks');
+			const tasksDir = stateDir('tasks');
 			queuedFiles = readdirSync(tasksDir).filter(f => f.endsWith('.txt'));
 		} catch {}
 		return {
@@ -453,7 +459,7 @@ const mainAgent: MainAgent = {
 		// have to re-deliver and the user knows where to find the answers.
 		let offlineDeliveryHint = '';
 		try {
-			const archDir = join(WORKSPACE_DIR, 'results', 'archive', new Date().toISOString().slice(0, 7));
+			const archDir = join(stateDir('results'), 'archive', new Date().toISOString().slice(0, 7));
 			if (existsSync(archDir)) {
 				const cutoff = Date.now() - 30 * 60 * 1000;
 				const recent_proactive = readdirSync(archDir).filter(f =>
@@ -485,13 +491,14 @@ const mainAgent: MainAgent = {
 		let standName = '';
 		try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); standName = si.name ? ` — ${si.name}` : ''; } catch {}
 		// Detect first-time user: no conversation log means brand new
-		const hasHistory = existsSync(join(WORKSPACE_DIR, 'conversation.log'));
+		const hasHistory = existsSync(statePath('conversation.log'));
 		const tutorialHint = hasHistory ? '' : ' Then say: "If this is your first time, say tutorial and I\'ll walk you through what I can do."';
 		// Check for today's briefing and insight
 		const today = new Date().toISOString().slice(0, 10);
-		const briefingFile = join(WORKSPACE_DIR, 'results', `briefing-${today}.txt`);
+		const resultsDir = stateDir('results');
+		const briefingFile = join(resultsDir, `briefing-${today}.txt`);
 		const briefingHint = hasHistory && existsSync(briefingFile) ? ' Mention: "I have your morning briefing ready if you want it."' : '';
-		const insightFile = join(WORKSPACE_DIR, 'results', `insight-${today}.txt`);
+		const insightFile = join(resultsDir, `insight-${today}.txt`);
 		const insightHint = hasHistory && existsSync(insightFile) ? ' Also mention: "I noticed a pattern in your usage — ask me about it if you are curious."' : '';
 		if (meetingActive) {
 			return `[System: MEETING MODE — LISTEN AND TAKE NOTES. A Zoom meeting is active. Listen to everything and mentally track the discussion: who said what, key decisions, action items, topics covered. But do NOT produce any audio output UNLESS someone says "Sutando" or "hey Sutando" — then respond to their request using your accumulated notes and context. When not addressed, produce absolutely zero words — no acknowledgments, no "silent", no sounds. You are an invisible note-taker until called upon.]`;
@@ -770,30 +777,79 @@ async function main() {
 	// this after ~5 PR-restart cycles desyncing voiceConnected.
 	function writeVoiceState(connected: boolean) {
 		try {
-			writeFileSync('voice-state.json', JSON.stringify({ connected, ts: Math.floor(Date.now() / 1000) }));
+			writeFileSync(statePath('voice-state.json'), JSON.stringify({ connected, ts: Math.floor(Date.now() / 1000) }));
 		} catch (err) {
 			console.error(`${ts()} [VoiceState] write failed:`, err);
 		}
 	}
 
+	// Cloud session id from /api/sessions POST. Held across the
+	// VoiceSession lifecycle so onSessionEnd can PATCH the same row.
+	// `cloudSessionPromise` is the in-flight POST during the window
+	// between start and end — onSessionEnd awaits it before PATCHing.
+	let cloudSessionId: string | null = null;
+	let cloudSessionPromise: Promise<string | null> | null = null;
+
+	function mapEndedReason(reason: string | undefined): 'user' | 'timeout' | 'error' | 'system' {
+		if (!reason) return 'system';
+		const r = reason.toLowerCase();
+		if (r.includes('user')) return 'user';
+		if (r.includes('timeout') || r.includes('idle')) return 'timeout';
+		if (r.includes('error') || r.includes('fail') || r.includes('disconnect')) return 'error';
+		return 'system';
+	}
+
+	function closeCloudSession(endedReason: 'user' | 'timeout' | 'error' | 'system') {
+		// Capture refs before the start-promise resolves; the PATCH
+		// runs after start completes so we always close the correct row.
+		const promise = cloudSessionPromise;
+		const turnCount = userTurnCount;
+		const toolsUsed: Record<string, number> = {};
+		for (const tc of voiceToolCalls) {
+			toolsUsed[tc.name] = (toolsUsed[tc.name] ?? 0) + 1;
+		}
+		cloudSessionId = null;
+		cloudSessionPromise = null;
+		void (async () => {
+			const id = promise ? await promise : null;
+			await cloudEndSession(id, { turnCount, toolsUsed, endedReason });
+		})();
+	}
+
 	function writeVoiceMetrics() {
 		if (metricsWritten) return;
 		metricsWritten = true;
+		const durationMs = Date.now() - voiceSessionStart;
 		try {
 			const metrics = {
 				timestamp: new Date().toISOString(),
 				sessionId: SESSION_ID,
 				source: 'voice',
-				durationMs: Date.now() - voiceSessionStart,
+				durationMs,
 				transcriptLines: voiceTranscript.length,
 				toolCalls: voiceToolCalls,
 				toolCount: voiceToolCalls.length,
 				events: voiceEvents,
 			};
-			appendFileSync('data/voice-metrics.jsonl', JSON.stringify(metrics) + '\n');
+			appendFileSync(statePath('data/voice-metrics.jsonl'), JSON.stringify(metrics) + '\n');
 			console.log(`${ts()} [Observability] Wrote voice metrics: ${voiceToolCalls.length} tools, ${voiceEvents.length} events, ${voiceTranscript.length} transcript lines`);
 		} catch (err) {
 			console.log(`${ts()} [Observability] Failed to write metrics: ${err}`);
+		}
+		// Cloud telemetry (Phase 4): emit one voice.gemini event per session
+		// with the elapsed duration. No-op when the user isn't signed in.
+		// Skip zero-length sessions — these are spurious disconnects.
+		const durationSeconds = durationMs / 1000;
+		if (durationSeconds >= 1) {
+			cloudRecordEvent({
+				kind: 'voice.gemini',
+				units: durationSeconds,
+				metadata: {
+					sessionId: SESSION_ID,
+					model: VOICE_NATIVE_AUDIO_MODEL,
+					toolCalls: voiceToolCalls.length,
+				},
+			});
 		}
 	}
 
@@ -816,11 +872,23 @@ async function main() {
 				voiceEvents.length = 0; voiceToolCalls.length = 0; voiceTranscript.length = 0;
 				voiceEvents.push({ event: 'session_started', timestamp: new Date().toISOString() });
 				console.log(`${ts()} [Session] Started: ${e.sessionId}`);
+				// Cloud session lifecycle. Independent of writeVoiceMetrics
+				// (which emits the voice.gemini usage_event) — this row in
+				// `sessions` carries turn count, tools used, ended reason.
+				cloudSessionId = null;
+				cloudSessionPromise = cloudStartSession({
+					kind: 'voice',
+					metadata: { sessionId: e.sessionId, model: VOICE_NATIVE_AUDIO_MODEL },
+				}).then((id) => {
+					cloudSessionId = id;
+					return id;
+				});
 			},
 			onSessionEnd: (e) => {
 				voiceEvents.push({ event: `session_ended:${e.reason}`, timestamp: new Date().toISOString() });
 				console.log(`${ts()} [Session] Ended: ${e.sessionId} (${e.reason})`);
 				writeVoiceMetrics();
+				closeCloudSession(mapEndedReason(e.reason));
 			},
 			onToolCall: (e) => {
 				voiceToolIdMap.set(e.toolCallId, e.toolName);
@@ -853,6 +921,13 @@ async function main() {
 			onError: (e) => {
 				voiceEvents.push({ event: `error:${e.component}:${e.error.message}`, timestamp: new Date().toISOString() });
 				console.error(`${ts()} [Error] ${e.component}: ${e.error.message} (${e.severity})`);
+				cloudRecordError({
+					kind: `voice.${e.component}`,
+					severity: e.severity === 'fatal' ? 'fatal' : 'error',
+					message: e.error.message,
+					stack: e.error.stack,
+					metadata: { sessionId: SESSION_ID, component: e.component },
+				});
 			},
 		},
 	});
@@ -879,11 +954,19 @@ async function main() {
 			if (notifiedCategories.has(c.category)) return;
 			notifiedCategories.add(c.category);
 			console.error(`${ts()} [VoiceFailure] ${c.category}: ${c.userMessage} (raw="${c.rawReason}")`);
+			// Cloud reliability board — non-retryable transport closes are
+			// the most actionable failure signal we have for voice.
+			cloudRecordError({
+				kind: `voice.transport.${c.category}`,
+				severity: 'error',
+				message: c.userMessage,
+				metadata: { rawReason: c.rawReason, userActionUrl: c.userActionUrl },
+			});
 			// Surface via proactive-result channel — picked up by web-client
 			// task feed and the Discord/Telegram bridges if configured.
 			try {
 				const tsMs = Date.now();
-				const path = join(WORKSPACE_DIR, 'results', `proactive-voice-${c.category}-${tsMs}.txt`);
+				const path = join(stateDir('results'), `proactive-voice-${c.category}-${tsMs}.txt`);
 				const body = c.userActionUrl
 					? `${c.userMessage} ${c.userActionUrl}`
 					: c.userMessage;

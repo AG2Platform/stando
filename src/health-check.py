@@ -25,7 +25,7 @@ from typing import Optional
 
 REPO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import shared_personal_path  # noqa: E402
+from util_paths import shared_personal_path, state_path, state_dir  # noqa: E402
 
 def _default_memory_dir() -> str:
     """Auto-detect Claude Code memory dir from repo path."""
@@ -282,7 +282,7 @@ def check_voice_watchers(voice_check: dict) -> dict:
         check["status"] = "warn"
         check["detail"] = f"voice-agent {vs}" if vs else "voice-agent status unknown"
         return check
-    log_file = REPO_DIR / "logs" / "voice-agent.log"
+    log_file = state_path("logs/voice-agent.log")
     if not log_file.exists():
         check["status"] = "warn"
         check["detail"] = "voice-agent.log not found"
@@ -359,7 +359,7 @@ def check_voice_transport(voice_check: dict) -> dict:
         check["status"] = "warn"
         check["detail"] = f"voice-agent {vs}" if vs else "voice-agent status unknown"
         return check
-    log_file = REPO_DIR / "logs" / "voice-agent.log"
+    log_file = state_path("logs/voice-agent.log")
     if not log_file.exists():
         check["status"] = "warn"
         check["detail"] = "voice-agent.log not found"
@@ -550,7 +550,7 @@ def run_all_checks() -> list[dict]:
     # Critical files
     for name, path in [
         ("CLAUDE.md", REPO_DIR / "CLAUDE.md"),
-        ("build_log.md", REPO_DIR / "build_log.md"),
+        ("build_log.md", Path(shared_personal_path("build_log.md", REPO_DIR))),
         (".env", REPO_DIR / ".env"),
     ]:
         checks.append(check_file(path, name))
@@ -654,7 +654,7 @@ def run_all_checks() -> list[dict]:
 
         # Check 2: Log file freshness
         import time
-        log_file = REPO_DIR / "src" / f"{name}.log"
+        log_file = state_path(f"logs/{name}.log")
         detail = "running"
         status = "ok"
         if log_file.exists():
@@ -664,7 +664,7 @@ def run_all_checks() -> list[dict]:
                 detail = f"running but log stale ({int(age_sec)}s old)"
 
         # Check 3: Heartbeat file freshness (overrides log staleness if fresh)
-        heartbeat_file = REPO_DIR / "state" / f"{name}.heartbeat"
+        heartbeat_file = state_path(f"state/{name}.heartbeat")
         if heartbeat_file.exists():
             hb_age = time.time() - heartbeat_file.stat().st_mtime
             if hb_age <= 120:  # heartbeat is fresh — bridge is alive
@@ -712,7 +712,7 @@ def run_all_checks() -> list[dict]:
     sutando_bin = REPO_DIR / "src" / "Sutando" / "Sutando"
     if sutando_bin.exists():
         try:
-            result = subprocess.run(["pgrep", "-f", "Sutando/Sutando"], capture_output=True, text=True)
+            result = subprocess.run(["pgrep", "-f", "(Sutando|MacOS)/Sutando"], capture_output=True, text=True)
             pids = [p for p in result.stdout.strip().split("\n") if p]
         except:
             pids = []
@@ -811,7 +811,7 @@ def main():
                     # dotenv, etc.) — restart would crash on import.
                     # Log path uses logs/ (post-PR #251 refactor).
                     subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
-                                     stdout=open(str(REPO_DIR / "logs" / f"{c['name']}.log"), "a"),
+                                     stdout=open(str(state_path(f"logs/{c['name']}.log")), "a"),
                                      stderr=subprocess.STDOUT, start_new_session=True)
                     print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
                 elif c["name"] == "sutando-app":

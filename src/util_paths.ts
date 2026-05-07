@@ -1,24 +1,60 @@
 // TypeScript twin of src/util_paths.py — personal-asset path resolution.
 //
-// Two helpers, one for per-machine state, one for shared-across-fleet state:
+// Three helpers covering the three persistence tiers:
 //
 //   personalPath(filename)          — `$SUTANDO_PRIVATE_DIR/machine-<host>/<filename>`
 //                                     For files where each Mac has its own copy
+//                                     synced via the private repo
 //                                     (stand-identity.json, pending-questions.md).
 //
 //   sharedPersonalPath(filename)    — `$SUTANDO_PRIVATE_DIR/<filename>`
 //                                     For files synced across the whole fleet
 //                                     (notes/, build_log.md).
 //
-// Both fall back to `<workspace>/<filename>` so existing installs keep working
+//   statePath(name)                 — `$SUTANDO_HOME/<name>`
+//                                     For per-machine runtime state that is NOT
+//                                     synced (tasks/, results/, state/, logs/,
+//                                     core-status.json, voice-state.json,
+//                                     conversation.log). The .app bundle sets
+//                                     SUTANDO_HOME to ~/Library/Application
+//                                     Support/Sutando so state lives outside
+//                                     the read-only bundle.
+//
+// All fall back to `<workspace>/<filename>` so existing installs keep working
 // until they migrate.
 
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 function expandHome(p: string): string {
 	return p.replace(/^~/, process.env.HOME || '');
+}
+
+const REPO_ROOT = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
+
+/** Per-machine runtime state path. Resolves to `$SUTANDO_HOME/<name>` when
+ * SUTANDO_HOME is set, else `<REPO_ROOT>/<name>` for backwards compatibility. */
+export function statePath(name: string): string {
+	const home = process.env.SUTANDO_HOME;
+	const root = home ? expandHome(home) : REPO_ROOT;
+	return join(root, name);
+}
+
+/** Like statePath() but also ensures the parent directory exists. Use when
+ * the caller is about to write a file. */
+export function statePathEnsured(name: string): string {
+	const p = statePath(name);
+	mkdirSync(dirname(p), { recursive: true });
+	return p;
+}
+
+/** Like statePath() but ensures the path itself exists as a directory. Use
+ * when resolving a directory like 'tasks' or 'results'. */
+export function stateDir(name: string): string {
+	const p = statePath(name);
+	mkdirSync(p, { recursive: true });
+	return p;
 }
 
 /** Per-machine resolver. */
