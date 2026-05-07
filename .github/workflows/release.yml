@@ -48,7 +48,12 @@ permissions:
 jobs:
   build:
     runs-on: macos-14  # M-series runner
-    timeout-minutes: 60
+    # Apple's notarization SLA is "usually 15 min" but the queue can
+    # stretch past an hour during peak times (especially after a burst
+    # of resubmissions from the same Apple ID). Build + sign takes ~2
+    # min; the rest is Apple's queue. 120 gives headroom; we'd rather
+    # wait 90 min than re-trigger and burn a fresh queue slot.
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
