@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Entitlements for bundled runtime binaries (node, tmux, dylibs)
+         under Resources/runtime/. These are spawned as child processes
+         by the .app and need their OWN entitlements at codesign time —
+         the parent's entitlements don't inherit. -->
+
+    <!-- V8 JIT compiles bytecode at runtime → needs writable+executable
+         pages, which hardened-runtime forbids by default. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- node + tmux load dylibs that are signed by us, not by Apple or
+         the same team certificate. Library validation would reject them. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!-- tmux finds its bundled libevent / libncursesw / libutf8proc via
+         @executable_path/../lib rpaths — DYLD env vars don't matter for
+         that, but the run-core-agent.sh wrapper sets TERMINFO_DIRS which
+         should be honored. -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+</dict>
+</plist>

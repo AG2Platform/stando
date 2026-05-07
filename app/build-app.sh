@@ -147,16 +147,42 @@ fi
 
 # 7. Sign. Identity "-" = ad-hoc (Phase 1 default; Gatekeeper requires
 # right-click → Open). Identity "Developer ID Application: …" produces a
-# distributable signature. Sign nested bundles (Sparkle.framework with its
-# helper tools — Autoupdate, Updater.app, etc.) before the outer bundle.
+# distributable signature. For notarization, EVERY Mach-O in the bundle
+# (including bundled node, tmux, dylibs, and Sparkle helpers) must be
+# signed with the same Developer ID + --options runtime + a secure
+# Apple timestamp. Ad-hoc inner signatures get rejected.
 echo "  Signing ($SIGNING_IDENTITY)..."
 
-# Nested signing — Sparkle ships an XPC service + helper apps that need
-# to be signed individually with the same identity.
+# `--timestamp=none` would skip Apple's timestamp authority — DON'T use
+# that with notarization. Default `--timestamp` (no value) hits the TSA.
+# When ad-hoc signing locally for dev, neither matters; the runtime
+# enforces nothing.
+SIGN_FLAGS=(--force --sign "$SIGNING_IDENTITY" --options runtime)
+if [ "$SIGNING_IDENTITY" != "-" ]; then
+    SIGN_FLAGS+=(--timestamp)
+fi
+
+# 7a. Re-sign every Mach-O under Resources/runtime/ — bundle-runtime.sh
+# ad-hoc signed these (so they'd at least load on macOS 15+), but for
+# notarization they need our Developer ID + hardened runtime + their
+# own entitlements (V8 JIT, library-validation off). Parent app's
+# entitlements don't inherit to child processes.
+RUNTIME_ENTITLEMENTS="$REPO/app/Sutando-runtime.entitlements"
+RUNTIME_SIGN_FLAGS=("${SIGN_FLAGS[@]}" --entitlements "$RUNTIME_ENTITLEMENTS")
+RUNTIME_DIR="$APP/Contents/Resources/runtime"
+if [ -d "$RUNTIME_DIR" ]; then
+    while IFS= read -r -d '' bin; do
+        # Skip non-binaries (text scripts, configs).
+        if file "$bin" 2>/dev/null | grep -qE 'Mach-O|dylib'; then
+            codesign "${RUNTIME_SIGN_FLAGS[@]}" "$bin" 2>&1 | grep -v "replacing existing signature" || true
+        fi
+    done < <(find "$RUNTIME_DIR" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' \) -print0)
+fi
+
+# 7b. Sparkle helpers — sign each XPC + helper before sealing the framework.
+# Sparkle ships pre-signed by the Sparkle Project; we MUST re-sign with our
+# identity so the chain validates against our cert.
 if [ "$ENABLE_SPARKLE" = "1" ] && [ -d "$APP/Contents/Frameworks/Sparkle.framework" ]; then
-    # Sign Sparkle's bundled helpers from the inside out. Sparkle's
-    # framework already ships pre-signed by the Sparkle Project — re-signing
-    # with --deep would invalidate inner signatures, so target each piece.
     SPARKLE_HELPERS=(
         "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/Resources/Updater.app"
         "$APP/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc"
@@ -165,16 +191,17 @@ if [ "$ENABLE_SPARKLE" = "1" ] && [ -d "$APP/Contents/Frameworks/Sparkle.framewo
     )
     for helper in "${SPARKLE_HELPERS[@]}"; do
         [ -e "$helper" ] || continue
-        codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp=none "$helper" 2>/dev/null || true
+        codesign "${SIGN_FLAGS[@]}" "$helper" 2>&1 | grep -v "replacing existing signature" || true
     done
-    codesign --force --sign "$SIGNING_IDENTITY" --options runtime --timestamp=none \
-        "$APP/Contents/Frameworks/Sparkle.framework" 2>/dev/null || true
+    codesign "${SIGN_FLAGS[@]}" "$APP/Contents/Frameworks/Sparkle.framework" 2>&1 | grep -v "replacing existing signature" || true
 fi
 
-codesign --force --sign "$SIGNING_IDENTITY" \
-    --entitlements "$REPO/app/Sutando.entitlements" \
-    --options runtime \
-    "$APP" 2>&1 | grep -v "replacing existing signature" || true
+# 7c. Outer .app last — entitlements applied here.
+OUTER_FLAGS=(--force --sign "$SIGNING_IDENTITY" --entitlements "$REPO/app/Sutando.entitlements" --options runtime)
+if [ "$SIGNING_IDENTITY" != "-" ]; then
+    OUTER_FLAGS+=(--timestamp)
+fi
+codesign "${OUTER_FLAGS[@]}" "$APP" 2>&1 | grep -v "replacing existing signature" || true
 
 # 8. Verify.
 echo "  Verifying..."

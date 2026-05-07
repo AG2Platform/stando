@@ -62,7 +62,20 @@ else
 fi
 
 echo "  Submitting $SUBMIT_TARGET to Apple notary service..."
-xcrun notarytool submit "$SUBMIT_TARGET" "${NOTARY_AUTH[@]}" --wait
+# Capture submission output so we can fetch the log on failure.
+SUBMIT_OUTPUT=$(xcrun notarytool submit "$SUBMIT_TARGET" "${NOTARY_AUTH[@]}" --wait 2>&1 | tee /dev/stderr)
+SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | awk '/^  id:/ { print $2; exit }')
+SUBMISSION_STATUS=$(echo "$SUBMIT_OUTPUT" | awk '/^  status:/ { print $2 }' | tail -1)
+
+if [ "$SUBMISSION_STATUS" != "Accepted" ]; then
+    echo ""
+    echo "✗ Notarization status: $SUBMISSION_STATUS"
+    if [ -n "$SUBMISSION_ID" ]; then
+        echo "  Fetching detailed log for submission $SUBMISSION_ID..."
+        xcrun notarytool log "$SUBMISSION_ID" "${NOTARY_AUTH[@]}" || true
+    fi
+    exit 1
+fi
 
 # Staple the ticket. For .app, staple the .app itself (not the .zip).
 # For .dmg, staple the .dmg.
