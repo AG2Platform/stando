@@ -95,7 +95,7 @@ def check_directory(path: Path, name: str) -> dict:
 def check_memory_sync() -> dict:
     """Verify memory sync is configured and has run recently."""
     name = "memory-sync"
-    env_path = REPO_DIR / ".env"
+    env_path = state_path(".env")
     repo_url = ""
     if env_path.exists():
         for line in env_path.read_text().splitlines():
@@ -633,7 +633,7 @@ def run_all_checks() -> list[dict]:
     for name, path in [
         ("CLAUDE.md", REPO_DIR / "CLAUDE.md"),
         ("build_log.md", Path(shared_personal_path("build_log.md", REPO_DIR))),
-        (".env", REPO_DIR / ".env"),
+        (".env", state_path(".env")),
     ]:
         checks.append(check_file(path, name))
 
@@ -650,7 +650,7 @@ def run_all_checks() -> list[dict]:
     checks.append(check_memory_sync())
 
     # Phone conversation server (optional — only check if Twilio configured and not skipped)
-    env_path = REPO_DIR / ".env"
+    env_path = state_path(".env")
     if env_path.exists():
         env_content = env_path.read_text()
         has_twilio = "TWILIO_ACCOUNT_SID=" in env_content and not env_content.split("TWILIO_ACCOUNT_SID=")[1].startswith("\n")
@@ -1142,7 +1142,7 @@ def main():
                     print(f"  {c['name']}: not auto-fixed — needs manual rebuild + relaunch (see memory feedback_sutando_app_launch_method.md)")
                 elif c["name"] == "ngrok":
                     # Read ngrok domain from .env if set, otherwise use default
-                    env_path = REPO_DIR / ".env"
+                    env_path = state_path(".env")
                     domain_arg = []
                     if env_path.exists():
                         for line in env_path.read_text().splitlines():
