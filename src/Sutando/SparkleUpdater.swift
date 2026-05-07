@@ -3,12 +3,22 @@
 // `#if ENABLE_SPARKLE` gates around the Sparkle import keep the dev
 // build (no Sparkle.framework) compiling cleanly.
 //
-// Phase 2 plan:
-//   - SUFeedURL → ag2.ai/sutando/updates/<channel>/appcast.xml
-//   - SUPublicEDKey → embedded in Info.plist
-//   - Channel: read from SUSelectedChannel or default "internal"
-//   - "Check for Updates…" menu item
-//   - Auto-check on launch (gated by SUEnableAutomaticChecks)
+// Update feed:
+//   - Hosted on GitHub Releases (the release.yml workflow uploads
+//     appcast.xml as a release asset on every tagged build).
+//   - URL: github.com/AG2Platform/stando/releases/latest/download/appcast.xml
+//   - GitHub redirects /releases/latest to whatever the most-recent
+//     non-prerelease release is. release.yml marks all internal
+//     releases as non-prerelease so they qualify as "latest" until
+//     stable + beta channels actually diverge.
+//   - SUPublicEDKey is embedded in Info.plist; clients verify the
+//     EdDSA signature on each appcast item before downloading.
+//   - Channels: read from SUSelectedChannel UserDefaults; defaults to
+//     "internal". generate_appcast tags each item with its channel via
+//     <sparkle:channel> so multi-channel filtering works without
+//     per-channel URLs.
+//   - When ag2.ai's CDN is set up, swap to
+//     ag2.ai/sutando/updates/<channel>/appcast.xml in one commit.
 
 import Cocoa
 #if ENABLE_SPARKLE
@@ -46,12 +56,13 @@ final class SparkleUpdater: NSObject, SPUUpdaterDelegate {
         controller.checkForUpdates(nil)
     }
 
-    /// Build the feed URL, optionally per channel. Channel defaults to
-    /// "internal" but can be overridden by setting SUSelectedChannel in
-    /// UserDefaults (e.g. via a hidden menu item).
+    /// Build the feed URL. Hosted on GitHub Releases for now — channel
+    /// filtering happens inside the appcast via <sparkle:channel> tags
+    /// rather than per-channel URLs, so a single feed serves all
+    /// channels. The SUSelectedChannel UserDefault still controls which
+    /// items Sparkle picks from that feed.
     func feedURLString(for updater: SPUUpdater) -> String? {
-        let channel = UserDefaults.standard.string(forKey: "SUSelectedChannel") ?? "internal"
-        return "https://ag2.ai/sutando/updates/\(channel)/appcast.xml"
+        return "https://github.com/AG2Platform/stando/releases/latest/download/appcast.xml"
     }
 }
 

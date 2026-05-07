@@ -179,9 +179,9 @@ fi
 # need library-validation off to load alongside non-Apple-signed dylibs.
 RUNTIME_ENTITLEMENTS="$REPO/app/Sutando-runtime.entitlements"
 RUNTIME_SIGN_FLAGS=("${SIGN_FLAGS[@]}" --entitlements "$RUNTIME_ENTITLEMENTS")
-RESOURCES_DIR="$APP/Contents/Resources"
-if [ -d "$RESOURCES_DIR" ]; then
-    SIGNED_COUNT=0
+SIGNED_COUNT=0
+for SCAN_DIR in "$APP/Contents/Resources" "$APP/Contents/Frameworks"; do
+    [ -d "$SCAN_DIR" ] || continue
     while IFS= read -r -d '' bin; do
         # `file` reliably distinguishes Mach-O (binaries, dylibs, bundles,
         # .node addons) from text. Skip everything that isn't Mach-O.
@@ -189,9 +189,9 @@ if [ -d "$RESOURCES_DIR" ]; then
             codesign "${RUNTIME_SIGN_FLAGS[@]}" "$bin" 2>&1 | grep -v "replacing existing signature" || true
             SIGNED_COUNT=$((SIGNED_COUNT + 1))
         fi
-    done < <(find "$RESOURCES_DIR" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' -o -name '*.node' \) -print0)
-    echo "  Re-signed $SIGNED_COUNT bundled Mach-O binaries"
-fi
+    done < <(find "$SCAN_DIR" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' -o -name '*.node' \) -print0)
+done
+echo "  Re-signed $SIGNED_COUNT bundled Mach-O binaries (Resources/ + Frameworks/)"
 
 # 7b. Sparkle helpers — sign each XPC + helper before sealing the framework.
 # Sparkle ships pre-signed by the Sparkle Project; we MUST re-sign with our

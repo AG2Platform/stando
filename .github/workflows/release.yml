@@ -185,7 +185,13 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Sutando ${{ steps.meta.outputs.version }}
-          prerelease: ${{ steps.meta.outputs.channel != 'stable' }}
+          # Sparkle reads the appcast from /releases/latest/download/, which
+          # GitHub resolves to the most recent NON-prerelease. Keep
+          # internal releases as latest (false) so existing users get
+          # auto-updated. Only mark beta as prerelease — beta sits beside
+          # stable as a parallel track and shouldn't be the auto-served
+          # latest. Revisit when stable channel actually exists.
+          prerelease: ${{ steps.meta.outputs.channel == 'beta' }}
           files: |
             app/build/Sutando-*.dmg
             app/build/appcast*.xml
