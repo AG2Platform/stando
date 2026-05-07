@@ -162,21 +162,35 @@ if [ "$SIGNING_IDENTITY" != "-" ]; then
     SIGN_FLAGS+=(--timestamp)
 fi
 
-# 7a. Re-sign every Mach-O under Resources/runtime/ — bundle-runtime.sh
-# ad-hoc signed these (so they'd at least load on macOS 15+), but for
-# notarization they need our Developer ID + hardened runtime + their
-# own entitlements (V8 JIT, library-validation off). Parent app's
-# entitlements don't inherit to child processes.
+# 7a. Re-sign every Mach-O ANYWHERE under Contents/Resources/ — covers
+# bundle-runtime.sh's ad-hoc signed binaries (node, tmux, dylibs) AND
+# the pre-built native binaries that npm packages ship inside
+# node_modules (ripgrep, fsevents, sharp, esbuild, libvips, etc.) AND
+# any .node addons or custom helpers under skills/.
+#
+# Apple's notary walks every Mach-O in the bundle and rejects any that
+# isn't (1) signed with our Developer ID, (2) timestamped via Apple's
+# TSA, and (3) has hardened runtime enabled. Missing any of the three
+# = full rejection.
+#
+# Runtime entitlements (allow-jit + allow-unsigned-executable-memory +
+# disable-library-validation + allow-dyld-environment-variables) are
+# applied to all of them — node binaries need JIT, native node-addons
+# need library-validation off to load alongside non-Apple-signed dylibs.
 RUNTIME_ENTITLEMENTS="$REPO/app/Sutando-runtime.entitlements"
 RUNTIME_SIGN_FLAGS=("${SIGN_FLAGS[@]}" --entitlements "$RUNTIME_ENTITLEMENTS")
-RUNTIME_DIR="$APP/Contents/Resources/runtime"
-if [ -d "$RUNTIME_DIR" ]; then
+RESOURCES_DIR="$APP/Contents/Resources"
+if [ -d "$RESOURCES_DIR" ]; then
+    SIGNED_COUNT=0
     while IFS= read -r -d '' bin; do
-        # Skip non-binaries (text scripts, configs).
-        if file "$bin" 2>/dev/null | grep -qE 'Mach-O|dylib'; then
+        # `file` reliably distinguishes Mach-O (binaries, dylibs, bundles,
+        # .node addons) from text. Skip everything that isn't Mach-O.
+        if file "$bin" 2>/dev/null | grep -qE 'Mach-O|dynamically linked shared library'; then
             codesign "${RUNTIME_SIGN_FLAGS[@]}" "$bin" 2>&1 | grep -v "replacing existing signature" || true
+            SIGNED_COUNT=$((SIGNED_COUNT + 1))
         fi
-    done < <(find "$RUNTIME_DIR" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' \) -print0)
+    done < <(find "$RESOURCES_DIR" -type f \( -perm -u+x -o -name '*.dylib' -o -name '*.so' -o -name '*.node' \) -print0)
+    echo "  Re-signed $SIGNED_COUNT bundled Mach-O binaries"
 fi
 
 # 7b. Sparkle helpers — sign each XPC + helper before sealing the framework.
