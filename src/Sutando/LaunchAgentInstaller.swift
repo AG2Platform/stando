@@ -257,7 +257,33 @@ class LaunchAgentInstaller {
             try? FileManager.default.removeItem(atPath: plistPath)
             removed.append(label)
         }
+        // The core-agent wrapper (run-core-agent.sh) starts a detached tmux
+        // server on /tmp/sutando-tmux.sock. tmux daemonizes out of the
+        // wrapper's process tree, so unloading the launchd job leaves the
+        // session running. Kill it explicitly here.
+        killCoreAgentTmux()
         return removed
+    }
+
+    private func killCoreAgentTmux() {
+        let socket = "/tmp/sutando-tmux.sock"
+        guard FileManager.default.fileExists(atPath: socket) else { return }
+        let candidates = [
+            (Bundle.main.resourcePath ?? "") + "/runtime/bin/tmux",
+            "/opt/homebrew/bin/tmux",
+            "/usr/local/bin/tmux",
+            "/usr/bin/tmux",
+        ]
+        if let tmux = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: tmux)
+            proc.arguments = ["-S", socket, "kill-server"]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            try? proc.run()
+            proc.waitUntilExit()
+        }
+        try? FileManager.default.removeItem(atPath: socket)
     }
 
     /// Query loaded com.sutando.* agents. Returns labels for which

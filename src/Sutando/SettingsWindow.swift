@@ -257,6 +257,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(sectionHeader("Background services"))
         stack.addArrangedSubview(servicesRow())
 
+        // Danger zone — full uninstall.
+        stack.addArrangedSubview(sectionHeader("Danger zone"))
+        stack.addArrangedSubview(dangerZoneRow())
+
         // Bottom buttons
         let footer = NSStackView()
         footer.orientation = .horizontal
@@ -811,6 +815,65 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 showBanner("Removed \(removed.count) services.", color: .systemOrange)
             }
         }
+    }
+
+    private func dangerZoneRow() -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+
+        let info = NSTextField(labelWithString: "Remove Sutando completely from this Mac.")
+        info.font = .systemFont(ofSize: 12)
+        info.textColor = .secondaryLabelColor
+        row.addArrangedSubview(info)
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        row.addArrangedSubview(spacer)
+
+        let button = NSButton(title: "Uninstall Sutando…", target: self, action: #selector(uninstallApp))
+        button.bezelStyle = .rounded
+        button.hasDestructiveAction = true
+        row.addArrangedSubview(button)
+        return row
+    }
+
+    @objc private func uninstallApp() {
+        let alert = NSAlert()
+        alert.messageText = "Uninstall Sutando?"
+        alert.informativeText = """
+            This removes the app, background services, caches, cloud sign-in, \
+            and skill symlinks. The Privacy & Security entries (Microphone, \
+            Screen Recording, Accessibility) will be reset, but you may need \
+            to remove them from System Settings manually if any remain.
+            """
+        alert.alertStyle = .warning
+
+        let keepData = NSButton(checkboxWithTitle: "Keep my settings and API keys", target: nil, action: nil)
+        keepData.state = .on
+        keepData.toolTip = "Preserve ~/Library/Application Support/Sutando (.env, results, notes). Useful if you plan to reinstall."
+        let accessory = NSStackView(views: [keepData])
+        accessory.orientation = .vertical
+        accessory.alignment = .leading
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+        accessory.frame = NSRect(x: 0, y: 0, width: 360, height: 24)
+        alert.accessoryView = accessory
+
+        alert.addButton(withTitle: "Uninstall and quit")
+        alert.addButton(withTitle: "Cancel")
+        // Make Cancel the default. The destructive button is buttons[0]
+        // (Uninstall) — flagging it via .keyEquivalentModifierMask leaves
+        // Return on Cancel.
+        alert.buttons[1].keyEquivalent = "\r"
+        alert.buttons[0].keyEquivalent = ""
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+
+        showBanner("Uninstalling… Sutando will quit in a moment.", color: .systemOrange)
+        let keep = keepData.state == .on
+        Uninstaller.performUninstall(keepUserData: keep)
     }
 
     // MARK: - State sync
