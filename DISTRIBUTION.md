@@ -665,6 +665,17 @@ and usage events from the desktop, with Stripe webhooks landing.
    `cloud-auth.json` `apiBase` to point at `https://sutando.ag2.ai`,
    sign in via prod Clerk, talk to voice agent, confirm a `voice.gemini`
    event lands in prod Neon within a minute. `/admin` page renders.
+7. **DMG download proxy** [DONE — code]. `GET /api/download/<channel>`
+   (channels: `stable` / `beta`) streams the latest GitHub release DMG
+   through the Vercel function — Clerk-gated, browser only ever sees
+   `sutando.ag2.ai` in the URL bar. Logs to a new `download_events`
+   table (`user_id`, `channel`, `release_tag`, `bytes`, `ts`,
+   `user_agent`) — feeds the activation funnel. Requires
+   `GITHUB_TOKEN` env (fine-grained PAT, `Contents: Read` on the
+   release repo) to lift GitHub's 60 req/hr unauthenticated rate
+   limit. `GITHUB_RELEASE_REPO` defaults to `AG2Platform/stando`.
+   Dashboard surfaces a "Download for Mac" card at the top of
+   `/dashboard`. No CI changes — DMG stays on GitHub Releases as today.
 
 ### Track 2 — Signed/notarized DMG
 
