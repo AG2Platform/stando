@@ -134,7 +134,15 @@ for attempt in 1 2 3 4 5 6 7 8; do
         tmux -S "$SOCKET" send-keys -t "$SESSION" Enter 2>/dev/null || true
         DIALOGS_DONE=0
     elif echo "$PANE" | grep -q "Bypass Permissions"; then
-        tmux -S "$SOCKET" send-keys -t "$SESSION" Down Enter 2>/dev/null || true
+        # Down and Enter must be sent in two separate send-keys calls.
+        # Claude Code 2.1.133's TUI reads stdin fast enough that a single
+        # `send-keys Down Enter` confirms the default-highlighted "1. No,
+        # exit" before the cursor visually advances — claude exits, launchd
+        # crash-loops every 30s. The 0.3s gap reliably lands on "2. Yes, I
+        # accept" on a fresh-Mac DMG install.
+        tmux -S "$SOCKET" send-keys -t "$SESSION" Down 2>/dev/null || true
+        sleep 0.3
+        tmux -S "$SOCKET" send-keys -t "$SESSION" Enter 2>/dev/null || true
         DIALOGS_DONE=0
     else
         DIALOGS_DONE=$((DIALOGS_DONE + 1))

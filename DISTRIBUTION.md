@@ -598,11 +598,16 @@ machine had accumulated state that masked them.
    an interactive *"1. No, exit / 2. Yes, I accept"* dialog every launch,
    even with `--dangerously-skip-permissions`. The default selection is
    "exit", so the wrapper would idle until claude timed out (~30s) and
-   exited. `run-core-agent.sh` now sends `Down + Enter` 2s after session
-   start; also kills any pre-existing tmux session on every wrapper
-   start so a zombie session stuck on the warning can't be misread as
-   healthy. Pane output now piped to `core-agent.pane.log` for next-time
-   debugging.
+   exited. `run-core-agent.sh` polls `capture-pane` for the dialog and
+   responds with `Down` then `Enter`; also kills any pre-existing tmux
+   session on every wrapper start so a zombie session stuck on the
+   warning can't be misread as healthy. Pane output piped to
+   `core-agent.pane.log` for debugging. **Follow-up (2.1.133):** the two
+   keys must be sent in **separate** `send-keys` calls with a 0.3s gap.
+   2.1.133's TUI reads stdin fast enough that `send-keys Down Enter` in
+   one call confirms the default-highlighted "1. No, exit" before the
+   cursor visually advances — surfaced on a fresh DMG install on a new
+   Mac, second crash-loop bug from the same dialog.
 
 5. **`screencapture: No such file or directory`** — the screen-capture
    plist's `PATH` had `/usr/local/bin:/usr/bin:/bin` but the system
