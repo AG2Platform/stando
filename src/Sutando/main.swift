@@ -101,6 +101,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let sutandoTmuxSocket = "/tmp/sutando-tmux.sock"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Default to the "internal" Sparkle channel so the appcast items
+        // tagged <sparkle:channel>internal</sparkle:channel> aren't
+        // filtered out. Without this, fresh installs would never see
+        // updates because Sparkle treats untagged items as "general"
+        // channel and tagged items require an explicit user opt-in.
+        // `register` only sets the default — users can override with
+        // `defaults write com.sutando.app SUSelectedChannel beta` etc.
+        UserDefaults.standard.register(defaults: ["SUSelectedChannel": "internal"])
+
         // Self-preventive single-instance: if another Sutando.app is already
         // running (e.g. manual double-launch or leftover from restartSelf()),
         // quit immediately. Prevents the menu-bar-icon ghost stack that

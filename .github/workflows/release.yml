@@ -162,17 +162,47 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: bash app/notarize.sh "$GITHUB_WORKSPACE/app/build/Sutando.dmg"
 
+      - name: Rename artifacts with version
+        # Must run BEFORE generate-appcast — Sparkle embeds the literal
+        # filename it sees on disk into the enclosure URL, and we need
+        # that to match the GitHub Release asset name (versioned).
+        run: |
+          cd "$GITHUB_WORKSPACE/app/build"
+          if [ -f Sutando.dmg ]; then
+            mv Sutando.dmg "Sutando-${{ steps.meta.outputs.version }}.dmg"
+          fi
+
       - name: Generate signed appcast
         if: env.SPARKLE_PRIVATE_KEY_FILE != ''
         env:
           SPARKLE_CHANNEL: ${{ steps.meta.outputs.channel }}
         run: bash app/sparkle/generate-appcast.sh "$GITHUB_WORKSPACE/app/build"
 
-      - name: Rename artifacts with version
+      - name: Rewrite appcast enclosure URLs to GitHub-asset URLs
+        # generate_appcast emits enclosure URLs as bare filenames (or
+        # whatever its --download-url-prefix was). For releases/latest
+        # to keep working as new versions ship, we point each enclosure
+        # at the versioned asset on this specific release tag. Sparkle
+        # follows the exact URL — no GitHub-side latest-redirect magic.
         run: |
           cd "$GITHUB_WORKSPACE/app/build"
-          if [ -f Sutando.dmg ]; then
-            mv Sutando.dmg "Sutando-${{ steps.meta.outputs.version }}.dmg"
+          if [ -f appcast.xml ]; then
+            VERSION="${{ steps.meta.outputs.version }}"
+            BASE_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
+            python3 - <<EOF
+          import re, pathlib
+          p = pathlib.Path("appcast.xml")
+          xml = p.read_text()
+          # Replace any enclosure url that points at a Sutando*.dmg with
+          # the canonical versioned GitHub Release asset URL.
+          xml = re.sub(
+              r'url="[^"]*Sutando[^"]*\.dmg"',
+              f'url="${BASE_URL}/Sutando-${VERSION}.dmg"',
+              xml,
+          )
+          p.write_text(xml)
+          print(xml)
+          EOF
           fi
 
       - name: Upload artifacts to job
