@@ -66,6 +66,37 @@ SEND_ALLOWED_PREFIXES = (
 
 _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*([^\s`~][^`~]*)?\s*$")
 
+# Discord-state references in task bodies that codex sandbox cannot resolve.
+# When a team/other-tier task asks the agent to look at a specific channel
+# or DM context, the codex sandbox path can't fulfill it (no Discord token,
+# no server access). Detected via channel-mention syntax `<#1234>`. The
+# bridge intercepts these BEFORE writing the task, posts a silent note to
+# the appropriate guild's escalation_channel, and writes a tier instruction
+# that tells the agent to NO-REPLY archive (no public "Sandbox unavailable"
+# string). Per msze_'s 2026-05-07 directive + Chi's "ship 1" call.
+_DISCORD_CHANNEL_REF_RE = re.compile(r"<#(\d+)>")
+
+# User-mention regex used by escalation cc_ids extraction. Critical: this
+# explicitly rejects role mentions `<@&id>` (the leading `&` after `<@`).
+# Earlier code did `s.strip("<@>")` after a startswith("<@") check, which
+# matched both shapes — role mentions then produced `&123` and `int(...)`
+# raised ValueError, killing the escalation post entirely. Per MacBook's
+# #639 v4 line-level review.
+_DISCORD_USER_MENTION_RE = re.compile(r"^<@(\d+)>$")
+
+
+def _extract_user_id_mentions(mention_strs):
+    """Parse `<@user_id>` strings from a sequence into int user_ids. Skips
+    role mentions `<@&role_id>` and any malformed entry. Used by escalation
+    paths that build a Discord `AllowedMentions(users=...)` list from
+    access.json's `escalation_cc_user_ids`."""
+    out = []
+    for s in mention_strs or ():
+        m = _DISCORD_USER_MENTION_RE.match(s)
+        if m:
+            out.append(int(m.group(1)))
+    return out
+
 
 def _is_fence_open_line(line: str):
     """Return the fence opener string if `line` is a real Markdown block-fence line.
@@ -381,6 +412,1322 @@ def load_channel_allowed(channel_id):
         return None
     return cfg[1]
 
+def load_channel_auto_react(channel_id):
+    """Return list of emoji strings to auto-react with on each new message in this
+    channel, or empty list if not configured. Reactions land at gateway-event
+    speed (~hundreds of ms) while task-file processing happens downstream —
+    gives users an immediate visual ack that the bot saw their message.
+    The task handler removes the reaction when it posts a response."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+        cfg = data.get("groups", {}).get(str(channel_id))
+        if isinstance(cfg, dict):
+            val = cfg.get("auto_react", [])
+            return val if isinstance(val, list) else []
+        return []
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# AG2 auto-mod LLM-judge helpers (per `notes/ag2-moderator-policy.md` §6.1).
+# Locked-in 2026-05-06 with msze + Chi: codex CLI + gpt-4o-mini, batched
+# 5s/20msgs, 7 rules + 2 global guardrails (G1 mod immunity / G2 escalate-on-
+# uncertainty). This PR ships the pure helpers + tests; the on_message hook +
+# action dispatchers ship in a follow-up so each PR stays focused.
+#
+# Per-guild config in access.json:
+#   {"guilds": {"<guild_id>": {
+#     "mod_active": true,
+#     "moderator_roles": ["<role_id_1>", "<role_id_2>"],
+#     ...
+#   }}}
+# `mod_active` defaults to false; the bridge does no auto-mod on a guild
+# without an explicit opt-in. AG2 starts in observer-mode until msze + Chi
+# flip the flag.
+
+# Per-rule confidence thresholds for G2 (escalate if confidence < threshold).
+MOD_RULE_CONFIDENCE = {
+    "rule_1": 0.85,  # crypto-job spam → auto-delete
+    "rule_2": 0.85,  # CSAM-bait → auto-delete + T&S rec
+    "rule_3": 0.85,  # cross-channel duplicate → server-rules-check
+    "rule_4": 0.85,  # job-availability → delete + redirect
+    "rule_5": 0.90,  # personal attack → escalate-only (highest FP risk)
+    "rule_6": 0.85,  # bare invite link → conditional delete
+    "rule_7": 0.85,  # off-topic streak → polite reminder
+}
+
+
+def _load_mod_config(guild_id):
+    """Return (mod_active: bool, moderator_role_ids: list[str]) for `guild_id`
+    from access.json. Defaults: (False, []) if guild not configured or
+    access.json missing/malformed. Defensive parsing — caller treats
+    mod_active=False as "do nothing" (the safe default)."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+    except Exception:
+        return False, []
+    g = data.get("guilds", {}).get(str(guild_id))
+    if not isinstance(g, dict):
+        return False, []
+    active = bool(g.get("mod_active", False))
+    roles_raw = g.get("moderator_roles", [])
+    roles = [str(r) for r in roles_raw] if isinstance(roles_raw, list) else []
+    return active, roles
+
+
+def _is_moderator(member, mod_role_ids):
+    """G1 — moderator immunity gate. Return True if `member` has any role in
+    `mod_role_ids` (or owns the guild). Pure function for testability —
+    caller passes the resolved role list."""
+    if member is None:
+        return False
+    # Server owner is always a mod
+    guild = getattr(member, "guild", None)
+    if guild is not None and getattr(guild, "owner_id", None) == getattr(member, "id", None):
+        return True
+    member_roles = getattr(member, "roles", []) or []
+    member_role_ids = {str(getattr(r, "id", r)) for r in member_roles}
+    return bool(member_role_ids.intersection(set(mod_role_ids)))
+
+
+def _should_auto_action(verdict, rule_threshold=None):
+    """G2 — confidence gate. Return True if the LLM verdict is confident
+    enough to act on. `verdict` is a dict with at least `confidence` (float)
+    and `rule_match` (str like "rule_1"). Below-threshold verdicts go to
+    escalate-only path even if rule_match is set."""
+    if not isinstance(verdict, dict):
+        return False
+    if not verdict.get("rule_match"):
+        return False
+    rm = verdict.get("rule_match")
+    threshold = rule_threshold if rule_threshold is not None else MOD_RULE_CONFIDENCE.get(rm, 0.85)
+    try:
+        conf = float(verdict.get("confidence", 0))
+    except (TypeError, ValueError):
+        return False
+    return conf >= threshold
+
+
+def _parse_judge_output(json_str):
+    """Parse codex's batched-judge output into a list of verdict dicts.
+
+    Expected schema (per message):
+        {
+          "msg_id": "<discord_msg_id>",
+          "rule_match": "rule_1" | "rule_2" | ... | null,
+          "confidence": 0.0–1.0,
+          "rationale": "<short explanation>"
+        }
+
+    Returns [] on any parse / schema failure (caller treats empty as
+    "no verdicts; don't act"). Lenient on extra keys; strict on required
+    keys (msg_id, confidence). `rule_match` may be null for clean messages.
+    """
+    if not isinstance(json_str, str) or not json_str.strip():
+        return []
+    try:
+        data = json.loads(json_str)
+    except Exception:
+        return []
+    # Accept either a list of verdicts or {"verdicts": [...]} wrapper
+    if isinstance(data, dict):
+        data = data.get("verdicts", [])
+    if not isinstance(data, list):
+        return []
+    out = []
+    for v in data:
+        if not isinstance(v, dict):
+            continue
+        msg_id = v.get("msg_id")
+        conf = v.get("confidence")
+        if not msg_id or conf is None:
+            continue
+        try:
+            conf_f = float(conf)
+        except (TypeError, ValueError):
+            continue
+        rule_match = v.get("rule_match")
+        if rule_match is not None and not isinstance(rule_match, str):
+            continue
+        rationale = v.get("rationale") if isinstance(v.get("rationale"), str) else ""
+        verdict = {
+            "msg_id": str(msg_id),
+            "rule_match": rule_match,
+            "confidence": max(0.0, min(1.0, conf_f)),
+            "rationale": rationale,
+        }
+        # Rule 3 carries an extra boolean: violates_server_rules. If the LLM
+        # returned it, preserve it so the dispatcher can branch on legit
+        # cross-post (false) vs spam (true). Default missing → True (act
+        # conservatively: treat as violation when LLM didn't say otherwise).
+        if "violates_server_rules" in v:
+            try:
+                verdict["violates_server_rules"] = bool(v.get("violates_server_rules"))
+            except Exception:
+                pass
+        out.append(verdict)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# AG2 auto-mod LLM-judge — codex subprocess wrapper + prompt builder.
+# Per `notes/ag2-moderator-policy.md` §6.1: codex CLI + gpt-4o-mini, batched
+# 5s/20msgs. PR2 of 3 — pure prompt builder + the codex invocation. Action
+# dispatchers + on_message buffer/flush wiring come in PR3.
+
+# Prefix that the LLM judge prompt includes for every batch — names the rules
+# and global guardrails. Source of truth for rule definitions stays in
+# `notes/ag2-moderator-policy.md`; this is the LLM-readable distillation.
+MOD_JUDGE_SYSTEM_PROMPT = """You are a Discord moderation judge. For each user message in the batch below, decide whether it matches one of these rules. Return STRICT JSON.
+
+Rules (return rule_match = "rule_N" if the message matches; null if clean):
+
+rule_1 — Crypto-job-listing spam: message advertises crypto-related employment with payment offers (e.g. "Beta tester $X/hour", "Moderator $Y/week") + @everyone/@here/DM-bait. Excludes legit hiring posts in #jobs that mention crypto as a topic but lack scam markers.
+
+rule_2 — CSAM-bait invite spam: explicit-content language (teen, underage, leaks) AND mass-broadcast pattern (@everyone/@here OR Discord invite tied to such content). Must combine both signals.
+
+rule_3 — Cross-channel duplicate: this is detected upstream by the bridge (caller sets rule_match=rule_3 in the prompt context if applicable). When triggered, your job is to also judge whether the duplicates VIOLATE any general server rule (separate from duplication itself).
+
+rule_4 — Job-availability post outside #jobs: user offering their own services for hire ("I'm a full-stack dev looking for work", "iOS dev DM me", "Looking for teammate to build X"). Excludes hiring-FROM-a-company posts and on-topic mentions where someone happens to mention they're available.
+
+rule_5 — Personal attack / derogatory toward community: personal attack, harassment, slurs, name-calling, content asserting community members are worthless / bad / criminal. Excludes vigorous technical disagreement, self-deprecation, non-targeted humor.
+
+rule_6 — Bare invite-link from non-mod: message contains a Discord invite (`discord.gg/...`) or external server invite link, with no surrounding conversational context, in a non-#geo / non-#announcements channel. Exception: if the message is a reply to a parent that's asking for that invite, return rule_match=null.
+
+rule_7 — Off-topic in focused channel: this is detected upstream as a streak of 5+ off-topic messages. When triggered, your job is to verify each message is indeed off-topic for the channel's stated topic.
+
+Global guardrails (apply to every rule):
+- G1: Moderator messages are always rule_match=null regardless of content. Bridge enforces this upstream; you can rely on the moderator filter happening before this prompt.
+- G2: When uncertain, lower the confidence (don't force a match). Bridge gates auto-action on confidence ≥ per-rule threshold.
+
+Output schema — STRICT JSON, no prose, no code fences:
+{"verdicts": [
+  {"msg_id": "<discord_msg_id>", "rule_match": "rule_N" | null, "confidence": 0.0–1.0, "rationale": "<one sentence>"}
+]}
+
+One entry per input message. Preserve msg_id strings exactly as given.
+"""
+
+
+def _format_judge_prompt(messages, rules_context=""):
+    """Build the codex judge prompt for a batch of messages.
+
+    `messages`: list of dicts with at least {msg_id, channel_name, author_name, content, is_reply, parent_content}.
+    `rules_context`: optional extra context (e.g. for Rule 3 the cross-channel-
+    duplicate evidence; for Rule 7 the channel topic + recent context).
+    Returns the full prompt string ready to feed `codex exec ... -- <prompt>`.
+    """
+    lines = [MOD_JUDGE_SYSTEM_PROMPT.strip(), ""]
+    if rules_context:
+        lines.append("Additional context for this batch:")
+        lines.append(rules_context.strip())
+        lines.append("")
+    lines.append("Messages to judge:")
+    for m in messages:
+        msg_id = m.get("msg_id", "?")
+        ch = m.get("channel_name", "?")
+        author = m.get("author_name", "?")
+        content = (m.get("content") or "").replace("\n", " ").strip()[:500]
+        is_reply = bool(m.get("is_reply"))
+        parent = m.get("parent_content", "") if is_reply else ""
+        prefix = f"  msg_id={msg_id} #{ch} @{author}"
+        if is_reply and parent:
+            parent_short = parent.replace("\n", " ").strip()[:120]
+            prefix += f' [reply to: "{parent_short}"]'
+        lines.append(f"{prefix}:")
+        lines.append(f"    {content!r}")
+    lines.append("")
+    lines.append("Respond with STRICT JSON only.")
+    return "\n".join(lines)
+
+
+async def _codex_judge_batch(messages, rules_context="", model=None, timeout_s=30):
+    """Async wrapper that invokes codex CLI to judge a batch of messages.
+
+    Spawns `codex exec --sandbox read-only -o <tmpfile> -- <prompt>` via
+    asyncio subprocess. The `-o` flag writes only the agent's final
+    message to the file (no agent-headers / token counts / shell
+    execution traces) — that's the clean read path for codex-as-judge.
+    `model` is optional; None uses codex's configured default
+    (gpt-5.5 currently). Returns list of verdict dicts; [] on any
+    failure (timeout, non-zero exit, malformed JSON, missing output).
+
+    Caller is responsible for the buffer/flush logic that decides WHEN to
+    invoke this. This function is stateless.
+
+    Tests should patch `_run_codex_subprocess` to avoid real LLM calls.
+    """
+    if not messages:
+        return []
+    prompt = _format_judge_prompt(messages, rules_context)
+    raw = await _run_codex_subprocess(prompt, model, timeout_s)
+    return _parse_judge_output(raw)
+
+
+async def _run_codex_subprocess(prompt, model, timeout_s):
+    """Default codex subprocess invocation. Patched in tests.
+
+    Uses the `-o <tmpfile>` flag so codex writes ONLY the agent's final
+    message (the JSON we care about) to a tempfile — bypasses the agent-
+    header wrapping that pollutes stdout. Returns the file contents on
+    success, "" on any failure (timeout / non-zero exit / file missing).
+    Stays read-only sandbox (codex won't shell out for any tool).
+
+    `model` is None to use codex's configured default (avoids the
+    "model not supported under ChatGPT account" 400 we'd get with
+    `-m gpt-4o-mini` under that auth path).
+    """
+    import tempfile, os
+    try:
+        out_fd, out_path = tempfile.mkstemp(prefix="sutando-mod-judge-", suffix=".json")
+        os.close(out_fd)
+    except Exception:
+        return ""
+    try:
+        argv = ["codex", "exec", "--sandbox", "read-only", "-o", out_path]
+        if model:
+            argv.extend(["-m", model])
+        argv.extend(["--", prompt])
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception:
+            return ""
+        try:
+            await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return ""
+        if proc.returncode != 0:
+            return ""
+        try:
+            with open(out_path, "r", encoding="utf-8", errors="replace") as fp:
+                return fp.read()
+        except Exception:
+            return ""
+    finally:
+        try:
+            os.unlink(out_path)
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# AG2 auto-mod LLM-judge — per-rule action dispatchers (PR3 of 4).
+# Per `notes/ag2-moderator-policy.md` §6.1. These are the async functions
+# that execute Discord operations (delete / post) when a verdict matches a
+# rule. They're parameterized so they can be unit-tested with mocked
+# discord.py message + channel objects (no real Discord API hits in tests).
+# Buffer + flush + on_message wiring + Rule 3/7 stateful detectors come in
+# the final PR4.
+
+# Per-guild moderation channels and CC roster live in access.json under
+# `guilds.<guild_id>` keys: `escalation_channel` (int channel id),
+# `escalation_cc_user_ids` (list of user-id strings or ints),
+# `redirect_channel_jobs` (int channel id for Rule 4). No bridge-side
+# default — operator must configure per-guild.
+
+
+def _load_mod_server_config(guild_id):
+    """Return dict of per-guild moderation config:
+        {
+          "escalation_channel": int | None,
+          "escalation_ccs": tuple[str, ...],   # `<@id>` mention strings
+          "redirect_channel_jobs": int | None,
+        }
+    Defaults to empty/None on any missing/malformed access.json entry.
+    Caller must handle None channels (skip the action with a log line)."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+    except Exception:
+        return {"escalation_channel": None, "escalation_ccs": (), "redirect_channel_jobs": None}
+    g = data.get("guilds", {}).get(str(guild_id))
+    if not isinstance(g, dict):
+        return {"escalation_channel": None, "escalation_ccs": (), "redirect_channel_jobs": None}
+    def _to_int(v):
+        try:
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+    raw_ccs = g.get("escalation_cc_user_ids", [])
+    ccs = tuple(f"<@{u}>" for u in raw_ccs) if isinstance(raw_ccs, list) else ()
+    return {
+        "escalation_channel": _to_int(g.get("escalation_channel")),
+        "escalation_ccs": ccs,
+        "redirect_channel_jobs": _to_int(g.get("redirect_channel_jobs")),
+    }
+
+
+def _guild_id_of(message):
+    """Best-effort extract guild_id from a discord.Message-like object.
+    Returns None for DMs or when guild attribute is missing."""
+    try:
+        g = getattr(message, "guild", None)
+        return getattr(g, "id", None) if g is not None else None
+    except Exception:
+        return None
+
+
+def _sanitize_for_quote(text):
+    """Neutralize mention-shaped substrings so quoting them in the mod
+    channel doesn't ping anyone. Inserts a zero-width space after each `@`
+    so Discord's parser no longer matches `@everyone`, `<@id>`, `<@&id>`,
+    etc. Also collapses `>` so the embedded line doesn't break the outer
+    blockquote. Reads visually identical to the original."""
+    if not isinstance(text, str):
+        return ""
+    # ZWSP = U+200B; invisible but breaks mention/everyone parsing
+    return (
+        text
+        .replace("@", "@\u200b")
+        .replace("\n>", "\n>\u200b")  # avoid nested blockquote issues inside our `> ` line
+    )
+
+
+def _extract_referenced_channels(text):
+    """Return the list of int channel-ids referenced via `<#1234>` syntax in
+    `text`. Empty list if none. Used by the bridge's task-write path to
+    detect task bodies asking for Discord-state codex sandbox can't resolve."""
+    if not text:
+        return []
+    return [int(m) for m in _DISCORD_CHANNEL_REF_RE.findall(text)]
+
+
+async def _silent_escalate_for_discord_state(message, user_task_text):
+    """Detect tasks that reference Discord-side state (channel mentions like
+    `<#1234>`) and silently escalate to the appropriate guild's
+    `escalation_channel` rather than letting the agent fall into the cold
+    "Sandbox unavailable" fallback when codex sandbox tries to fulfill what
+    it structurally can't (no Discord token, no server access).
+
+    Decision flow:
+      1. If `user_task_text` contains no `<#...>` reference → return False
+         (caller proceeds with normal team/other tier instruction).
+      2. Resolve target guild for escalation:
+         a. If the task originated in a guild channel → use that guild.
+         b. Else (DM origin) → look up the FIRST referenced channel and use
+            that channel's guild.
+      3. Look up `escalation_channel` from access.json's `guilds.<gid>` block.
+      4. POST a silent notification to that channel summarizing sender +
+         original task body. Returns True on attempted post (regardless of
+         success), so the caller writes the "already_escalated" tier
+         instruction and the agent NO-REPLY archives.
+      5. If no escalation channel can be resolved → still return True so
+         the agent stays silent (msze_'s "don't respond publicly" intent).
+
+    Returns True iff the task was identified as Discord-state-reference and
+    the agent should NO-REPLY archive instead of running codex.
+    """
+    refs = _extract_referenced_channels(user_task_text)
+    if not refs:
+        return False
+
+    # Determine target guild for escalation
+    target_guild_id = None
+    msg_guild = getattr(message, "guild", None)
+    if msg_guild is not None:
+        target_guild_id = msg_guild.id
+    else:
+        # DM origin — try resolving the first referenced channel to its guild.
+        # Two extra gates here vs origin-guild path (per MacBook's #639 review):
+        #   (a) reject anything that isn't a guild text/thread channel — a fetch
+        #       success on a category/voice/etc. doesn't mean it's safe to use
+        #       for routing, and we want fail-closed on weird shapes.
+        #   (b) require the target guild to have `mod_active=True` (explicit
+        #       opt-in for moderation flow) — without this, an arbitrary user
+        #       DM'ing a `<#...>` reference for ANY guild the bot is in could
+        #       leak their request into that guild's escalation channel.
+        guild_text_types = {
+            getattr(discord, "ChannelType", None) and discord.ChannelType.text,
+            getattr(discord, "ChannelType", None) and discord.ChannelType.public_thread,
+            getattr(discord, "ChannelType", None) and discord.ChannelType.private_thread,
+            getattr(discord, "ChannelType", None) and discord.ChannelType.news_thread,
+            getattr(discord, "ChannelType", None) and discord.ChannelType.news,
+        }
+        guild_text_types.discard(None)
+        for ref_ch_id in refs:
+            try:
+                ch = client.get_channel(ref_ch_id)
+                if ch is None:
+                    ch = await client.fetch_channel(ref_ch_id)
+            except Exception as e:
+                print(f"  [discord-state-escalate] failed to resolve channel {ref_ch_id}: {e}", flush=True)
+                continue
+            if ch is None:
+                continue
+            ch_type = getattr(ch, "type", None)
+            if guild_text_types and ch_type is not None and ch_type not in guild_text_types:
+                print(f"  [discord-state-escalate] channel {ref_ch_id} type={ch_type} is not a guild text/thread channel; skipping", flush=True)
+                continue
+            ch_guild = getattr(ch, "guild", None)
+            if ch_guild is None:
+                continue
+            # DM-origin gate 1: require explicit mod_active=True for routing
+            # (the same opt-in signal #633's mod-judge uses).
+            try:
+                guild_active, _roles = _load_mod_config(ch_guild.id)
+            except Exception:
+                guild_active = False
+            if not guild_active:
+                print(f"  [discord-state-escalate] guild {ch_guild.id} has mod_active=False; not routing DM-referenced escalation", flush=True)
+                continue
+            # DM-origin gate 2 (per MacBook #639 v2 follow-up review):
+            # `mod_active=True` is an opt-in gate, NOT a sender-auth gate.
+            # A team-tier-trusted DM sender is "trusted by Sutando" but that
+            # doesn't extend to routing escalations to ANOTHER guild they
+            # may not be a member of. Require the sender to be a member of
+            # the target guild before routing.
+            sender_id = getattr(message.author, "id", None) if hasattr(message, "author") else None
+            if sender_id is None:
+                continue
+            sender_member = None
+            try:
+                if hasattr(ch_guild, "get_member"):
+                    sender_member = ch_guild.get_member(sender_id)
+            except Exception as e:
+                print(f"  [discord-state-escalate] get_member raised for sender {sender_id} in guild {ch_guild.id}: {e}", flush=True)
+                sender_member = None
+            # If cache miss, fall back to HTTP. Per discord.py docs:
+            #   `Guild.fetch_member()` raises `discord.NotFound` when the user
+            #   is NOT in the guild (NOT `None`); also `discord.Forbidden` if
+            #   the bot lacks permission, and `discord.HTTPException` for
+            #   transient errors. All three should silently fail-closed (no
+            #   routing). Per MacBook's #639 v3 follow-up review.
+            if sender_member is None and hasattr(ch_guild, "fetch_member"):
+                _NotFound = getattr(discord, "NotFound", None)
+                _Forbidden = getattr(discord, "Forbidden", None)
+                _HTTPException = getattr(discord, "HTTPException", None)
+                try:
+                    sender_member = await ch_guild.fetch_member(sender_id)
+                except Exception as e:
+                    if _NotFound is not None and isinstance(e, _NotFound):
+                        # Expected: user is not in this guild — the silent path
+                        sender_member = None
+                    elif _Forbidden is not None and isinstance(e, _Forbidden):
+                        print(f"  [discord-state-escalate] fetch_member forbidden for sender {sender_id} in guild {ch_guild.id}: {e}", flush=True)
+                        sender_member = None
+                    elif _HTTPException is not None and isinstance(e, _HTTPException):
+                        print(f"  [discord-state-escalate] fetch_member http error for sender {sender_id} in guild {ch_guild.id}: {e}", flush=True)
+                        sender_member = None
+                    else:
+                        print(f"  [discord-state-escalate] fetch_member unexpected error for sender {sender_id} in guild {ch_guild.id}: {e}", flush=True)
+                        sender_member = None
+            if sender_member is None:
+                print(f"  [discord-state-escalate] sender {sender_id} not a member of guild {ch_guild.id}; not routing DM-referenced escalation", flush=True)
+                continue
+            target_guild_id = ch_guild.id
+            break
+
+    if target_guild_id is None:
+        print(f"  [discord-state-escalate] no target guild resolvable; staying silent (NO-REPLY)", flush=True)
+        return True
+
+    cfg = _load_mod_server_config(target_guild_id)
+    esc_ch_id = cfg.get("escalation_channel") if isinstance(cfg, dict) else None
+    if not esc_ch_id:
+        print(f"  [discord-state-escalate] guild {target_guild_id} has no escalation_channel; staying silent", flush=True)
+        return True
+
+    try:
+        esc_ch = client.get_channel(esc_ch_id)
+        if esc_ch is None:
+            esc_ch = await client.fetch_channel(esc_ch_id)
+    except Exception as e:
+        print(f"  [discord-state-escalate] failed to resolve escalation channel {esc_ch_id}: {e}", flush=True)
+        return True
+
+    if esc_ch is None:
+        return True
+
+    sender_id = getattr(message.author, "id", "?") if hasattr(message, "author") else "?"
+    origin_ch_id = getattr(message.channel, "id", "?") if hasattr(message, "channel") else "?"
+    body_lines = [
+        "**Sutando — task escalation**",
+        "",
+        f"Sender: <@{sender_id}>",
+        f"Origin: <#{origin_ch_id}>",
+        f"Referenced channel(s): {', '.join(f'<#{r}>' for r in refs)}",
+        "",
+        "Task body:",
+        "```",
+        (user_task_text or "")[:1500],
+        "```",
+        "",
+        ("This task references Discord-side state (channel content / message lookup) that the bot's "
+         "sandboxed processing path cannot access. A moderator can review and respond directly if appropriate."),
+    ]
+    cc_ids = []
+    if cfg.get("escalation_ccs"):
+        cc_ids = _extract_user_id_mentions(cfg["escalation_ccs"])
+    am = discord.AllowedMentions(everyone=False, roles=False, users=cc_ids)
+    try:
+        await esc_ch.send("\n".join(body_lines), allowed_mentions=am)
+        print(f"  [discord-state-escalate] posted to channel {esc_ch_id} for guild {target_guild_id}", flush=True)
+    except Exception as e:
+        print(f"  [discord-state-escalate] post failed: {e}", flush=True)
+    return True
+
+
+async def _post_mod_escalation(client_ref, suspect_message, rule_label, llm_rationale, extras_md=""):
+    """Shared escalation post template. Used by Rules 1/2/3-violates/5/6.
+
+    `client_ref` is the discord.Client (so we can resolve the mod channel
+    by id). `suspect_message` is the discord.Message that triggered. Posts
+    a structured msg to #moderator-only with cc-mentions of the 3 mods.
+    Returns the posted message object on success, None on failure.
+    """
+    try:
+        guild_id = _guild_id_of(suspect_message)
+        cfg = _load_mod_server_config(guild_id)
+        ch_id = cfg["escalation_channel"]
+        if ch_id is None:
+            print(f"  [mod-escalate] no escalation_channel configured for guild {guild_id}; skipping", flush=True)
+            return None
+        mod_ch = client_ref.get_channel(ch_id)
+        if mod_ch is None:
+            print(f"  [mod-escalate] {ch_id} not in client cache; skipping", flush=True)
+            return None
+        suspect_link = ""
+        try:
+            suspect_link = f" — [jump]({suspect_message.jump_url})" if hasattr(suspect_message, "jump_url") else ""
+        except Exception:
+            pass
+        author = getattr(suspect_message.author, "display_name", None) or str(suspect_message.author)
+        ch_name = getattr(suspect_message.channel, "name", "?")
+        # Sanitize the suspect message preview to prevent mention-injection:
+        # a malicious message containing @everyone / <@user> / <@&role> would
+        # otherwise emit real pings when we replay it in the mod channel. We
+        # neutralize by inserting a zero-width space after the @ — the mention
+        # is no longer parsed by Discord, but reads identically.
+        raw_content = (getattr(suspect_message, "content", None) or "")[:300]
+        body_preview = _sanitize_for_quote(raw_content)
+        body_lines = [
+            f"**Mod escalation — {rule_label}** (auto-judge)",
+            "",
+            f"From: **{author}** in `#{ch_name}`{suspect_link}",
+            "Suspect message preview:",
+            f"> {body_preview}" if body_preview else "> (no text content)",
+            "",
+            f"LLM rationale: {llm_rationale}",
+        ]
+        if extras_md:
+            body_lines.append("")
+            body_lines.append(extras_md.strip())
+        if cfg["escalation_ccs"]:
+            body_lines.append("")
+            body_lines.append(f"cc {' '.join(cfg['escalation_ccs'])}")
+        # Belt + suspenders: also use Discord's allowed_mentions to whitelist
+        # ONLY the explicit cc user-ids; suppress @everyone/@here/@role and
+        # any user mentions not in the cc list.
+        try:
+            cc_ids = _extract_user_id_mentions(cfg["escalation_ccs"])
+        except Exception:
+            cc_ids = []
+        try:
+            am = discord.AllowedMentions(everyone=False, roles=False, users=cc_ids)
+            return await mod_ch.send("\n".join(body_lines), allowed_mentions=am)
+        except Exception:
+            # Fallback if discord.AllowedMentions is unavailable in stub/test env
+            return await mod_ch.send("\n".join(body_lines))
+    except Exception as e:
+        print(f"  [mod-escalate] post failed: {e}", flush=True)
+        return None
+
+
+async def _action_delete_and_escalate(client_ref, suspect_message, verdict, extras_md=""):
+    """Rules 1, 2, 6 (and Rule 3 when duplicates violate server rules):
+    delete the offending message + post mod escalation. Returns
+    (deleted_ok: bool, escalation_msg or None)."""
+    deleted_ok = False
+    try:
+        await suspect_message.delete()
+        deleted_ok = True
+    except Exception as e:
+        print(f"  [mod-action] delete failed for {getattr(suspect_message,'id','?')}: {e}", flush=True)
+    rule_label = verdict.get("rule_match", "rule_?")
+    rationale = verdict.get("rationale", "")
+    esc = await _post_mod_escalation(client_ref, suspect_message, rule_label, rationale, extras_md)
+    return deleted_ok, esc
+
+
+async def _action_redirect_to_jobs(client_ref, suspect_message, verdict):
+    """Rule 4: delete the misplaced message + post a redirect with
+    @-mention in the same channel pointing to #jobs. No mod escalation
+    (legit user, just wrong channel). Returns (deleted_ok, redirect_msg)."""
+    deleted_ok = False
+    try:
+        await suspect_message.delete()
+        deleted_ok = True
+    except Exception as e:
+        print(f"  [mod-action] redirect-delete failed: {e}", flush=True)
+    redirect_msg = None
+    try:
+        author_id = getattr(suspect_message.author, "id", None)
+        if author_id is None:
+            return deleted_ok, None
+        guild_id = _guild_id_of(suspect_message)
+        jobs_ch = _load_mod_server_config(guild_id)["redirect_channel_jobs"]
+        if jobs_ch is None:
+            print(f"  [mod-action] no redirect_channel_jobs configured for guild {guild_id}; skipping redirect post", flush=True)
+            return deleted_ok, None
+        body = (
+            f"<@{author_id}> Looking-for-work posts belong in <#{jobs_ch}> — "
+            f"please re-post there. (Automated reminder.)"
+        )
+        redirect_msg = await suspect_message.channel.send(body)
+    except Exception as e:
+        print(f"  [mod-action] redirect post failed: {e}", flush=True)
+    return deleted_ok, redirect_msg
+
+
+async def _action_escalate_only(client_ref, suspect_message, verdict, extras_md=""):
+    """Rule 5 (personal attack), Rule 3 non-violating duplicates, and any
+    G2-uncertain verdict: post to #moderator-only WITHOUT deleting the
+    suspect message. Mods decide. Returns the escalation message or None."""
+    rule_label = verdict.get("rule_match", "rule_?")
+    rationale = verdict.get("rationale", "")
+    return await _post_mod_escalation(client_ref, suspect_message, rule_label, rationale, extras_md)
+
+
+async def _action_polite_reminder(channel, channel_topic_hint=None):
+    """Rule 7: post one polite reminder when a 5-msg off-topic streak hits.
+    No @-mention (don't single anyone out). Returns the reminder message
+    or None on failure. Caller is responsible for cooldown bookkeeping
+    (only fire once per channel per cooldown window) — this function just
+    posts."""
+    try:
+        topic = channel_topic_hint or "#" + getattr(channel, "name", "this channel")
+        body = (
+            f"Hey folks 👋 — looks like the chat's drifting from the {topic} focus. "
+            f"No worries, but if you want to keep going, a more general channel might be a great spot. "
+            f"Carry on if it's still relevant!"
+        )
+        return await channel.send(body)
+    except Exception as e:
+        print(f"  [mod-action] polite reminder post failed: {e}", flush=True)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# AG2 auto-mod LLM-judge — stateful detectors (PR4 of 5).
+# Two pure state-machine classes that the buffer/flush logic in PR5 will
+# call. Each class is parameterized for testability — caller passes in
+# `now_s` rather than the trackers reading `time.time()` themselves.
+#
+# `_DupeTracker` — Rule 3 cross-channel-duplicate detection. Tracks
+# (user_id, normalized_text) → set of (channel_id, ts_s). Rolling 5-min
+# window. Fires when same (user, text) spans ≥3 distinct channels in
+# the window.
+#
+# `_OffTopicStreakTracker` — Rule 7 streak detection. Per-channel
+# rolling list of off-topic verdicts. Mod messages reset the streak.
+# Fires when 5 consecutive off-topic non-mod messages accumulate (per
+# channel, per cooldown).
+
+DUPE_WINDOW_S = 5 * 60      # Rule 3 rolling window: 5 minutes
+DUPE_CHANNEL_THRESHOLD = 3  # Rule 3: fire on 3+ distinct channels in window
+OFFTOPIC_STREAK_LEN = 5     # Rule 7: 5 consecutive off-topic msgs trigger
+OFFTOPIC_REMINDER_COOLDOWN_S = 30 * 60  # Rule 7: 30 min between reminders per channel
+
+
+def _normalize_msg_text(text):
+    """Same normalization as Rule 3 / dedup — lowercase, collapse runs of
+    whitespace, trim, cap at 200 chars. Differs slightly from work-tool
+    dedup (150 chars) — moderation can afford a bit more context for
+    matching cross-channel raid spam."""
+    if not text:
+        return ""
+    return re.sub(r"\s+", " ", text).strip().lower()[:200]
+
+
+class _DupeTracker:
+    """Rule 3 detector. Tracks (user_id, normalized_text) → set of
+    (channel_id, msg_id, ts_s). Rolling 5-min window. Caller passes
+    `now_s` for testability."""
+
+    def __init__(self, window_s=DUPE_WINDOW_S, channel_threshold=DUPE_CHANNEL_THRESHOLD):
+        self._window_s = window_s
+        self._channel_threshold = channel_threshold
+        # key: (user_id_str, normalized_text) → list[(channel_id, msg_id, ts_s)]
+        self._store = {}
+
+    def add(self, user_id, channel_id, msg_id, text, now_s):
+        """Record a message. Returns the dupe-set if this addition triggers
+        Rule 3 (>= channel_threshold distinct channels), else None.
+
+        On trigger, returns list[(channel_id, msg_id)] of all duplicate
+        copies in the window — caller deletes them all + escalates."""
+        key = (str(user_id), _normalize_msg_text(text))
+        if not key[1]:
+            return None  # empty/normalized-to-blank text → ignore
+        bucket = self._store.setdefault(key, [])
+        # Drop entries outside window
+        bucket[:] = [(c, m, t) for (c, m, t) in bucket if (now_s - t) <= self._window_s]
+        bucket.append((str(channel_id), str(msg_id), now_s))
+        distinct_channels = {c for (c, _m, _t) in bucket}
+        if len(distinct_channels) >= self._channel_threshold:
+            # Trigger! Return all duplicate (channel, msg) pairs in window.
+            return [(c, m) for (c, m, _t) in bucket]
+        return None
+
+    def clear(self, user_id, text):
+        """Manual reset for a (user, text) key — used after Rule 3 fires
+        and the duplicates are deleted, so the same evidence doesn't
+        re-trigger on subsequent messages."""
+        key = (str(user_id), _normalize_msg_text(text))
+        self._store.pop(key, None)
+
+    def gc(self, now_s):
+        """Drop empty + expired entries to keep memory bounded. Caller
+        should run this periodically (e.g. on every flush)."""
+        for k in list(self._store.keys()):
+            self._store[k] = [(c, m, t) for (c, m, t) in self._store[k] if (now_s - t) <= self._window_s]
+            if not self._store[k]:
+                del self._store[k]
+
+
+class _OffTopicStreakTracker:
+    """Rule 7 detector. Per-channel rolling list of recent verdicts.
+    Mod messages reset the streak (we don't count them). Fires when
+    OFFTOPIC_STREAK_LEN consecutive non-mod off-topic verdicts accumulate.
+    Per-channel cooldown after each fire so we don't spam reminders."""
+
+    def __init__(self, streak_len=OFFTOPIC_STREAK_LEN, cooldown_s=OFFTOPIC_REMINDER_COOLDOWN_S):
+        self._streak_len = streak_len
+        self._cooldown_s = cooldown_s
+        # channel_id_str → deque-like list of dicts {user_id, ts, off_topic, is_mod}
+        self._streaks = {}
+        # channel_id_str → ts_s of last reminder fire
+        self._last_reminder = {}
+
+    def record(self, channel_id, user_id, off_topic, is_mod, now_s):
+        """Record a message verdict for this channel. Returns True if
+        this addition triggers a reminder (passes cooldown + streak). On
+        trigger, the streak buffer is cleared so the next reminder needs
+        a fresh streak."""
+        ch = str(channel_id)
+        # Mod messages: reset streak (we don't count them at all)
+        if is_mod:
+            self._streaks[ch] = []
+            return False
+        # Cooldown gate: only suppresses if a reminder has already fired
+        # (last_reminder set). Initial state has no entry, so the first
+        # fire is unrestricted.
+        last_fire = self._last_reminder.get(ch)
+        in_cooldown = last_fire is not None and (now_s - last_fire) < self._cooldown_s
+        buf = self._streaks.setdefault(ch, [])
+        buf.append({"user": str(user_id), "ts": now_s, "off_topic": bool(off_topic)})
+        # Cap buffer to streak_len so we don't grow unbounded
+        if len(buf) > self._streak_len:
+            buf[:] = buf[-self._streak_len:]
+        if in_cooldown:
+            return False
+        # Streak fires only if there are streak_len consecutive off-topic
+        # entries from AFTER the cooldown window expired. Entries during
+        # cooldown are stale and don't count toward the next fire.
+        if last_fire is None:
+            cutoff = 0  # no prior fire — all entries valid
+        else:
+            cutoff = last_fire + self._cooldown_s
+        relevant = [e for e in buf if e["ts"] > cutoff]
+        if len(relevant) >= self._streak_len and all(e["off_topic"] for e in relevant[-self._streak_len:]):
+            self._last_reminder[ch] = now_s
+            self._streaks[ch] = []  # clear so next reminder needs fresh streak
+            return True
+        return False
+
+    def reset_channel(self, channel_id):
+        """Manual reset (e.g. after a mod posts in the channel out-of-band)."""
+        self._streaks[str(channel_id)] = []
+
+
+# ---------------------------------------------------------------------------
+# AG2 auto-mod LLM-judge — verdict dispatcher (PR5 of 6).
+# Takes a batch of LLM verdicts + the source messages, routes each to the
+# right action (delete/escalate/redirect/polite-reminder) per the rule
+# match. Buffer + on_message integration ship in PR6.
+
+# Per-rule action routing. Rule 3 is special-cased (handled at on_message
+# time by _DupeTracker before the judge runs); the dispatcher handles
+# verdicts on Rule 3-flagged messages by either delete-and-escalate (if
+# the LLM judges them as also violating server rules) or escalate-only.
+RULE_TO_ACTION = {
+    "rule_1": "delete_and_escalate",  # crypto-job spam
+    "rule_2": "delete_and_escalate",  # CSAM-bait spam
+    "rule_3": "rule_3_conditional",   # routed via verdict.violates_server_rules
+    "rule_4": "redirect_to_jobs",     # job-availability misplaced
+    "rule_5": "escalate_only",        # personal attack
+    "rule_6": "delete_and_escalate",  # bare invite link
+    "rule_7": "rule_7_streak",        # off-topic streak (handled separately)
+}
+
+
+async def _dispatch_verdicts(verdicts, messages_by_id, client_ref, off_topic_tracker=None):
+    """Process a batch of verdicts. For each verdict:
+      - Look up the corresponding source message by msg_id.
+      - Apply G2: if confidence below per-rule threshold, escalate-only.
+      - Otherwise route to the action keyed in RULE_TO_ACTION.
+      - For rule_7, feed the off_topic signal into the streak tracker;
+        fire a polite reminder if the streak triggers.
+
+    `messages_by_id`: dict of {msg_id_str: discord.Message}. Caller assembles
+    this from the buffer at flush time.
+    `off_topic_tracker`: optional `_OffTopicStreakTracker`. If provided,
+    Rule 7 verdicts feed into it.
+
+    Returns a summary dict for logging:
+      {"acted": <count>, "escalated_only": <count>, "skipped": <count>}.
+    """
+    summary = {"acted": 0, "escalated_only": 0, "skipped": 0}
+    for v in verdicts:
+        msg_id = str(v.get("msg_id", ""))
+        msg = messages_by_id.get(msg_id)
+        if msg is None:
+            summary["skipped"] += 1
+            continue
+        rule_match = v.get("rule_match")
+        if not rule_match:
+            # Clean message — no action. But for Rule 7, we still record
+            # the on-topic verdict (off_topic=False) into the streak tracker.
+            # Mod messages never reach this path: `_observe_for_mod()` filters
+            # them at observation time and feeds the streak tracker directly
+            # with is_mod=True. So is_mod is always False here.
+            if off_topic_tracker is not None:
+                channel_id = getattr(msg.channel, "id", None)
+                user_id = getattr(msg.author, "id", None)
+                if channel_id is not None and user_id is not None:
+                    import time as _t
+                    off_topic_tracker.record(channel_id, user_id, off_topic=False, is_mod=False, now_s=_t.time())
+            summary["skipped"] += 1
+            continue
+        # Rule 7 path: judge says message is off-topic. Feed off_topic=True
+        # into the streak tracker; if the streak fires (5+ off-topic in
+        # cooldown window), post a polite reminder in the channel.
+        if rule_match == "rule_7":
+            if off_topic_tracker is not None:
+                channel_id = getattr(msg.channel, "id", None)
+                user_id = getattr(msg.author, "id", None)
+                if channel_id is not None and user_id is not None:
+                    import time as _t
+                    fired = off_topic_tracker.record(
+                        channel_id, user_id, off_topic=True, is_mod=False, now_s=_t.time()
+                    )
+                    if fired:
+                        try:
+                            await _action_polite_reminder(msg.channel)
+                            summary["acted"] += 1
+                        except Exception as e:
+                            print(f"  [mod-action] rule_7 reminder failed: {e}", flush=True)
+                            summary["skipped"] += 1
+                    else:
+                        summary["skipped"] += 1
+                else:
+                    summary["skipped"] += 1
+            else:
+                summary["skipped"] += 1
+            continue
+        # G2 confidence gate. Below threshold → escalate-only fallback.
+        if not _should_auto_action(v):
+            await _action_escalate_only(client_ref, msg, v,
+                                          extras_md="(G2: LLM confidence below threshold)")
+            summary["escalated_only"] += 1
+            continue
+        # Above-threshold action routing
+        action = RULE_TO_ACTION.get(rule_match, "escalate_only")
+        if action == "delete_and_escalate":
+            await _action_delete_and_escalate(client_ref, msg, v)
+            summary["acted"] += 1
+        elif action == "redirect_to_jobs":
+            await _action_redirect_to_jobs(client_ref, msg, v)
+            summary["acted"] += 1
+        elif action == "escalate_only":
+            await _action_escalate_only(client_ref, msg, v)
+            summary["escalated_only"] += 1
+        elif action == "rule_3_conditional":
+            # Rule 3: LLM also judged whether duplicates violate server
+            # rules. The verdict's `violates_server_rules` field (if set)
+            # disambiguates. If True or unset (default to caution), delete.
+            # Otherwise escalate-only (legit cross-post).
+            if v.get("violates_server_rules", True):
+                await _action_delete_and_escalate(client_ref, msg, v,
+                                                    extras_md="(Rule 3: cross-channel duplicate violates server rules)")
+                summary["acted"] += 1
+            else:
+                await _action_escalate_only(client_ref, msg, v,
+                                              extras_md="(Rule 3: cross-channel duplicate, NOT violating server rules — for human review)")
+                summary["escalated_only"] += 1
+        else:
+            # Unknown rule label → escalate-only as safe default.
+            await _action_escalate_only(client_ref, msg, v,
+                                          extras_md=f"(unknown rule_match={rule_match!r})")
+            summary["escalated_only"] += 1
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# AG2 auto-mod LLM-judge — buffer + flush + on_message hook (PR6 of 6).
+# Final integration. The buffer-collection observe runs at the TOP of
+# `_handle_discord_message` and only OBSERVES (no immediate action), so
+# the existing task pipeline (mentions, allowFrom, requireMention, etc.)
+# remains untouched. Auto-mod actions run from the periodic flush.
+
+MOD_BUFFER_FLUSH_INTERVAL_S = 5      # flush every N seconds when buffer non-empty
+MOD_BUFFER_SIZE_THRESHOLD = 20       # also flush when buffer hits this size
+_mod_buffer = []                     # type: list  (each entry is a dict + the discord.Message)
+_mod_buffer_lock = None              # asyncio.Lock guarding _mod_buffer mutation
+_mod_flush_lock = None               # asyncio.Lock serializing whole-flush executions
+_mod_dupe_tracker = _DupeTracker()
+_mod_streak_tracker = _OffTopicStreakTracker()
+
+
+def _ensure_mod_lock():
+    """Lazy-init asyncio.Lock — must run inside an event loop."""
+    global _mod_buffer_lock
+    if _mod_buffer_lock is None:
+        _mod_buffer_lock = asyncio.Lock()
+    return _mod_buffer_lock
+
+
+def _ensure_mod_flush_lock():
+    """Lazy-init asyncio.Lock that serializes flushes. Single-flight guard:
+    only one `_flush_mod_buffer` call runs at a time. Subsequent invocations
+    await this lock, then re-snapshot the buffer (which by then has been
+    cleared of the prior batch on success, or still contains it on failure
+    so the retry processes it). Without this, a threshold-eager flush + the
+    timer flush can race and double-judge / double-action the same batch."""
+    global _mod_flush_lock
+    if _mod_flush_lock is None:
+        _mod_flush_lock = asyncio.Lock()
+    return _mod_flush_lock
+
+
+async def _observe_for_mod(message):
+    """Push a message into the auto-mod buffer if its guild has mod_active=True
+    and the author is not a mod (G1). Called from the top of
+    `_handle_discord_message`. Returns silently — never blocks the existing
+    task pipeline.
+
+    Mod messages are NOT buffered (G1 immunity) but they DO feed the
+    Rule 7 streak tracker as `is_mod=True` so an in-channel mod intervention
+    resets any pending off-topic streak — which is the whole point of the
+    streak-tracker's mod-reset rule."""
+    try:
+        guild = getattr(message, "guild", None)
+        if guild is None:
+            return  # DMs / private contexts not auto-modded
+        active, mod_role_ids = _load_mod_config(guild.id)
+        if not active:
+            return  # this guild hasn't opted in
+        if _is_moderator(message.author, mod_role_ids):
+            # G1 — mods aren't judged. But Rule 7 wants mod intervention to
+            # reset the channel streak; feed the tracker directly.
+            channel_id = getattr(message.channel, "id", None)
+            user_id = getattr(message.author, "id", None)
+            if channel_id is not None and user_id is not None:
+                try:
+                    import time as _t
+                    _mod_streak_tracker.record(
+                        channel_id, user_id, off_topic=False, is_mod=True, now_s=_t.time()
+                    )
+                except Exception as e:
+                    print(f"  [mod-observe] mod-reset streak failed: {e}", flush=True)
+            return
+        # Build a queued-message record and append to buffer.
+        rec = {
+            "msg_id": str(getattr(message, "id", "")),
+            "channel_name": getattr(message.channel, "name", "?"),
+            "channel_id": getattr(message.channel, "id", None),
+            "author_name": str(getattr(message.author, "display_name", message.author)),
+            "author_id": getattr(message.author, "id", None),
+            "content": getattr(message, "content", "") or "",
+            "is_reply": bool(getattr(message, "reference", None)),
+            "parent_content": _resolve_reply_parent_content(message),
+            "_msg": message,  # discord.Message ref, used at dispatch time
+        }
+        lock = _ensure_mod_lock()
+        async with lock:
+            _mod_buffer.append(rec)
+            buffer_full = len(_mod_buffer) >= MOD_BUFFER_SIZE_THRESHOLD
+        if buffer_full:
+            # Eager flush — don't wait for the 5s timer if we hit threshold.
+            asyncio.create_task(_flush_mod_buffer())
+    except Exception as e:
+        print(f"  [mod-observe] failed: {e}", flush=True)
+
+
+def _resolve_reply_parent_content(message):
+    """Best-effort: pull parent message content for reply-context. Returns
+    "" if not a reply or parent not resolvable."""
+    try:
+        ref = getattr(message, "reference", None)
+        if ref is None:
+            return ""
+        resolved = getattr(ref, "resolved", None)
+        if resolved is None:
+            return ""
+        return getattr(resolved, "content", "") or ""
+    except Exception:
+        return ""
+
+
+async def _flush_mod_buffer():
+    """Drain the buffer, run codex batch judge, dispatch actions. Idempotent
+    when buffer is empty. Concurrent calls are serialized by `_mod_flush_lock`
+    — single-flight, so the same messages cannot be judged twice.
+
+    Failure semantics: snapshot buffer WITHOUT clearing. Clear only after
+    successful dispatch. On codex/judge failure or empty-verdicts the
+    messages remain in the buffer for the next flush. Prevents silent
+    data loss when codex times out or returns malformed output."""
+    flush_lock = _ensure_mod_flush_lock()
+    async with flush_lock:
+        await _flush_mod_buffer_inner()
+
+
+async def _flush_mod_buffer_inner():
+    """Body of `_flush_mod_buffer`. Caller MUST hold `_mod_flush_lock`.
+    Split out so tests can drive the body directly without the outer lock
+    (e.g. the concurrency test asserts that two parallel _flush_mod_buffer
+    calls serialize and don't double-process)."""
+    lock = _ensure_mod_lock()
+    async with lock:
+        if not _mod_buffer:
+            return
+        # Snapshot — do NOT clear yet. Clear only after successful dispatch.
+        batch = _mod_buffer[:]
+        batch_ids = {r["msg_id"] for r in batch}
+    # Feed bridge-side dupe-tracker; identify Rule 3 candidates to pass into prompt.
+    # `_DupeTracker.add()` returns a trigger list (channel_id, msg_id) when
+    # >= DUPE_CHANNEL_THRESHOLD distinct channels see the same content from
+    # the same user within DUPE_WINDOW_S. Collect those msg_ids.
+    rule3_ids = set()
+    # (user_id, text) keys whose buckets fired Rule 3 in this batch — clear
+    # them after dispatch success so a follow-up repost in the 5min window
+    # doesn't inherit the stale 3-channel evidence.
+    triggered_keys = []
+    try:
+        import time as _t
+        now_s = _t.time()
+        for r in batch:
+            ch_id = r.get("channel_id")
+            user_id = r.get("author_id")
+            if ch_id is None or user_id is None:
+                continue
+            trigger = _mod_dupe_tracker.add(
+                user_id=user_id, channel_id=ch_id, msg_id=r["msg_id"],
+                text=r["content"], now_s=now_s,
+            )
+            if trigger:
+                # All msg_ids in the trigger list are Rule 3 candidates
+                rule3_ids.update(m for (_c, m) in trigger)
+                triggered_keys.append((user_id, r["content"]))
+    except Exception as e:
+        print(f"  [mod-flush] dupe-tracker error (continuing without rule_3 context): {e}", flush=True)
+    messages_for_judge = [
+        {
+            "msg_id": r["msg_id"],
+            "channel_name": r["channel_name"],
+            "author_name": r["author_name"],
+            "content": r["content"],
+            "is_reply": r["is_reply"],
+            "parent_content": r["parent_content"],
+            "_rule3_candidate": r["msg_id"] in rule3_ids,
+        }
+        for r in batch
+    ]
+    messages_by_id = {r["msg_id"]: r["_msg"] for r in batch}
+    rules_context = ""
+    if rule3_ids:
+        rules_context = (
+            f"Rule 3 candidates (cross-channel duplicates detected by bridge in last 5min): "
+            f"{sorted(rule3_ids)}. For these set rule_match=rule_3 AND additionally include "
+            f"a boolean violates_server_rules: true|false in the verdict (true if the duplicates "
+            f"violate a general server rule, false if benign legit cross-post)."
+        )
+    try:
+        verdicts = await _codex_judge_batch(messages_for_judge, rules_context=rules_context)
+    except Exception as e:
+        print(f"  [mod-flush] codex judge failed: {e} — batch retained in buffer for retry", flush=True)
+        return
+    if not verdicts:
+        print(f"  [mod-flush] codex returned no verdicts — batch retained in buffer for retry", flush=True)
+        return
+    # Dispatch — clear the judged messages from the buffer ONLY on dispatch success.
+    try:
+        summary = await _dispatch_verdicts(verdicts, messages_by_id, client_ref=client,
+                                             off_topic_tracker=_mod_streak_tracker)
+        async with lock:
+            _mod_buffer[:] = [r for r in _mod_buffer if r["msg_id"] not in batch_ids]
+        # Clear Rule 3 evidence for keys that fired in this batch — only
+        # after dispatch success so a retry can still re-trigger if needed.
+        for (uid, text) in triggered_keys:
+            try:
+                _mod_dupe_tracker.clear(uid, text)
+            except Exception as e:
+                print(f"  [mod-flush] dupe-tracker clear failed for ({uid}): {e}", flush=True)
+        print(f"  [mod-flush] batch={len(batch)} verdicts={len(verdicts)} {summary}", flush=True)
+    except Exception as e:
+        print(f"  [mod-flush] dispatch failed: {e} — batch retained in buffer for retry", flush=True)
+    # GC the dupe tracker periodically so it doesn't grow unbounded
+    try:
+        import time as _t
+        _mod_dupe_tracker.gc(now_s=_t.time())
+    except Exception:
+        pass
+
+
+async def _mod_flush_timer_loop():
+    """Background task: flush every N seconds when buffer non-empty.
+    Started in on_ready alongside the existing poll_results / poll_proactive
+    tasks."""
+    while True:
+        try:
+            await asyncio.sleep(MOD_BUFFER_FLUSH_INTERVAL_S)
+            if _mod_buffer:
+                await _flush_mod_buffer()
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            print(f"  [mod-flush-timer] error: {e}", flush=True)
+
+# ---------------------------------------------------------------------------
+# Auto-welcome on first user post in a configured welcome channel.
+# Per msze 2026-05-06: welcome should respond to the user's first hi/intro
+# message in the configured channel, NOT fire on the join event itself. That
+# drops the privileged Server Members Intent requirement entirely — this
+# uses the existing on_message path. Per-guild config in access.json:
+#   {"guilds": {"<guild_id>": {"welcome_channel": "<id>", "welcome_template": "<path>"}}}
+# Both fields required for welcome to fire. Bridge does NOT bake an AG2
+# default — operator picks the template path per-guild. Welcomed-users
+# dedup state at state/discord-welcomed-users.json keeps a user from being welcomed
+# twice in the same guild across bridge restarts.
+
+WELCOMED_USERS_FILE = STATE_DIR / "discord-welcomed-users.json"
+
+
+def _load_welcome_config(guild_id):
+    """Return (welcome_channel_id, welcome_template_path) for `guild_id`
+    from access.json, or (None, None) if not configured. Both fields must
+    be present for welcome to be considered configured. Defensive against
+    missing/malformed JSON."""
+    try:
+        data = json.loads(ACCESS_FILE.read_text())
+    except Exception:
+        return None, None
+    g = data.get("guilds", {}).get(str(guild_id))
+    if not isinstance(g, dict):
+        return None, None
+    ch = g.get("welcome_channel")
+    tpl = g.get("welcome_template")
+    try:
+        ch_int = int(ch) if isinstance(ch, (int, str)) else None
+    except (TypeError, ValueError):
+        ch_int = None
+    tpl_str = tpl if isinstance(tpl, str) and tpl else None
+    return ch_int, tpl_str
+
+
+def _load_welcome_channel(guild_id):
+    """Back-compat shim — return only the channel id."""
+    return _load_welcome_config(guild_id)[0]
+
+
+def _read_welcome_template(template_path=None):
+    """Read the welcome template at `template_path`. Empty string on
+    missing path or read failure (callers treat empty as 'skip the
+    welcome'). No bridge-side default — operator must configure per-guild
+    via access.json `welcome_template`."""
+    if not template_path:
+        return ""
+    p = Path(template_path).expanduser()
+    if not p.is_absolute():
+        p = REPO / p
+    try:
+        return p.read_text()
+    except Exception:
+        return ""
+
+
+def _load_welcomed_users():
+    """Return {guild_id_str: set(user_id_str)} from the persisted dedup file,
+    or empty dict if missing/malformed."""
+    try:
+        raw = json.loads(WELCOMED_USERS_FILE.read_text())
+    except Exception:
+        return {}
+    out = {}
+    for gid, users in (raw or {}).items():
+        if isinstance(users, list):
+            out[str(gid)] = set(str(u) for u in users)
+    return out
+
+
+def _mark_user_welcomed(guild_id, user_id):
+    """Atomically add (guild_id, user_id) to the persisted dedup set.
+    Atomic write via tmp + rename so a crash mid-write doesn't leave a
+    half-written state file."""
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        current = _load_welcomed_users()
+        guild_set = current.setdefault(str(guild_id), set())
+        guild_set.add(str(user_id))
+        # JSON can't serialize sets — convert to lists at write time.
+        serializable = {gid: sorted(list(uids)) for gid, uids in current.items()}
+        tmp = WELCOMED_USERS_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(serializable))
+        os.replace(tmp, WELCOMED_USERS_FILE)
+    except Exception as e:
+        # Non-fatal: dedup may double-fire on next restart, but better than
+        # blocking the welcome itself.
+        print(f"  [welcome] mark-welcomed write failed: {e}", flush=True)
+
+
+def _is_user_welcomed(guild_id, user_id, welcomed_users=None):
+    """Pure check: has this user already been welcomed in this guild?
+    `welcomed_users` is the loaded dict from `_load_welcomed_users()` —
+    pass it in for testability; defaults to a fresh load."""
+    if welcomed_users is None:
+        welcomed_users = _load_welcomed_users()
+    return str(user_id) in welcomed_users.get(str(guild_id), set())
+
+
+def _should_welcome_first_post(message, welcome_channel_id, welcome_template_path, welcomed_users):
+    """Decide whether `message` triggers a welcome. Pure function for
+    testability — caller passes the resolved welcome_channel_id +
+    welcome_template_path (both from access.json) and the pre-loaded
+    welcomed_users dict.
+
+    Returns (do_welcome, reason). do_welcome=True only when ALL of:
+      - message.guild is not None
+      - welcome_channel_id is set
+      - welcome_template_path is set (no bridge-side default)
+      - message.channel.id == welcome_channel_id
+      - message.author is not a bot
+      - message.author has not been welcomed yet in this guild
+    """
+    guild = getattr(message, "guild", None)
+    if guild is None:
+        return False, "no_guild"
+    if welcome_channel_id is None:
+        return False, "no_welcome_channel_configured"
+    if not welcome_template_path:
+        return False, "no_welcome_template_configured"
+    if message.channel.id != welcome_channel_id:
+        return False, "wrong_channel"
+    if getattr(message.author, "bot", False):
+        return False, "bot_account"
+    if _is_user_welcomed(guild.id, message.author.id, welcomed_users):
+        return False, "already_welcomed"
+    return True, "ok"
+
+
 # Track pending replies: task_id -> channel
 pending_replies = {}
 
@@ -397,6 +1744,8 @@ async def on_ready():
     client.loop.create_task(poll_approved())
     client.loop.create_task(poll_proactive())
     client.loop.create_task(poll_dm_fallback())
+    # Auto-mod LLM-judge flush timer (per-guild gate enforced inside flush)
+    client.loop.create_task(_mod_flush_timer_loop())
 
 
 def _message_mentions_bot(message):
@@ -439,6 +1788,10 @@ async def on_message_edit(before, after):
 async def _handle_discord_message(message, force=False):
     if message.author == client.user:
         return
+    # Auto-mod LLM-judge observation hook (per-guild opt-in via access.json
+    # `mod_active`). Pure observe — never blocks the rest of the function.
+    # Action only fires from the periodic flush task, not at receive time.
+    await _observe_for_mod(message)
     # NOTE: the bot-author filter ("drop bot messages without @-mention") used
     # to fire here unconditionally. It now lives in the `if not is_dm:` branch
     # below, gated on the channel's `requireMention` setting, so channels
@@ -468,6 +1821,52 @@ async def _handle_discord_message(message, force=False):
 
     # In channels, check if mention is required
     if not is_dm:
+        # First-post welcome: if this message is in the guild's configured
+        # welcome_channel and the author hasn't been welcomed yet, post the
+        # configured welcome template and short-circuit (don't process the
+        # "Hi" as a task). Sits before the requireMention/allowFrom gate
+        # because the welcome trigger is independent of those — anyone
+        # posting for the first time in the configured welcome channel
+        # gets greeted. No bridge-side default template — operator picks
+        # per-guild via access.json `welcome_template`.
+        guild = getattr(message, "guild", None)
+        if guild is not None:
+            welcome_channel_id, welcome_template_path = _load_welcome_config(guild.id)
+            do_welcome, reason = _should_welcome_first_post(
+                message, welcome_channel_id, welcome_template_path, _load_welcomed_users()
+            )
+            if do_welcome:
+                template = _read_welcome_template(welcome_template_path)
+                if template:
+                    # Mark BEFORE sending so two near-simultaneous first posts
+                    # from the same user don't both pass the welcomed-check
+                    # during the await on `channel.send`. Tradeoff: if send
+                    # fails, the user is marked welcomed without seeing the
+                    # message — recoverable manually by editing the state
+                    # file. Better than a double-welcome.
+                    _mark_user_welcomed(guild.id, message.author.id)
+                    body = f"<@{message.author.id}> {template}"
+                    # `allowed_mentions` constrains who can be pinged via the
+                    # welcome body — defense in depth against an operator-
+                    # supplied template containing @everyone / @here / role
+                    # mentions. Only the welcomed user themselves can be
+                    # actually pinged.
+                    am = discord.AllowedMentions(
+                        everyone=False, roles=False, users=[message.author]
+                    )
+                    try:
+                        for chunk in _chunk_for_discord(body):
+                            await message.channel.send(chunk, allowed_mentions=am)
+                        print(f"  [welcome] sent to {message.author} in #{getattr(message.channel,'name','?')}", flush=True)
+                    except Exception as e:
+                        print(f"  [welcome] send failed for {message.author}: {e}", flush=True)
+                else:
+                    print(f"  [welcome] template empty/missing at {welcome_template_path}; skipping {message.author}", flush=True)
+                return
+            elif welcome_channel_id is not None and message.channel.id == welcome_channel_id and reason != "ok":
+                # In welcome channel but skipped for a reason — log only.
+                print(f"  [welcome] skipping {message.author} (reason={reason})", flush=True)
+
         channel_cfg = load_channel_config(str(message.channel.id))
         require_mention = True  # default
         if channel_cfg is not None:
@@ -767,12 +2166,51 @@ async def _handle_discord_message(message, force=False):
     # See CLAUDE.md "Discord access control" section for the policy.
     user_task_text = f"[Discord @{username}] {text}{attachment_note}{reply_context}"
     quoted_task = shlex.quote(user_task_text)
+
+    # Pre-classify Discord-state-reference tasks (per msze_'s 2026-05-07
+    # directive + Chi's "ship 1" call). If the task body contains a
+    # channel-mention `<#1234>`, codex sandbox cannot read that channel's
+    # content; rather than letting the agent emit the cold "Sandbox
+    # unavailable" string publicly, the bridge silently escalates to the
+    # appropriate guild's escalation_channel and writes an "already_escalated"
+    # tier instruction telling the agent to NO-REPLY archive.
+    already_escalated = False
+    if access_tier in ("team", "other"):
+        try:
+            already_escalated = await _silent_escalate_for_discord_state(message, user_task_text)
+        except Exception as e:
+            # Per MacBook's #639 v4 review: fail-SILENT on unknown error in
+            # the escalate path. The previous fail-open default
+            # (already_escalated=False → run codex publicly) meant a broken
+            # escalation infra would leak the cold "Sandbox unavailable"
+            # string into public channels, which is exactly what msze_'s
+            # original directive said to avoid. Fail-silent matches the
+            # "don't surface internal errors publicly" intent.
+            print(f"  [discord-state-escalate] outer guard caught: {e}; fail-silent (NO-REPLY archive)", flush=True)
+            already_escalated = True
+
+    # When the bridge has already silently escalated, the agent has nothing to
+    # do — skip the task-file write entirely. Otherwise the task would land in
+    # `pending_replies` (line ~2080 below) but no `results/task-*.txt` would
+    # ever appear (the new `already_escalated` tier instruction is NO-REPLY),
+    # leaving the entry to age out via _recovery only. Skipping the write
+    # avoids the leak + avoids a spurious 👀 auto-react that signals "the bot
+    # is processing this." Per MacBook #639 review finding #2.
+    if already_escalated:
+        print(f"  [discord-state-escalate] silent escalation handled; no task file written for {username} in #{getattr(message.channel, 'name', '?')}", flush=True)
+        return
     # Absolute path for codex's `-o` flag. The team-tier command runs from
     # the bridge's cwd (the repo) so a relative `results/...` path would work,
     # but the other-tier command uses `-C /tmp` which would resolve a
     # relative `-o results/...` against `/tmp/results/` (does not exist) and
     # codex fails with `os error 2`. Reuse the module-level RESULTS_DIR so
     # both tier blocks are robust regardless of cwd.
+    # Note: the silent-escalate path (above) `return`s before this point when
+    # `already_escalated=True`, so the only valid keys consumed below are
+    # owner/team/other. (An earlier draft had an `already_escalated` tier
+    # instruction that told the agent to NO-REPLY archive, but that left the
+    # task in `pending_replies` until age-out — leak-prone per MacBook's #639
+    # review. Removed in favor of skipping the task-file write entirely.)
     tier_instructions = {
         "owner": "",
         "team": (
@@ -811,6 +2249,19 @@ async def _handle_discord_message(message, force=False):
             "===END SUTANDO SYSTEM INSTRUCTIONS===\n"
         ),
     }
+
+    # Auto-react BEFORE writing the task — gives the user an instant visual ack
+    # at gateway-event speed, while the rest of task processing (file write,
+    # watcher pickup, agent response craft) happens downstream. The task
+    # handler is expected to remove the reaction when it posts its reply.
+    # Configured per-channel via `auto_react: ["👀", ...]` in access.json.
+    # No-op if the channel has no `auto_react` config.
+    if not is_dm:
+        for react_emoji in load_channel_auto_react(message.channel.id):
+            try:
+                await message.add_reaction(react_emoji)
+            except Exception as e:
+                print(f"  [auto-react] {react_emoji} failed: {e}", flush=True)
 
     task_file.write_text(
         f"id: {task_id}\n"
@@ -866,19 +2317,54 @@ async def poll_approved():
 
 PENDING_REPLIES_FILE = REPO / "state" / "discord-pending-replies.json"
 
+def _atomic_write_pending_replies(data: dict) -> None:
+    """Write JSON atomically: tmp + rename. Avoids truncation on mid-write
+    crash (rare but real for unattended bridge restarts). Per MacBook's
+    review on PR #597."""
+    try:
+        tmp = PENDING_REPLIES_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(PENDING_REPLIES_FILE)
+    except Exception:
+        pass
+
 def save_pending_replies():
     """Persist pending_replies channel IDs to disk for crash recovery."""
     try:
         data = {k: str(v.id) for k, v in pending_replies.items()}
-        PENDING_REPLIES_FILE.write_text(json.dumps(data))
+        _atomic_write_pending_replies(data)
     except Exception:
         pass
 
 def load_pending_replies_from_disk():
-    """Load pending_replies from disk on startup (channel IDs only — resolved lazily)."""
+    """Load pending_replies from disk on startup (channel IDs only — resolved lazily).
+
+    Ages out entries older than 7 days. Without this cap, entries leak
+    forever for tasks the agent never wrote a result file for (silent
+    dedup / crash / ignored as noise). Caught 2026-05-05 with 375 entries
+    accumulated since 2026-04-12 (124 of them >7d old).
+    """
     try:
-        if PENDING_REPLIES_FILE.exists():
-            return json.loads(PENDING_REPLIES_FILE.read_text())
+        if not PENDING_REPLIES_FILE.exists():
+            return {}
+        data = json.loads(PENDING_REPLIES_FILE.read_text())
+        now_ms = int(time.time() * 1000)
+        max_age_ms = 7 * 86400 * 1000
+        aged_out = []
+        for task_id in list(data.keys()):
+            try:
+                # task_id format: "task-<epoch_ms>"
+                ts_ms = int(task_id.split("-")[1])
+                if now_ms - ts_ms > max_age_ms:
+                    aged_out.append(task_id)
+                    del data[task_id]
+            except (ValueError, IndexError):
+                # Malformed task_id — leave it; cap protects the simple case
+                pass
+        if aged_out:
+            print(f"  [recovery] aged out {len(aged_out)} pending_replies > 7d", flush=True)
+            _atomic_write_pending_replies(data)
+        return data
     except Exception:
         pass
     return {}
@@ -940,15 +2426,33 @@ async def poll_results():
                     archive_file(task_file, "tasks", task_id)
                     continue
                 try:
+                    # Extract optional [reply: <message_id>] directive — the
+                    # agent signals "this result is a reply to that message"
+                    # so the bridge POSTs with `message_reference` (Discord's
+                    # reply-style) rather than as a fresh message. Used for
+                    # welcome posts that reply to a new-user message + any
+                    # context-replying response. msze 2026-05-06 ask.
+                    reply_pattern = re.compile(r'\[reply:\s*(\d{17,20})\]')
+                    reply_match = reply_pattern.search(reply_text)
+                    reply_to_id = int(reply_match.group(1)) if reply_match else None
+                    if reply_match:
+                        reply_text = reply_pattern.sub('', reply_text).strip()
+
                     # Extract file paths: [file: /path] or [send: /path]
                     file_pattern = re.compile(r'\[(?:file|send|attach):\s*((?:/|~/)[^\]:]+)\]')
                     files = file_pattern.findall(reply_text)
                     clean_text = file_pattern.sub('', reply_text).strip()
 
                     # Send text — fence-aware chunker preserves triple-backtick code blocks
+                    # First chunk uses message_reference (if set); subsequent chunks
+                    # are fresh — Discord allows only one reply-anchor per message,
+                    # and split-chunk continuation isn't itself a reply.
                     if clean_text:
+                        first = True
                         for chunk in _chunk_for_discord(clean_text):
-                            await channel.send(chunk)
+                            ref = discord.MessageReference(message_id=reply_to_id, channel_id=channel.id, fail_if_not_exists=False) if (first and reply_to_id) else None
+                            await channel.send(chunk, reference=ref)
+                            first = False
 
                     # Send files (allowlist-gated; see _is_path_sendable)
                     for fpath in files:

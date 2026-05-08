@@ -3,9 +3,11 @@
 Sutando health check — verifies all components are running correctly.
 
 Usage:
-  python3 src/health-check.py            # full check, human-readable
-  python3 src/health-check.py --json     # machine-readable output
-  python3 src/health-check.py --fix      # attempt to fix issues
+  python3 src/health-check.py                  # full check, human-readable
+  python3 src/health-check.py --json           # machine-readable output
+  python3 src/health-check.py --fix            # attempt to fix issues
+  python3 src/health-check.py --emit-task      # write tasks/task-health-*.txt on failure
+  python3 src/health-check.py --notify-on-fail # macOS notification on failure
 
 Checks:
   - Voice agent (port 9900), web client, agent API, dashboard
@@ -14,6 +16,7 @@ Checks:
   - Notes directory
 """
 
+import hashlib
 import json
 import os
 import socket
@@ -522,6 +525,85 @@ def _extract_body(text: str, start: int) -> str:
     return text[brace : brace + 2000]
 
 
+# ---------------------------------------------------------------------------
+# Stuck-loop / dead-watcher detection
+# ---------------------------------------------------------------------------
+# These two checks together catch the failure mode observed 2026-05-06 where
+# voice-queued tasks piled up in tasks/ for 5+ minutes with no processing,
+# because (a) the watch-tasks.sh fswatch shim wasn't running and (b) the
+# core proactive loop's last status update was 5 days old (status="running"
+# with a stale ts means a pass crashed mid-execution and the loop never
+# re-armed). Each check is a *consequence* signal that fires regardless of
+# which underlying mechanism died.
+
+def check_core_proactive_loop(threshold_sec: int = 600) -> dict:
+    """Detect a stuck core proactive loop via stale core-status.json.
+
+    The proactive loop writes core-status.json at every state transition
+    (see CLAUDE.md "Work Status"). If status reads "running" but the
+    timestamp hasn't advanced in `threshold_sec`, a pass crashed mid-
+    execution and the loop never re-armed — emitted tasks won't be
+    processed. Returns "warn" so emit_task_for_failures surfaces it.
+
+    File missing or malformed → ok (new install, or core has never run).
+    Status is anything other than "running" → ok regardless of age.
+    """
+    name = "core-proactive-loop"
+    status_path = REPO_DIR / "core-status.json"
+    if not status_path.exists():
+        return {"name": name, "status": "ok", "detail": "core-status.json not yet written"}
+    try:
+        data = json.loads(status_path.read_text())
+    except Exception as e:
+        # Malformed JSON shouldn't be treated as a stuck loop — could be a
+        # half-written file caught between os.write() syscalls. Fall through
+        # to ok so the next tick sees a (re-)written status.
+        return {"name": name, "status": "ok", "detail": f"core-status.json unreadable: {str(e)[:60]}"}
+    state = data.get("status")
+    ts = data.get("ts")
+    if state != "running":
+        return {"name": name, "status": "ok", "detail": f"status={state}"}
+    if not isinstance(ts, (int, float)):
+        return {"name": name, "status": "ok", "detail": "running, no ts"}
+    age = int(time.time() - ts)
+    if age > threshold_sec:
+        step = data.get("step", "?")
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": f"running for {age}s on '{step}' — last heartbeat > {threshold_sec}s ago",
+        }
+    return {"name": name, "status": "ok", "detail": f"running ({age}s ago)"}
+
+
+def check_task_queue(threshold_count: int = 3, threshold_age_sec: int = 300) -> dict:
+    """Detect a task-queue pileup — tasks/ directory growing without
+    being drained. Independent of which watcher / loop is dying: the queue
+    backs up either way. Fires when BOTH count and age cross thresholds so
+    a transient spike of fresh tasks (normal during heavy use) doesn't
+    alert.
+    """
+    name = "task-queue"
+    tasks_dir = REPO_DIR / "tasks"
+    if not tasks_dir.exists():
+        return {"name": name, "status": "ok", "detail": "tasks/ not yet created"}
+    # *.txt at the top level only — archive lives in tasks/archive/<YYYY-MM>/
+    # (PR #591) and shouldn't count toward the queue.
+    files = [p for p in tasks_dir.glob("*.txt") if p.is_file()]
+    if not files:
+        return {"name": name, "status": "ok", "detail": "queue empty"}
+    now = time.time()
+    oldest = min(files, key=lambda p: p.stat().st_mtime)
+    oldest_age = int(now - oldest.stat().st_mtime)
+    if len(files) > threshold_count and oldest_age > threshold_age_sec:
+        return {
+            "name": name,
+            "status": "warn",
+            "detail": f"{len(files)} tasks queued, oldest {oldest_age}s — watcher or core may be stuck",
+        }
+    return {"name": name, "status": "ok", "detail": f"{len(files)} task(s), oldest {oldest_age}s"}
+
+
 def run_all_checks() -> list[dict]:
     checks = []
 
@@ -652,9 +734,15 @@ def run_all_checks() -> list[dict]:
             checks.append({"name": name, "status": "warn", "detail": f"multiple processes ({len(pids)} PIDs: {','.join(pids)})"})
             continue
 
-        # Check 2: Log file freshness
+        # Check 2: Log file freshness — prefer logs/ (where startup.sh writes)
+        # and fall back to src/ for legacy. The src/ default was silently a
+        # no-op since 2026-04 when startup.sh was changed to write logs/<name>.log,
+        # so log-stale warnings never fired (caught 2026-05-05 when Mini's
+        # logs/discord-bridge.log was 36h stale but health-check stayed "ok").
         import time
         log_file = state_path(f"logs/{name}.log")
+        if not log_file.exists():
+            log_file = state_path(f"src/{name}.log")
         detail = "running"
         status = "ok"
         if log_file.exists():
@@ -706,6 +794,38 @@ def run_all_checks() -> list[dict]:
         except (subprocess.TimeoutExpired, ValueError, OSError):
             pass
 
+        # Check 5: Dead-log-inode detection — last so heartbeat doesn't override.
+        # Bridge process FDs point to a path that's been renamed/deleted (the
+        # 2026-05-05 case where discord-bridge stdout was going to
+        # /discord-bridge.log.bak after the file was unlinked, so logging
+        # silently went to /dev/null while bridge appeared healthy). Heartbeats
+        # don't catch this because they're written to a separate file via
+        # state/<name>.heartbeat.
+        try:
+            lsof_out = subprocess.run(
+                ["lsof", "-p", pids[0]], capture_output=True, text=True, timeout=5
+            ).stdout
+            for line in lsof_out.splitlines():
+                parts = line.split()
+                # Columns: COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME
+                # FD column is index 3 — "1w" or "2w" carry log writes
+                if len(parts) < 9 or parts[3] not in ("1w", "2w"):
+                    continue
+                # NAME starts at col 8 — join remaining tokens to handle paths
+                # with spaces (per MacBook's PR #596 review nit).
+                log_path = " ".join(parts[8:])
+                if log_path.endswith(".log") or log_path.endswith(".log.bak"):
+                    if not Path(log_path).exists():
+                        status = "warn"
+                        detail = (
+                            f"running but log inode dead ({log_path} unlinked) — "
+                            f"restart with: launchctl kickstart -k gui/$(id -u)/com.sutando.{name} "
+                            "(or nohup+disown on Mini)"
+                        )
+                        break
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
         checks.append({"name": name, "status": status, "detail": detail})
 
     # Sutando menu bar app — check either dev-built binary or installed .app.
@@ -735,16 +855,201 @@ def run_all_checks() -> list[dict]:
         else:
             checks.append({"name": "sutando-app", "status": "warn", "detail": "not running — hotkeys disabled"})
 
+    # Stuck-loop / queue-pileup detection — consequence-level signals that
+    # fire whether the watcher died, the proactive loop crashed mid-pass, or
+    # both. Independent of which mechanism died.
+    loop_stale_sec = int(os.environ.get("SUTANDO_HEALTH_LOOP_STALE_SEC", "600"))
+    queue_age_sec = int(os.environ.get("SUTANDO_HEALTH_QUEUE_AGE_SEC", "300"))
+    queue_count = int(os.environ.get("SUTANDO_HEALTH_QUEUE_COUNT", "3"))
+    checks.append(check_core_proactive_loop(threshold_sec=loop_stale_sec))
+    checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
+
     return checks
+
+
+def emit_task_for_failures(checks: list[dict], state_file: Optional[Path] = None, tasks_dir: Optional[Path] = None) -> None:
+    """Emit a task file describing health-check failures so the proactive
+    loop's CLI session sees them via the watcher and can decide what to do
+    (restart, DM owner, ignore as transient).
+
+    Bridges the detection-vs-action gap: dashboard + morning-briefing already
+    surface failures to the user, but no path drove the AGENT to act on them.
+    Now health-check at any cron tick can produce a task file → watcher fires
+    → CLI processes as owner-tier task → LLM judgment at the act step.
+
+    Dedup via failure-SET hash to avoid spamming a task every tick when a
+    failure persists. The hash covers the full active set (sorted member
+    names) — if the set changes (one service recovers, another fails), the
+    hash changes and a new task fires. Cooldown is 1h per hash so a
+    persistent failure re-alerts after a reasonable window.
+
+    `state_file` and `tasks_dir` default to the workspace paths used in
+    production. Tests inject temp paths.
+    """
+    # `warn` is the status used for "service is up but has a real issue"
+    # (e.g., the dead-log-inode case from PR #596 — bridge running but
+    # logging silently to a deleted file). Including warn means the
+    # watchdog catches the bug class that motivated this PR. Excluding
+    # would have missed Mini's discord-bridge issue this morning. Per
+    # her PR review note 2026-05-05.
+    failures = [c for c in checks if c["status"] in ("down", "missing", "not_loaded", "fail", "stale", "warn")]
+    if not failures:
+        return
+
+    if state_file is None or tasks_dir is None:
+        REPO = Path(__file__).resolve().parent.parent
+        if state_file is None:
+            state_file = REPO / "state" / "health-last-alerted.json"
+        if tasks_dir is None:
+            tasks_dir = REPO / "tasks"
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Hash the full failure set (sorted) — Mini's #2 review note: hash MUST
+    # cover the active set, not member-by-member, else suppressing legit
+    # re-alerts when the set is identical to last alert.
+    set_key = "|".join(sorted(c["name"] for c in failures))
+    hash_key = hashlib.sha256(set_key.encode()).hexdigest()[:16]
+    now_ms = int(time.time() * 1000)
+    cooldown_ms = 3600 * 1000  # 1h
+
+    # Read prior alert state.
+    history: dict = {}
+    try:
+        if state_file.exists():
+            history = json.loads(state_file.read_text())
+    except Exception:
+        history = {}
+
+    last_alerted = history.get(hash_key, 0)
+    if now_ms - last_alerted < cooldown_ms:
+        # Same failure set, within cooldown — skip.
+        return
+
+    # Build task content.
+    ts_iso = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    bullet_lines = [f"- {c['name']}: {c['status']} ({c['detail']})" for c in failures]
+    body = (
+        f"id: task-health-{int(time.time())}\n"
+        f"timestamp: {ts_iso}\n"
+        f"task: Health check found issues. Decide whether to restart, DM owner, or treat as transient:\n"
+        + "\n".join(bullet_lines) + "\n"
+        f"source: health-check\n"
+        f"user_id: health-check\n"
+        f"access_tier: owner\n"
+    )
+    task_path = tasks_dir / f"task-health-{int(time.time())}.txt"
+    task_path.write_text(body)
+
+    # Update history. Prune entries older than 24h to bound file size.
+    history[hash_key] = now_ms
+    cutoff = now_ms - (24 * 3600 * 1000)
+    history = {k: v for k, v in history.items() if v >= cutoff}
+    try:
+        state_file.write_text(json.dumps(history))
+    except Exception:
+        pass
+
+
+def notify_for_failures(
+    checks: list[dict],
+    state_file: Optional[Path] = None,
+    notify_cmd: Optional[list[str]] = None,
+) -> None:
+    """Surface health-check failures via macOS notification.
+
+    Companion to `emit_task_for_failures` — same dedup contract (per-failure-
+    set hash, 1h cooldown, separate state file). Two surfaces are needed for
+    robustness: emit-task only delivers if the agent is alive to read tasks/,
+    osascript runs at OS level and surfaces even when every Sutando service
+    is dead. The launchd-supervised fallback health-check
+    (com.sutando.health-check-fallback) relies on this property — it's the
+    alert path that survives "all of Sutando is down."
+
+    `notify_cmd` is the executable + args used to fire the notification;
+    defaults to `osascript` driving `display notification`. Tests inject a
+    fake to avoid spamming the developer's own notification center.
+    """
+    failures = [c for c in checks if c["status"] in ("down", "missing", "not_loaded", "fail", "stale", "warn")]
+    if not failures:
+        return
+
+    if state_file is None:
+        state_file = REPO_DIR / "state" / "health-last-notified.json"
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+
+    set_key = "|".join(sorted(c["name"] for c in failures))
+    hash_key = hashlib.sha256(set_key.encode()).hexdigest()[:16]
+    now_ms = int(time.time() * 1000)
+    cooldown_ms = 3600 * 1000  # 1h — matches emit_task
+
+    history: dict = {}
+    try:
+        if state_file.exists():
+            history = json.loads(state_file.read_text())
+    except Exception:
+        history = {}
+
+    last_notified = history.get(hash_key, 0)
+    if now_ms - last_notified < cooldown_ms:
+        return
+
+    # Build a short notification body — macOS truncates aggressively. Lead
+    # with count, then top failure names. Full detail is in emit-task.
+    names = [c["name"] for c in failures[:3]]
+    extra = f" (+{len(failures) - 3} more)" if len(failures) > 3 else ""
+    body = f"{len(failures)} health check failure(s): {', '.join(names)}{extra}"
+
+    # AppleScript single-quote escaping: drop double-quotes and backslashes
+    # so the shell command literal can't be broken by check details.
+    safe = body.replace('"', '').replace('\\', '')
+    cmd = notify_cmd or [
+        "osascript", "-e",
+        f'display notification "{safe}" with title "Sutando — health check"',
+    ]
+    try:
+        subprocess.run(cmd, check=False, timeout=10)
+    except Exception:
+        # Notification failure is non-fatal — we still want emit-task to fire.
+        pass
+
+    history[hash_key] = now_ms
+    cutoff = now_ms - (24 * 3600 * 1000)
+    history = {k: v for k, v in history.items() if v >= cutoff}
+    try:
+        state_file.write_text(json.dumps(history))
+    except Exception:
+        pass
 
 
 def main():
     as_json = "--json" in sys.argv
     do_fix = "--fix" in sys.argv
+    do_emit = "--emit-task" in sys.argv
+    do_notify = "--notify-on-fail" in sys.argv
     quiet = "--quiet" in sys.argv or "-q" in sys.argv
 
     checks = run_all_checks()
     issues = [c for c in checks if c["status"] not in ("ok", "warn")]
+
+    # Optional: macOS notification surface for the launchd-supervised path
+    # (com.sutando.health-check-fallback). Notifies on the INITIAL check set
+    # — the launchd fallback wants the user-visible alert immediately, even
+    # if --fix would resolve some issues. Independent dedup state from
+    # emit-task — the two surfaces are deliberately decoupled so neither
+    # can suppress the other.
+    if do_notify:
+        notify_for_failures(checks)
+
+    # Emit-task: when NOT running --fix, the initial check IS the residual,
+    # so emit here BEFORE the early-exit paths (--json return, --quiet
+    # sys.exit). Per Mini's PR #640 v2-regression catch: my prior change
+    # moved emit-task to end-of-main, which the launchd fallback's
+    # `--quiet --emit-task --notify-on-fail` invocation bypassed via the
+    # quiet-path sys.exit(1). Splitting the emit logic by --fix state
+    # restores coverage for the no-fix path.
+    if do_emit and not do_fix:
+        emit_task_for_failures(checks)
 
     if as_json:
         print(json.dumps({"checks": checks, "issues": len(issues), "total": len(checks)}, indent=2))
@@ -877,35 +1182,16 @@ def main():
                                      stderr=subprocess.STDOUT, start_new_session=True)
                     print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
 
-    # Email alert if critical issues found and --fix didn't resolve them
-    if issues and do_fix:
-        # Re-check after fix attempts
-        import time
-        time.sleep(2)
-        rechecks = run_all_checks()
-        remaining = [c for c in rechecks if c["status"] not in ("ok",)]
-        if remaining:
-            alert_lines = ["Sutando health check found issues that auto-fix couldn't resolve:", ""]
-            for c in remaining:
-                alert_lines.append(f"  - {c['name']}: {c['status']} ({c['detail']})")
-            alert_lines.append("")
-            alert_lines.append("Check manually or run: python3 src/health-check.py")
-            alert_body = "\\n".join(alert_lines)
-            try:
-                subject = "Sutando: health check alert"
-                script = (
-                    'tell application "Mail"\n'
-                    f'    set m to make new outgoing message with properties {{subject:"{subject}", content:"{alert_body}", visible:false}}\n'
-                    '    tell m\n'
-                    f'        make new to recipient at end of to recipients with properties {{address:"{os.environ.get("NOTIFICATION_EMAIL", "")}"}}\n'
-                    '    end tell\n'
-                    '    send m\n'
-                    'end tell'
-                )
-                subprocess.run(["osascript", "-e", script], capture_output=True, timeout=15)
-                print("Alert email sent.")
-            except Exception:
-                pass
+    # Emit task on the RESIDUAL failure set when --fix ran (per PR #640 v2
+    # review). The no-fix path emits earlier, before --quiet / --json early
+    # exits (per #640 v2-regression: launchd's `--quiet --emit-task` was
+    # bypassing the end-of-main emit via sys.exit(1)).
+    if do_emit and do_fix and issues:
+        # Brief delay so restarts have a chance to register before re-check.
+        # 2s matches the fix-loop's per-service `time.sleep(1)` budget.
+        import time as _t; _t.sleep(2)
+        residual_checks = run_all_checks()
+        emit_task_for_failures(residual_checks)
 
     sys.exit(1 if issues else 0)
 
