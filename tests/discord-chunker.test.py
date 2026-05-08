@@ -6,10 +6,40 @@ test both. Loads via importlib because filenames contain hyphens.
 """
 
 import importlib.util
+import os
 import sys
+import types
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+
+# discord-bridge.py module-load has two side effects that fail in clean CI:
+#   1. `import discord` + `discord.Intents.default()` + `discord.Client(...)`
+#      — discord.py isn't installed on Ubuntu CI runners.
+#   2. Reads DISCORD_BOT_TOKEN from ~/.claude/channels/discord/.env and
+#      `exit(1)` if missing — that path doesn't exist in CI.
+#
+# Bypass both so the test can reach `_chunk_for_discord` (pure string ops,
+# no discord runtime dependency). Locally with the real discord installed
+# and a real token, both bypasses no-op.
+try:
+    import discord  # noqa: F401
+except ImportError:
+    stub = types.ModuleType("discord")
+    stub.Intents = type("Intents", (), {"default": staticmethod(lambda: type("I", (), {"message_content": False})())})
+    stub.Client = type("Client", (), {"__init__": lambda self, **kw: None, "event": staticmethod(lambda fn: fn)})
+    stub.File = type("File", (), {})
+    stub.Message = type("Message", (), {})
+    sys.modules["discord"] = stub
+
+# discord-bridge.py reads DISCORD_BOT_TOKEN from a file path, not os.environ.
+# Materialize a fake .env at the expected path if absent (CI runners don't
+# have it; locally it already exists, setdefault-style logic preserves the
+# real one).
+_channels_env = Path.home() / ".claude" / "channels" / "discord" / ".env"
+if not _channels_env.exists():
+    _channels_env.parent.mkdir(parents=True, exist_ok=True)
+    _channels_env.write_text("DISCORD_BOT_TOKEN=test-token-not-real\n")
 
 
 def _load(name: str, path: Path):

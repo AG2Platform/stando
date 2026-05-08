@@ -76,18 +76,35 @@ const DEFAULT_TASK_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes default
 type PendingTask = { submittedAt: number; timeoutMs: number; dmOnTimeout: boolean };
 const _pendingTasks = new Map<string, PendingTask>();
 
-/** True if the task file (in tasks/, tasks/processed/, or tasks/archive/)
- * is voice-originated (channel_id: local-voice). Used by the result watcher
+/** True if the task file (in tasks/, tasks/processed/, or tasks/archive/
+ * — including month-partitioned subdirs `tasks/archive/YYYY-MM/`) is
+ * voice-originated (channel_id: local-voice). Used by the result watcher
  * to decide whether to forward an unsent result to Discord DM when voice is
  * offline. Returns false on missing file or parse error — bias toward not
  * forwarding to keep Susan-rejected always-DM behavior off by default for
  * non-voice tasks. */
-function _isVoiceTask(taskId: string): boolean {
-	const candidates = [
+export function _isVoiceTask(taskId: string): boolean {
+	const candidates: string[] = [
 		join(TASK_DIR, `${taskId}.txt`),
 		join(TASK_DIR, 'processed', `${taskId}.txt`),
+		// Legacy flat-archive location — kept for any task archived before
+		// the YYYY-MM partitioning (PR #591) was introduced.
 		join(TASK_DIR, 'archive', `${taskId}.txt`),
 	];
+	// Active archive layout: tasks/archive/YYYY-MM/<taskId>.txt. Glob the
+	// month subdirs rather than rebuild the YYYY-MM from the task's mtime —
+	// the writer's archive month and current month can differ around month
+	// boundaries.
+	const archiveRoot = join(TASK_DIR, 'archive');
+	if (existsSync(archiveRoot)) {
+		try {
+			for (const entry of readdirSync(archiveRoot)) {
+				// Only month-shaped names (YYYY-MM); skip stray files.
+				if (!/^\d{4}-\d{2}$/.test(entry)) continue;
+				candidates.push(join(archiveRoot, entry, `${taskId}.txt`));
+			}
+		} catch {}
+	}
 	for (const p of candidates) {
 		if (!existsSync(p)) continue;
 		try {
@@ -232,9 +249,16 @@ export const workTool: ToolDefinition = {
 // and inject them into the conversation via a callback
 // ---------------------------------------------------------------------------
 
-/** Append a message to the persistent conversation log. */
+/** Append a message to the persistent conversation log. The text cap
+ *  matches Discord's per-message limit (2000 chars) so a single transcript
+ *  line never exceeds what could legitimately appear elsewhere in the
+ *  conversation. The previous 200-char cap was aggressive — it truncated
+ *  ordinary user/assistant turns mid-sentence, especially in CJK where one
+ *  character can render as multiple bytes. Lifted to LOG_LINE_MAX_CHARS;
+ *  override via SUTANDO_LOG_LINE_MAX_CHARS env if a host wants tighter logs. */
+const LOG_LINE_MAX_CHARS = Number(process.env.SUTANDO_LOG_LINE_MAX_CHARS) || 2000;
 export function logConversation(role: string, text: string): void {
-	const line = `${new Date().toISOString()}|${role}|${text.replace(/\n/g, ' ').slice(0, 200)}\n`;
+	const line = `${new Date().toISOString()}|${role}|${text.replace(/\n/g, ' ').slice(0, LOG_LINE_MAX_CHARS)}\n`;
 	try { appendFileSync(CONVERSATION_LOG, line); } catch { /* best effort */ }
 }
 
@@ -455,14 +479,12 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 				// Move the task file out of tasks/ so /tasks/active stops listing it
 				// as 'working' forever. (Without this, dedup-orphan tasks left behind
 				// after a consolidated reply pile up in the UI as stuck spinners.)
+				// Use archiveFile() — same destination (tasks/archive/<YYYY-MM>/) as
+				// the result-delivery archival paths so all timeout/done/dedupe lands
+				// in one place. (Mini's #589 review flagged the previous
+				// tasks/processed/ split as a learn-collector scan footprint.)
 				if (existsSync(taskFile)) {
-					try {
-						const processedDir = join(TASK_DIR, 'processed');
-						mkdirSync(processedDir, { recursive: true });
-						renameSync(taskFile, join(processedDir, `${taskId}.txt`));
-					} catch (e) {
-						console.error(`${ts()} [TaskBridge] Failed to archive timed-out task ${taskId}:`, e);
-					}
+					archiveFile(taskFile, 'tasks', taskId);
 				}
 				// Discord DM fallback (opt-in via dm_on_timeout). Default off per
 				// Susan's PR #578 contract — silent timeout. We emit by writing
@@ -551,7 +573,7 @@ export function startResultWatcher(onResult: (result: string) => void, isClientC
 					_sendTaskStatus?.(taskId, 'done', result.slice(0, 60), result);
 					_deliveredResults.add(file);
 					_pendingTasks.delete(taskId);
-					logConversation('core-agent', `[task:${taskId}] ${result.slice(0, 200)}`);
+					logConversation('core-agent', `[task:${taskId}] ${result.slice(0, LOG_LINE_MAX_CHARS)}`);
 					onResult(result);
 					// Notify agent-api directly, then delete file
 					try {

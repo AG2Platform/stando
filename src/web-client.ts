@@ -646,6 +646,8 @@ fetch('http://localhost:7844/stand-identity').then(r=>r.json()).then(s=>{
 <div id="status-bar" style="text-align:center;font-size:16px;color:#888;letter-spacing:0.3px;padding:12px 16px">
   <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃C</kbd> drop context
   <span style="margin:0 8px;color:#444">|</span>
+  <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃S</kbd> drop screenshot
+  <span style="margin:0 8px;color:#444">|</span>
   <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃V</kbd> voice
   <span style="margin:0 8px;color:#444">|</span>
   <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃M</kbd> mute
@@ -928,6 +930,18 @@ function setStatus(text, state) {
 // here, refreshing the page wipes the results from the UI.
 const PERSIST_KEY_TASKS = 'sutando-taskmap-v1';
 const PERSIST_KEY_EXPAND = 'sutando-expanded-v1';
+const PERSIST_KEY_SHOW_DONE = 'sutando-show-done-v1';
+// Default-hide done tasks. With Tasks growing to top-30, completed work was
+// crowding out active items and the watcher-glance use case ("what's still
+// running?") got lost. Toggle persists across reloads.
+let showDone = (() => {
+  try { return localStorage.getItem(PERSIST_KEY_SHOW_DONE) === '1'; } catch { return false; }
+})();
+window.toggleShowDone = function() {
+  showDone = !showDone;
+  try { localStorage.setItem(PERSIST_KEY_SHOW_DONE, showDone ? '1' : '0'); } catch {}
+  renderTasks();
+};
 function loadPersistedTaskMap() {
   try {
     const raw = localStorage.getItem(PERSIST_KEY_TASKS);
@@ -1050,18 +1064,32 @@ function renderTasks() {
   window._drTaskCount = entries.length;
   const hdr = $('tasks-header');
   if (entries.length === 0) { container.innerHTML = ''; if (hdr) hdr.style.display = 'none'; return; }
+  // Default-filter done tasks. error/pending/working always render so the
+  // user never loses sight of active work. Toggle in header reveals done.
+  const doneCount = entries.filter(([, t]) => t.status === 'done').length;
+  const visible = showDone ? entries : entries.filter(([, t]) => t.status !== 'done');
   if (hdr) {
     const hasExpanded = expandedTasks.size > 0;
     hdr.style.display = 'flex';
-    hdr.innerHTML = '<span>Tasks</span><span onclick="toggleAllTasks()" style="cursor:pointer">' +
+    const doneToggle = doneCount > 0
+      ? '<span onclick="toggleShowDone()" style="cursor:pointer">' +
+        (showDone ? 'hide ' + doneCount + ' done' : 'show ' + doneCount + ' done') +
+        '</span>'
+      : '';
+    hdr.innerHTML = '<span>Tasks</span>' +
+      doneToggle +
+      '<span onclick="toggleAllTasks()" style="cursor:pointer">' +
       (hasExpanded ? 'collapse all' : 'expand all') +
       '</span>';
   }
+  // Empty visible list with non-empty entries means everything is done and
+  // hidden. Show the header toggle so the user can reveal — clear the list.
+  if (visible.length === 0) { container.innerHTML = ''; return; }
   // Render top-30 most recent. Was 8, but in active sessions (e.g. a kid
   // iterating on a party plan) new tasks pushed earlier valuable results out
   // of view within seconds. 30 keeps a longer history visible; localStorage
   // persistence above keeps results from being lost across refreshes.
-  const sorted = entries.sort((a, b) => b[1].time - a[1].time).slice(0, 30);
+  const sorted = visible.sort((a, b) => b[1].time - a[1].time).slice(0, 30);
   container.innerHTML = sorted.map(([id, t]) => {
     const icons = { pending: '&#8987;', working: '&#9881;', done: '&#10003;', error: '&#10007;' };
     const ago = Math.round((Date.now() - t.time) / 1000);
