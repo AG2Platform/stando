@@ -20,6 +20,10 @@ export type TmuxParseResult = {
 };
 
 const DEFAULT_SESSION = 'sutando-core';
+// Match startup.sh / run-core-agent.sh / Sutando/main.swift — the tmux server
+// runs on this socket, not the default. Without -S, capture-pane hits the
+// wrong server and tmux-status falls back to idle forever.
+const DEFAULT_SOCKET = '/tmp/sutando-tmux.sock';
 const CACHE_TTL_MS = 3_000;
 const CAPTURE_TIMEOUT_MS = 500;
 const LINES_BACK = 30;
@@ -39,10 +43,11 @@ async function _refreshCache(): Promise<void> {
 	if (_refreshInFlight) return;
 	_refreshInFlight = true;
 	const session = process.env.SUTANDO_TMUX_SESSION || DEFAULT_SESSION;
+	const socket = process.env.SUTANDO_TMUX_SOCKET || DEFAULT_SOCKET;
 	try {
 		const { stdout } = await execFileAsync(
 			'tmux',
-			['capture-pane', '-t', session, '-pS', `-${LINES_BACK}`],
+			['-S', socket, 'capture-pane', '-t', session, '-pS', `-${LINES_BACK}`],
 			{ encoding: 'utf-8', timeout: CAPTURE_TIMEOUT_MS },
 		);
 		_cache = { ts: Date.now(), result: parseTmuxPane(stdout) };

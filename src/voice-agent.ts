@@ -37,7 +37,7 @@ import { workTool, startResultWatcher, startContextDropWatcher, startNoteViewing
 import { buildSutandoSystemPrompt, buildVoiceAgentContext } from './voice-context.js';
 import { classifyTransportClose, type ClassifiedClose } from './voice-error-classifier.js';
 
-import { personalPath, sharedPersonalPath, statePath, stateDir } from './util_paths.js';
+import { personalPath, sharedPersonalPath, statePath, statePathEnsured, stateDir } from './util_paths.js';
 import {
 	recordEvent as cloudRecordEvent,
 	recordOnboarding as cloudRecordOnboarding,
@@ -854,7 +854,7 @@ async function main() {
 				toolCount: voiceToolCalls.length,
 				events: voiceEvents,
 			};
-			appendFileSync(statePath('data/voice-metrics.jsonl'), JSON.stringify(metrics) + '\n');
+			appendFileSync(statePathEnsured('data/voice-metrics.jsonl'), JSON.stringify(metrics) + '\n');
 			console.log(`${ts()} [Observability] Wrote voice metrics: ${voiceToolCalls.length} tools, ${voiceEvents.length} events, ${voiceTranscript.length} transcript lines`);
 		} catch (err) {
 			console.log(`${ts()} [Observability] Failed to write metrics: ${err}`);
