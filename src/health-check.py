@@ -708,9 +708,12 @@ def run_all_checks() -> list[dict]:
 
         checks.append({"name": name, "status": status, "detail": detail})
 
-    # Sutando menu bar app (optional — only check if binary exists)
-    sutando_bin = REPO_DIR / "src" / "Sutando" / "Sutando"
-    if sutando_bin.exists():
+    # Sutando menu bar app — check either dev-built binary or installed .app.
+    # On the distributed .app path the dev binary doesn't ship; we still want
+    # the menu bar check to run so dashboard reports accurate status.
+    dev_bin = REPO_DIR / "src" / "Sutando" / "Sutando"
+    app_bin = Path("/Applications/Sutando.app/Contents/MacOS/Sutando")
+    if dev_bin.exists() or app_bin.exists():
         try:
             result = subprocess.run(["pgrep", "-f", "(Sutando|MacOS)/Sutando"], capture_output=True, text=True)
             pids = [p for p in result.stdout.strip().split("\n") if p]
@@ -718,12 +721,16 @@ def run_all_checks() -> list[dict]:
             pids = []
         if pids:
             check = {"name": "sutando-app", "status": "ok", "detail": f"running (⌃C/⌃V/⌃M)"}
-            mark_stale_if_outdated(
-                check,
-                REPO_DIR / "src" / "Sutando" / "main.swift",
-                "src/Sutando/Sutando",
-                binary_path=REPO_DIR / "src" / "Sutando" / "Sutando",
-            )
+            # Staleness check is meaningful only in the dev workflow — the
+            # .app binary and bundled main.swift share a build mtime, so a
+            # comparison there is always equal. Skip when dev_bin missing.
+            if dev_bin.exists():
+                mark_stale_if_outdated(
+                    check,
+                    REPO_DIR / "src" / "Sutando" / "main.swift",
+                    "(Sutando|MacOS)/Sutando",
+                    binary_path=dev_bin,
+                )
             checks.append(check)
         else:
             checks.append({"name": "sutando-app", "status": "warn", "detail": "not running — hotkeys disabled"})
