@@ -114,15 +114,33 @@ fi
 echo "$(ts) [pane] === session $SESSION started ===" >> "$PANE_LOG"
 tmux -S "$SOCKET" pipe-pane -t "$SESSION" -o "cat >> '$PANE_LOG'" 2>/dev/null || true
 
-# Auto-accept the "Bypass Permissions mode" warning that Claude Code
-# 2.1.x shows on every launch. The default selection is "1. No, exit"
-# — without this, the session would idle on the warning until claude
-# times out and exits, and launchd would crash-loop us forever.
-# Down + Enter selects "2. Yes, I accept". The 2-second wait gives the
-# TUI time to render before keystrokes arrive (sending too early
-# silently no-ops because the prompt isn't focused yet).
-sleep 2
-tmux -S "$SOCKET" send-keys -t "$SESSION" Down Enter 2>/dev/null || true
+# Dismiss Claude Code 2.1.x's startup dialogs. On a fresh Mac, two
+# appear in sequence:
+#   (a) workspace-trust dialog — "Is this a project you trust?", default
+#       cursor on "Yes, I trust this folder". Bare Enter accepts.
+#   (b) bypass-permissions warning — "Bypass Permissions mode", default
+#       cursor on "No, exit". Down+Enter selects "Yes, I accept".
+# On a relaunch where (a) is remembered, only (b) appears. The earlier
+# blind Down+Enter at 2s misfires when (a) renders first: Down on the
+# trust dialog moves the cursor to "No, exit", Enter then exits claude,
+# launchd crash-loops the session indefinitely with the watcher never
+# coming up. Loop with capture-pane detection: respond to whichever
+# dialog is visible, exit once two consecutive ticks are dialog-free.
+DIALOGS_DONE=0
+for attempt in 1 2 3 4 5 6 7 8; do
+    sleep 1
+    PANE=$(tmux -S "$SOCKET" capture-pane -t "$SESSION" -p 2>/dev/null || true)
+    if echo "$PANE" | grep -q "trust this folder"; then
+        tmux -S "$SOCKET" send-keys -t "$SESSION" Enter 2>/dev/null || true
+        DIALOGS_DONE=0
+    elif echo "$PANE" | grep -q "Bypass Permissions"; then
+        tmux -S "$SOCKET" send-keys -t "$SESSION" Down Enter 2>/dev/null || true
+        DIALOGS_DONE=0
+    else
+        DIALOGS_DONE=$((DIALOGS_DONE + 1))
+        [ "$DIALOGS_DONE" -ge 2 ] && break
+    fi
+done
 
 # Block until the session exits. tmux's wait-for would be ideal but it
 # requires the channel to have been signaled; instead poll has-session
