@@ -44,7 +44,10 @@ if [ -d "$BUNDLED_RUNTIME/share/terminfo" ]; then
 fi
 
 # Extend PATH so launchd can find Homebrew binaries (dev workflow + claude).
-export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+# `~/.local/bin` is where the official `claude.ai/install.sh` installer drops
+# the binary; the Settings → Install Claude Code button uses that installer,
+# so users who don't have Homebrew claude end up with it there.
+export PATH="$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin"
 
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 
