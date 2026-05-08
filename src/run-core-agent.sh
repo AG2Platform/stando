@@ -49,6 +49,26 @@ fi
 # so users who don't have Homebrew claude end up with it there.
 export PATH="$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin"
 
+# Symlink read-only repo bits into SUTANDO_HOME so claude's relative-path
+# tool invocations (`bash src/watch-tasks-stream.sh`, `python3
+# src/health-check.py`, etc.) resolve. The plist's WorkingDirectory is
+# SUTANDO_HOME, so claude inherits cwd=SUTANDO_HOME — but writable state
+# (tasks/, results/, core-status.json) lives there, while the actual
+# scripts ship inside the .app at Resources/repo/. Without these symlinks,
+# every relative path in proactive-loop's SKILL.md fails on a fresh user
+# who doesn't have a dev clone at ~/stando. Replace dangling links so a
+# .app move (Sparkle relocation, /Applications drag) self-heals on next
+# boot. Skip when SUTANDO_HOME already has a real file or dir at the path
+# — never overwrite user content.
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+mkdir -p "$SUTANDO_HOME"
+for name in src skills node_modules package.json package-lock.json tsconfig.json CLAUDE.md; do
+    target="$REPO_DIR/$name"
+    link="$SUTANDO_HOME/$name"
+    if [ -L "$link" ] && [ ! -e "$link" ]; then rm "$link"; fi
+    if [ -e "$target" ] && [ ! -e "$link" ]; then ln -s "$target" "$link"; fi
+done
+
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 
 if ! command -v tmux >/dev/null 2>&1; then
