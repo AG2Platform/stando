@@ -404,8 +404,8 @@ export const cancelTaskTool: ToolDefinition = {
 	async execute(args) {
 		const { taskId, query, list } = (args ?? {}) as { taskId?: string; query?: string; list?: boolean };
 		try {
-			const tasksDir = join(process.cwd(), 'tasks');
-			const resultsDir = join(process.cwd(), 'results');
+			const tasksDir = stateDir('tasks');
+			const resultsDir = stateDir('results');
 			const files = readdirSync(tasksDir).filter(f => f.endsWith('.txt')).sort();
 			if (files.length === 0) return { status: 'nothing_to_cancel' };
 
@@ -639,7 +639,7 @@ return frontApp`;
 // Resolve at module-init: $SUTANDO_PRIVATE_DIR/notes (canonical) when set,
 // else cwd/notes (legacy fallback). Notes are SHARED across the fleet so
 // they live at the top-level private dir, not under machine-<host>/.
-import { sharedPersonalPath, statePath } from './util_paths.js';
+import { sharedPersonalPath, stateDir, statePath } from './util_paths.js';
 const NOTES_DIR = sharedPersonalPath('notes', process.cwd());
 
 export const showViewTool: ToolDefinition = {
