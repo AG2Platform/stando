@@ -59,10 +59,30 @@ final class SparkleUpdater: NSObject, SPUUpdaterDelegate {
     /// Build the feed URL. Hosted on GitHub Releases for now — channel
     /// filtering happens inside the appcast via <sparkle:channel> tags
     /// rather than per-channel URLs, so a single feed serves all
-    /// channels. The SUSelectedChannel UserDefault still controls which
-    /// items Sparkle picks from that feed.
+    /// channels.
     func feedURLString(for updater: SPUUpdater) -> String? {
         return "https://github.com/AG2Platform/stando/releases/latest/download/appcast.xml"
+    }
+
+    /// Tell Sparkle which channels we participate in. Required: Sparkle
+    /// 2.9.x does NOT read `SUSelectedChannel` from user defaults — its
+    /// binary contains zero references to that key. Without this method,
+    /// Sparkle treats the allowed-channels set as empty and silently
+    /// rejects every item tagged `<sparkle:channel>internal</sparkle:channel>`,
+    /// reporting "you're up to date" forever. The v0.2.1 attempt to
+    /// register `SUSelectedChannel = internal` as a default was a dud
+    /// for the same reason. We still consult `SUSelectedChannel` here so
+    /// users (or QA) can override via `defaults write` to test e.g.
+    /// `internal,beta`, but the in-app default is the channel we
+    /// actually ship to.
+    func allowedChannels(for updater: SPUUpdater) -> Set<String> {
+        if let raw = UserDefaults.standard.string(forKey: "SUSelectedChannel"), !raw.isEmpty {
+            let parts = raw.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }.filter { !$0.isEmpty }
+            if !parts.isEmpty { return Set(parts) }
+        }
+        return ["internal"]
     }
 }
 
