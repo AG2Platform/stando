@@ -1,0 +1,7 @@
+{
+	"name": "skill-installer",
+	"description": "Browse + install cloud marketplace skills. Voice-callable: 'find a skill for X', 'install Y', 'review Y'.",
+	"enabled": true,
+	"access_tier": "owner",
+	"tools": "./tools.ts"
+}

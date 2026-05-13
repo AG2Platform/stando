@@ -43,6 +43,8 @@ import {
 	startSession as cloudStartSession,
 	endSession as cloudEndSession,
 	recordError as cloudRecordError,
+	onCapHit as cloudOnCapHit,
+	type CapHitInfo,
 } from './cloud-client.js';
 
 // Cartesia is loaded dynamically at the bottom of the config section so
@@ -933,6 +935,23 @@ async function main() {
 				voiceToolCalls.push({ name: toolName, durationMs: e.durationMs, timestamp: new Date().toISOString() });
 				voiceEvents.push({ event: `tool_result:${toolName}:${e.durationMs}ms`, timestamp: new Date().toISOString() });
 				console.log(`${ts()} [Tool] result: ${toolName} (${e.status}, ${e.durationMs}ms)`);
+				// Per-skill metering for the marketplace. One event per tool
+				// call. metadata.skill names the tool; metadata.source pins
+				// the invocation channel so admin can split voice vs bridge.
+				// metadata.work=true on the `work` tool flags claude-code
+				// dispatches so they don't get conflated with inline skills.
+				cloudRecordEvent({
+					kind: 'skill.run',
+					units: 1,
+					metadata: {
+						skill: toolName,
+						source: 'voice',
+						durationMs: e.durationMs,
+						status: e.status,
+						sessionId: SESSION_ID,
+						work: toolName === 'work',
+					},
+				});
 				// Clear the tool track; browser track takes over immediately.
 				fetch('http://localhost:8080/mute-state?state=idle&source=tool').catch(() => {});
 			},
@@ -1035,6 +1054,93 @@ async function main() {
 			}
 		};
 		console.log(`${ts()} [VoiceFailure] classifier wired into transport.onClose`);
+	})();
+
+	// Subscribe to cloud cap-hit events so the voice agent can surface
+	// "monthly limit reached" naturally on the next turn. We don't
+	// proactively interrupt — the next user prompt will trigger Gemini
+	// to read the injected note and explain. Throttled per (group ×
+	// reason) so retries don't spam the conversation.
+	(() => {
+		const notified = new Map<string, number>();
+		const NOTIFY_THROTTLE_MS = 60_000;
+		cloudOnCapHit((info: CapHitInfo) => {
+			const key = `${info.group ?? 'unknown'}:${info.reason ?? 'denied'}`;
+			const last = notified.get(key) ?? 0;
+			if (Date.now() - last < NOTIFY_THROTTLE_MS) return;
+			notified.set(key, Date.now());
+
+			const isBurst = info.reason === 'fair_use_burst';
+			const isFunds = info.reason === 'tier_exhausted_no_wallet';
+			const groupLabel = ((): string => {
+				switch (info.group) {
+					case 'voice': return 'voice';
+					case 'phone': return 'phone';
+					case 'channel': return 'channel message';
+					case 'image': return 'image generation';
+					case 'video': return 'video generation';
+					case 'tts': return 'speech synthesis';
+					case 'skill': return 'skill';
+					default: return 'usage';
+				}
+			})();
+			const msg = isBurst
+				? `[System: Sutando's cloud just rate-limited your ${groupLabel} traffic — short burst protection. Tell the user calmly that they should slow down and try again in a minute. Don't pretend it's your own decision — say "the cloud throttled this".]`
+				: isFunds
+				? `[System: Monthly ${groupLabel} cap exhausted and the credit wallet is empty. Tell the user once that they've hit their plan's monthly limit; suggest topping up at sutando.ag2.ai/billing or upgrading. Wallet balance: ${info.walletBalance} credits.]`
+				: `[System: A ${groupLabel} request was denied by the cloud (reason: ${info.reason ?? 'capped'}). Tell the user once, briefly, and suggest checking the dashboard.]`;
+
+			console.log(`${ts()} [CapHit] ${key} balance=${info.walletBalance} remaining=${info.tierRemainingCanonical}`);
+
+			// Inject into voice if connected — Gemini will read it on the
+			// next user turn and explain in-character. If the session is
+			// closed (e.g. voice cap exhausted closed the transport),
+			// fall back to proactive-result + OS notification so the user
+			// still finds out.
+			try {
+				if (session.sessionManager.isActive && isClientConnected(session)) {
+					injectText(session, msg);
+					return;
+				}
+			} catch {}
+
+			try {
+				const path = join(stateDir('results'), `proactive-cap-hit-${Date.now()}.txt`);
+				writeFileSync(
+					path,
+					(isBurst
+						? `Sutando paused ${groupLabel} briefly — burst limit. Try again in a minute.`
+						: isFunds
+						? `You've hit your monthly ${groupLabel} cap and your wallet is empty. Top up at sutando.ag2.ai/billing.`
+						: `${groupLabel} request blocked. Check sutando.ag2.ai/dashboard.`),
+				);
+			} catch {}
+
+			try {
+				const note = isBurst
+					? `${groupLabel} throttled — try again in a minute`
+					: isFunds
+					? `${groupLabel} cap reached — top up at sutando.ag2.ai/billing`
+					: `${groupLabel} request blocked`;
+				const safe = note.replace(/["\\]/g, '');
+				execSyncTop(
+					`osascript -e 'display notification "${safe}" with title "Sutando"'`,
+					{ stdio: 'ignore' } as any,
+				);
+			} catch {}
+
+			// If voice itself is what's capped and the session is alive,
+			// close it cleanly so reconnect attempts don't immediately
+			// re-hit the cap. Health monitor's backoff window will keep
+			// the loop quiet.
+			if (info.group === 'voice' && isFunds) {
+				try {
+					console.log(`${ts()} [CapHit] closing voice session on voice-cap`);
+					void session.close('voice_cap_exhausted');
+					voiceFatalBackoffUntil = Date.now() + 5 * 60 * 1000;
+				} catch {}
+			}
+		});
 	})();
 
 	// Wire narration-tee: capture Gemini's outbound audio for screen recordings

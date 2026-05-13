@@ -21,6 +21,52 @@ import discord
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from util_paths import shared_personal_path  # noqa: E402
+from cloud_metrics import (  # noqa: E402
+    record_event as _cloud_record_event,
+    cap_status as _cloud_cap_status,
+)
+
+
+def _emit_channel_metric(direction: str, metadata: dict | None = None) -> None:
+    """Beta tier-cap accounting: emit one `channel.discord.<in|out>`
+    per accepted message. Cap to "real" traffic — bot heartbeats and
+    control messages (pairing/access prompts) skip this call. Silent on
+    failure; telemetry must never crash the bridge."""
+    try:
+        _cloud_record_event(
+            f"channel.discord.{direction}",
+            units=1,
+            metadata=metadata or None,
+        )
+    except Exception:
+        pass
+
+
+# Cap-hit reply throttle: per-channel last-notice timestamp so a chatty
+# channel doesn't see the "monthly cap reached" message on every single
+# inbound. ~5 min between repeats matches the cloud_metrics cap-status
+# TTL, so when the cap clears (renewal / topup) the next message is
+# processed normally instead of bounced.
+_channel_cap_notice: dict[int, float] = {}
+_CAP_NOTICE_REMINDER_S = 300.0
+
+
+def _cap_hit_reply_text(reason: str | None) -> str:
+    if reason == "fair_use_burst":
+        return (
+            "Sutando paused briefly — short-burst rate-limit hit. "
+            "Try again in a minute."
+        )
+    if reason == "tier_exhausted_no_wallet":
+        return (
+            "Sutando: monthly channel-message cap reached and your credit "
+            "wallet is empty. Top up at https://sutando.ag2.ai/billing or "
+            "upgrade at https://sutando.ag2.ai/dashboard."
+        )
+    return (
+        "Sutando: cloud throttled this channel. Check "
+        "https://sutando.ag2.ai/dashboard for details."
+    )
 
 # Load token from channels config
 TOKEN = ""
@@ -2432,6 +2478,31 @@ async def _handle_discord_message(message, force=False):
         ),
     }
 
+    # Cap-hit short-circuit. If the cloud denied a recent channel.*
+    # accounting (monthly cap exhausted, wallet empty, or fair-use
+    # burst), skip the task entirely and reply once per ~5 min so the
+    # sender knows. Owner tier is exempt — capping the operator's own
+    # ability to use Sutando defeats the purpose of the gate.
+    if access_tier != "owner":
+        cap_hit, cap_reason = _cloud_cap_status("channel")
+        if cap_hit:
+            last_notice = _channel_cap_notice.get(message.channel.id, 0.0)
+            now = time.time()
+            if now - last_notice > _CAP_NOTICE_REMINDER_S:
+                _channel_cap_notice[message.channel.id] = now
+                try:
+                    for chunk in _chunk_for_discord(_cap_hit_reply_text(cap_reason)):
+                        await message.channel.send(chunk)
+                except Exception as e:
+                    print(f"  [cap-hit-reply] failed: {e}", flush=True)
+            else:
+                print(
+                    f"  [cap-hit] suppressing reply in #{channel_name} "
+                    f"(last notice {int(now - last_notice)}s ago)",
+                    flush=True,
+                )
+            return
+
     # Auto-react BEFORE writing the task — gives the user an instant visual ack
     # at gateway-event speed, while the rest of task processing (file write,
     # watcher pickup, agent response craft) happens downstream. The task
@@ -2457,6 +2528,18 @@ async def _handle_discord_message(message, force=False):
     )
     pending_replies[task_id] = message.channel
     save_pending_replies()
+    # Tier-cap accounting: one inbound counts toward the user's monthly
+    # channel allowance. access_tier carries owner/team/other for splits
+    # in admin views.
+    _emit_channel_metric(
+        "in",
+        metadata={
+            "channel_id": str(message.channel.id),
+            "is_dm": is_dm,
+            "access_tier": access_tier,
+            "task_id": task_id,
+        },
+    )
 
     # Typing indicator
     async with message.channel.typing():
@@ -2649,6 +2732,15 @@ async def poll_results():
                             print(f"  REJECTED file (not in allowlist): {fpath}", flush=True)
 
                     print(f"  Replied: {reply_text[:80]}...", flush=True)
+                    _emit_channel_metric(
+                        "out",
+                        metadata={
+                            "channel_id": str(channel.id),
+                            "task_id": task_id,
+                            "reply_chunks": len(_chunk_for_discord(clean_text)) if clean_text else 0,
+                            "file_count": len(files),
+                        },
+                    )
                 except Exception as e:
                     print(f"  Reply failed: {e}", flush=True)
                 # Archive (not delete) so we can mine patterns later.
@@ -2750,6 +2842,15 @@ async def poll_proactive():
                                 await dm.send(f"(file not allowed: {fpath})")
                                 print(f"  [proactive] REJECTED file: {fpath}", flush=True)
                         print(f"  [proactive] sent to {owner_id}: {clean_text[:80]}")
+                        _emit_channel_metric(
+                            "out",
+                            metadata={
+                                "channel_id": "dm",
+                                "kind": "proactive",
+                                "owner_id": owner_id,
+                                "file_count": len(files),
+                            },
+                        )
                     except Exception as e:
                         print(f"  [proactive] failed to DM {owner_id}: {e}")
                     f.unlink(missing_ok=True)

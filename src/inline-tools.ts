@@ -788,15 +788,18 @@ async function loadSkillManifestTools(): Promise<ToolDefinition[]> {
 	// `~/.sutando-memory-sync/skills/`). The private dir lets users keep
 	// personal tooling with real per-file git history outside the public repo.
 	// Order: public first, then private — same-name skills loaded from
-	// private take precedence (last one wins via the dup-name guard below if
-	// any; in practice they should be uniquely named).
+	// private take precedence (last-wins via `bySkill` map below). Required
+	// for users whose `$SUTANDO_PRIVATE_DIR` aliases the public repo (e.g.
+	// dev workflow where private points at the same checkout): without
+	// last-wins, both passes load `report-feedback` and the per-tool dup
+	// guard at the bottom of this module throws.
 	const dirsToScan: string[] = [join(process.cwd(), 'skills')];
 	const privateRoot = process.env.SUTANDO_PRIVATE_DIR;
 	if (privateRoot) {
 		const expanded = privateRoot.replace(/^~/, process.env.HOME || '');
 		dirsToScan.push(join(expanded, 'skills'));
 	}
-	const out: ToolDefinition[] = [];
+	const bySkill = new Map<string, ToolDefinition[]>();
 	for (const skillsDir of dirsToScan) {
 		if (!existsSync(skillsDir)) continue;
 		let dirs: string[];
@@ -825,14 +828,20 @@ async function loadSkillManifestTools(): Promise<ToolDefinition[]> {
 				// @ts-ignore — dynamic relative import resolved at runtime by tsx
 				const mod = await import(toolsPath);
 				if (Array.isArray(mod.tools)) {
-					out.push(...mod.tools);
-					console.log(`[skill-loader] loaded ${mod.tools.length} tool(s) from ${manifest.name || dirName} (${skillsDir})`);
+					const skillName = manifest.name || dirName;
+					// Last-write-wins: a later (private) pass replaces the
+					// public skill of the same name. Without this, the
+					// per-tool unique-name guard at module bottom throws.
+					bySkill.set(skillName, mod.tools);
+					console.log(`[skill-loader] loaded ${mod.tools.length} tool(s) from ${skillName} (${skillsDir})`);
 				}
 			} catch (err) {
 				console.warn(`[skill-loader] failed to import ${dirName}/${manifest.tools} from ${skillsDir}:`, err instanceof Error ? err.message : err);
 			}
 		}
 	}
+	const out: ToolDefinition[] = [];
+	for (const tools of bySkill.values()) out.push(...tools);
 	return out;
 }
 const personalTools = await loadSkillManifestTools();

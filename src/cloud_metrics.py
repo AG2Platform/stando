@@ -21,6 +21,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 from urllib import request as urlrequest
@@ -32,6 +33,8 @@ __all__ = [
     "record_onboarding",
     "is_cloud_signed_in",
     "load_cloud_auth",
+    "is_cap_exhausted",
+    "cap_status",
 ]
 
 REPO_DIR = Path(__file__).resolve().parent.parent
@@ -120,8 +123,78 @@ def is_cloud_signed_in() -> bool:
     return load_cloud_auth() is not None
 
 
-def _post_json(auth: dict[str, Any], path: str, body: dict[str, Any]) -> None:
-    """Background-thread sender. Silent on all errors."""
+# Cap-hit cache. Updated from the /api/usage accounting response so
+# Python callers (Discord / Telegram / image-gen) can check whether the
+# cloud has already denied a recent request for the same cap group.
+# Maps `cap_group` -> (expires_at_unix, reason). Beta posture: in-memory,
+# per-process; bridges that reset reset their notice state too.
+_cap_status_lock = threading.Lock()
+_cap_status: dict[str, tuple[float, str]] = {}
+_CAP_NOTICE_TTL_SECONDS = 300.0
+
+
+def is_cap_exhausted(group: str) -> bool:
+    """True iff the most recent /api/usage accounting for `group` denied
+    a call AND the notice TTL hasn't elapsed. Bridges can short-circuit
+    inbound processing and reply with a "monthly limit reached" canned
+    response instead of running the agent."""
+    with _cap_status_lock:
+        rec = _cap_status.get(group)
+    if not rec:
+        return False
+    expires, _reason = rec
+    return expires > time.time()
+
+
+def cap_status(group: str) -> tuple[bool, str | None]:
+    """Same as is_cap_exhausted but also returns the denial reason
+    (e.g. 'tier_exhausted_no_wallet', 'fair_use_burst') for downstream
+    UX messaging."""
+    with _cap_status_lock:
+        rec = _cap_status.get(group)
+    if not rec:
+        return False, None
+    expires, reason = rec
+    if expires <= time.time():
+        return False, None
+    return True, reason
+
+
+def _update_cap_status_from_response(payload: dict[str, Any]) -> None:
+    accounting = payload.get("accounting")
+    if not isinstance(accounting, list):
+        return
+    now = time.time()
+    with _cap_status_lock:
+        for entry in accounting:
+            if not isinstance(entry, dict):
+                continue
+            result = entry.get("result") or {}
+            if not isinstance(result, dict):
+                continue
+            allowed = result.get("allowed", True)
+            group = result.get("group")
+            reason = result.get("reason") or "denied"
+            if not isinstance(group, str):
+                continue
+            if allowed:
+                # On a clean allow, clear any stale denial — caps can be
+                # reset by a subscription renewal mid-window.
+                _cap_status.pop(group, None)
+            else:
+                _cap_status[group] = (now + _CAP_NOTICE_TTL_SECONDS, str(reason))
+
+
+def _post_json(
+    auth: dict[str, Any],
+    path: str,
+    body: dict[str, Any],
+    *,
+    parse_response: bool = False,
+) -> None:
+    """Background-thread sender. Silent on all errors. When
+    `parse_response=True`, reads the JSON response and updates the
+    cap-hit cache so subsequent callers can short-circuit."""
     try:
         data = json.dumps(body).encode("utf-8")
         req = urlrequest.Request(
@@ -133,8 +206,15 @@ def _post_json(auth: dict[str, Any], path: str, body: dict[str, Any]) -> None:
                 "Content-Type": "application/json",
             },
         )
-        with urlrequest.urlopen(req, timeout=_TIMEOUT_SECONDS):
-            pass
+        with urlrequest.urlopen(req, timeout=_TIMEOUT_SECONDS) as resp:
+            if parse_response:
+                try:
+                    body_text = resp.read().decode("utf-8", errors="replace")
+                    payload = json.loads(body_text)
+                    if isinstance(payload, dict):
+                        _update_cap_status_from_response(payload)
+                except (json.JSONDecodeError, ValueError, OSError):
+                    pass
     except (HTTPError, URLError, OSError, TimeoutError) as e:
         try:
             print(f"cloud_metrics: send to {path} failed: {e}", file=sys.stderr)
@@ -144,7 +224,7 @@ def _post_json(auth: dict[str, Any], path: str, body: dict[str, Any]) -> None:
 
 def _send(auth: dict[str, Any], events: list[dict[str, Any]]) -> None:
     """Legacy alias retained for /api/usage callers."""
-    _post_json(auth, "/api/usage", {"events": events})
+    _post_json(auth, "/api/usage", {"events": events}, parse_response=True)
 
 
 def record_event(

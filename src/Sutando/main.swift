@@ -87,6 +87,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// in-flight edits.
     var settingsWindow: SettingsWindowController?
 
+    /// Feedback window. Same pattern — lazily created on first hotkey /
+    /// Settings-button press; retained so the user can dismiss + reopen
+    /// without losing draft text.
+    var feedbackWindow: FeedbackWindowController?
+
     /// In-app WKWebView windows hosting the voice client (localhost:8080)
     /// and the dashboard (localhost:7844). Replaces the old AppleScript
     /// path that opened these in Chrome — see WebWindow.swift for why.
@@ -149,8 +154,126 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             watchResults()
             registerURLSchemeHandler()
             startCloudHeartbeat()
+            observeCloudAuthSignIn()
             logToFile("App started, workspace=\(workspace)")
+            // Services start *with* the app and stop when it quits.
+            // Bootstrap unconditionally on launch — idempotent via
+            // bootout-before-bootstrap. Web UI opens once services are
+            // up (WebWindowController retries the URL for ~30s, so the
+            // cold-start race is handled there).
+            autoBootstrapServices()
             maybeRunFirstLaunchFlow()
+            scheduleAutoOpenWebUI()
+        }
+    }
+
+    /// Hook fired by NSApplication before termination (cmd+Q, menu Quit,
+    /// app being relaunched via restartSelf, …). Synchronously boots out
+    /// every running com.sutando.* service so cmd+Q tears down the whole
+    /// stack — voice agent, dashboard, bridges, core agent — not just
+    /// the menu-bar icon.
+    func applicationWillTerminate(_ notification: Notification) {
+        logToFile("applicationWillTerminate: shutting down services")
+        let stopped = LaunchAgentInstaller().stopAll()
+        logToFile("applicationWillTerminate: stopped \(stopped.joined(separator: ", "))")
+    }
+
+    /// Render plist templates + `launchctl bootstrap` every service.
+    /// Runs synchronously off the main thread so menu-bar UI stays
+    /// responsive while ~7 plists load. On first launch of this app
+    /// version, also migrates plists left behind by older Sutando
+    /// versions (which lived in `~/Library/LaunchAgents/` and would
+    /// otherwise auto-load on user login — conflicting with the new
+    /// "services bound to app lifecycle" model).
+    private func autoBootstrapServices() {
+        DispatchQueue.global(qos: .userInitiated).async { [self] in
+            let installer = LaunchAgentInstaller()
+            let migrated = installer.migrateLegacyPlists()
+            if !migrated.isEmpty {
+                logToFile("autoBootstrapServices: migrated legacy plists: \(migrated.joined(separator: ", "))")
+            }
+            let paths = LaunchAgentInstaller.defaultPaths(workspace: workspace)
+            do {
+                let summary = try installer.install(paths: paths)
+                logToFile("autoBootstrapServices: installed=\(summary.installed.joined(separator: ",")) skipped=\(summary.skippedDisabled.joined(separator: ",")) failed=\(summary.failed.map { $0.label }.joined(separator: ","))")
+                if !summary.failed.isEmpty {
+                    let errs = summary.failed.map { "\($0.label): \($0.message)" }.joined(separator: "; ")
+                    DispatchQueue.main.async { [self] in
+                        notify("Sutando", "Some services failed to start: \(summary.failed.map { $0.label }.joined(separator: ", ")). See Settings.")
+                    }
+                    logToFile("autoBootstrapServices: failures — \(errs)")
+                }
+            } catch LaunchAgentError.bundleResourcesMissing {
+                logToFile("autoBootstrapServices: bundle templates missing — running raw binary?")
+            } catch {
+                logToFile("autoBootstrapServices: error \(error)")
+            }
+        }
+    }
+
+    /// Open the voice web window after bootstrap kicks off. The window
+    /// retries cold-start failures on its own (30 × 1s) so a fixed short
+    /// delay is enough to avoid the immediate-fail-twice flicker on
+    /// fresh launches.
+    private func scheduleAutoOpenWebUI() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [self] in
+            openWebUI()
+        }
+    }
+
+    /// Subscribe to the sign-in notification CloudAuth posts after a
+    /// successful sutando:// callback. Used to kick off one-shot setup
+    /// work — currently just a memory hydrate so a fresh Mac restores
+    /// from cloud backup before the agent boots.
+    private func observeCloudAuthSignIn() {
+        NotificationCenter.default.addObserver(
+            forName: .cloudAuthDidSignIn,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.runMemoryHydrate()
+        }
+    }
+
+    /// Best-effort hydrate. Shells out to `python3 src/memory-backup.py
+    /// hydrate`, which itself short-circuits when the local memory dir
+    /// is non-empty (so re-running on every sign-in is safe). Output
+    /// goes to logs/memory-backup.log.
+    private func runMemoryHydrate() {
+        let script = workspace + "/src/memory-backup.py"
+        guard FileManager.default.fileExists(atPath: script) else {
+            logToFile("runMemoryHydrate: \(script) not found — skipping")
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            task.arguments = ["python3", script, "hydrate"]
+            task.currentDirectoryURL = URL(fileURLWithPath: self.workspace)
+            // Inherit environment so SUTANDO_HOME / SUTANDO_MEMORY_DIR
+            // resolve consistently with the bash-launched services.
+            let logsDir = self.stateRoot + "/logs"
+            try? FileManager.default.createDirectory(
+                atPath: logsDir,
+                withIntermediateDirectories: true
+            )
+            let logPath = logsDir + "/memory-backup.log"
+            if let fh = FileHandle(forWritingAtPath: logPath) ?? {
+                FileManager.default.createFile(atPath: logPath, contents: nil)
+                return FileHandle(forWritingAtPath: logPath)
+            }() {
+                fh.seekToEndOfFile()
+                task.standardOutput = fh
+                task.standardError = fh
+            }
+            do {
+                try task.run()
+                task.waitUntilExit()
+                self.logToFile("runMemoryHydrate: exit=\(task.terminationStatus)")
+            } catch {
+                self.logToFile("runMemoryHydrate: launch failed: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -281,6 +404,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindow?.showAndFocus()
     }
 
+    /// Open the native feedback form. Used by the ⌃⇧F global hotkey and
+    /// the Settings "Report an issue" button. `initialBody` lets callers
+    /// preseed context (e.g. "Auto-filled from cap-hit").
+    @objc func openFeedbackForm(initialBody: String) {
+        if feedbackWindow == nil {
+            feedbackWindow = FeedbackWindowController(initialBody: initialBody)
+        }
+        feedbackWindow?.showAndFocus()
+    }
+
+    /// Selector form for menus / buttons that pass no userInfo.
+    @objc func openFeedbackFormDefault() {
+        openFeedbackForm(initialBody: "")
+    }
+
     // MARK: - Result notifications (when voice is not connected)
     func watchResults() {
         let resultsPath = stateRoot + "/results"
@@ -336,8 +474,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
+            // Prefer the bundled menubar template (monochrome, auto-tinted
+            // by macOS for dark + light bars). Falls back to the legacy
+            // stand-avatar.png from the dev repo, then to a bold "S"
+            // glyph if neither is on disk (very early dev or partial
+            // install). Search order: .app bundle Resources, then the
+            // dev-workflow app/assets/ directory beside the binary.
+            let bundled = Bundle.main.resourcePath.flatMap { p -> String? in
+                let candidate = p + "/menubar.png"
+                return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
+            }
+            let templatePath = bundled ?? (workspace + "/app/assets/menubar.png")
             let avatarPath = workspace + "/assets/stand-avatar.png"
-            if let image = NSImage(contentsOfFile: avatarPath) {
+            if FileManager.default.fileExists(atPath: templatePath),
+               let image = NSImage(contentsOfFile: templatePath) {
+                image.size = NSSize(width: 18, height: 18)
+                image.isTemplate = true
+                button.image = image
+            } else if let image = NSImage(contentsOfFile: avatarPath) {
                 image.size = NSSize(width: 18, height: 18)
                 image.isTemplate = false
                 button.image = image
@@ -356,6 +510,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             "drop_screenshot": ("Drop Screenshot", #selector(dropScreenshot)),
             "toggle_voice":    ("Toggle Voice",    #selector(toggleVoice)),
             "toggle_mute":     ("Toggle Mute",     #selector(toggleMute)),
+            "report_feedback": ("Report an Issue", #selector(openFeedbackFormDefault)),
         ]
         for hk in hotkeys {
             guard let (label, sel) = actionToSelector[hk.action] else { continue }
@@ -419,12 +574,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         signOutMenuItem = signOutItem
         // Hide whichever item doesn't match the current state.
         DispatchQueue.main.async { [self] in updateCloudMenuItems() }
-        menu.addItem(NSMenuItem.separator())
-        // LaunchAgent install/uninstall (also accessible from inside Settings).
-        let installItem = NSMenuItem(title: "Install Background Services…", action: #selector(installLaunchAgents), keyEquivalent: "")
-        let uninstallItem = NSMenuItem(title: "Uninstall Background Services", action: #selector(uninstallLaunchAgents), keyEquivalent: "")
-        menu.addItem(installItem)
-        menu.addItem(uninstallItem)
         menu.addItem(NSMenuItem.separator())
         // Sparkle auto-update.
         menu.addItem(NSMenuItem(title: "Check for Updates…", action: #selector(checkForUpdates), keyEquivalent: ""))
@@ -982,10 +1131,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Composited onto the top-right corner of the 18×18 avatar so the
     /// menu bar continuously signals mode without taking an extra slot.
     func avatarImage(presenterActive: Bool, meetingActive: Bool = false) -> NSImage? {
-        let avatarPath = workspace + "/assets/stand-avatar.png"
-        guard let base = NSImage(contentsOfFile: avatarPath) else { return nil }
+        // Prefer the bundled monochrome menubar template (Resources/menubar.png
+        // in the .app bundle, or app/assets/menubar.png in the dev tree).
+        // Falls back to the legacy assets/stand-avatar.png so installs
+        // that predate the template still render. Template images get
+        // tinted automatically by macOS — when one is found we keep
+        // isTemplate=true unless we composite a status dot (which needs
+        // its own color, so we drop template-ness for that case).
+        let bundledTemplate = Bundle.main.resourcePath.flatMap { p -> String? in
+            let candidate = p + "/menubar.png"
+            return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
+        }
+        let templatePath = bundledTemplate ?? (workspace + "/app/assets/menubar.png")
+        let fallbackPath = workspace + "/assets/stand-avatar.png"
+
+        let baseIsTemplate: Bool
+        let basePath: String
+        if FileManager.default.fileExists(atPath: templatePath) {
+            basePath = templatePath
+            baseIsTemplate = true
+        } else {
+            basePath = fallbackPath
+            baseIsTemplate = false
+        }
+        guard let base = NSImage(contentsOfFile: basePath) else { return nil }
         base.size = NSSize(width: 18, height: 18)
-        base.isTemplate = false
+        base.isTemplate = baseIsTemplate
         // Composite priority: presenter > meeting > active (none).
         let dotColor: NSColor?
         if presenterActive {
@@ -1186,6 +1357,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ("drop_screenshot",  "S", ["control"]),
         ("toggle_voice",     "V", ["control"]),
         ("toggle_mute",      "M", ["control"]),
+        ("report_feedback",  "F", ["control", "shift"]),
     ]
 
     private func loadHotkeyConfig() -> [(action: String, key: String, modifiers: [String])] {
@@ -1284,6 +1456,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             case "drop_screenshot": appDelegate.dropScreenshot()
             case "toggle_voice":    appDelegate.toggleVoice()
             case "toggle_mute":     appDelegate.toggleMute()
+            case "report_feedback": appDelegate.openFeedbackForm(initialBody: "")
             default: break
             }
             return noErr
@@ -1844,71 +2017,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func restartServices() {
-        notify("Sutando", "Restarting all services...")
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        proc.arguments = [workspace + "/src/restart.sh"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        DispatchQueue.global(qos: .utility).async {
-            try? proc.run()
-            proc.waitUntilExit()
+        notify("Sutando", "Restarting all services…")
+        DispatchQueue.global(qos: .utility).async { [self] in
+            let installer = LaunchAgentInstaller()
+            let stopped = installer.stopAll()
+            let paths = LaunchAgentInstaller.defaultPaths(workspace: workspace)
+            do {
+                let summary = try installer.install(paths: paths)
+                let failuresMsg = summary.failed
+                    .map { "\($0.label): \($0.message)" }
+                    .joined(separator: "; ")
+                logToFile("restartServices: stopped=\(stopped.count) installed=\(summary.installed.joined(separator: ",")) skipped=\(summary.skippedDisabled.joined(separator: ",")) failed=\(failuresMsg.isEmpty ? "(none)" : failuresMsg)")
+                DispatchQueue.main.async { [self] in
+                    if summary.failed.isEmpty {
+                        notify("Sutando", "Restarted \(summary.installed.count) services.")
+                    } else {
+                        notify("Sutando", "Restarted \(summary.installed.count). \(summary.failed.count) failed — see log.")
+                    }
+                }
+            } catch {
+                logToFile("restartServices: error \(error)")
+                DispatchQueue.main.async { [self] in
+                    notify("Sutando", "Restart failed: \(error.localizedDescription)")
+                }
+            }
         }
     }
 
     @objc func stopServices() {
-        notify("Sutando", "Stopping all services...")
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        proc.arguments = [workspace + "/src/stop.sh"]
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
-        DispatchQueue.global(qos: .utility).async {
-            try? proc.run()
-            proc.waitUntilExit()
-        }
-    }
-
-    @objc func installLaunchAgents() {
+        notify("Sutando", "Stopping all services…")
         DispatchQueue.global(qos: .utility).async { [self] in
-            let installer = LaunchAgentInstaller()
-            let paths = LaunchAgentInstaller.defaultPaths(workspace: workspace)
-            do {
-                let summary = try installer.install(paths: paths)
-                logToFile("installLaunchAgents: installed=\(summary.installed.joined(separator: ",")) skipped=\(summary.skippedDisabled.joined(separator: ",")) failed=\(summary.failed.map { $0.label }.joined(separator: ","))")
-                DispatchQueue.main.async { [self] in
-                    if summary.failed.isEmpty {
-                        notify("Sutando", "Installed \(summary.installed.count) services. They'll auto-start on login.")
-                    } else {
-                        notify("Sutando", "Installed \(summary.installed.count). \(summary.failed.count) failed — see Settings.")
-                    }
-                }
-            } catch LaunchAgentError.bundleResourcesMissing {
-                DispatchQueue.main.async { [self] in
-                    notify("Sutando", "LaunchAgent templates not found. Run from .app bundle.")
-                }
-            } catch {
-                logToFile("installLaunchAgents: error \(error)")
-                DispatchQueue.main.async { [self] in
-                    notify("Sutando", "Install failed: \(error.localizedDescription)")
-                }
+            let stopped = LaunchAgentInstaller().stopAll()
+            logToFile("stopServices: stopped \(stopped.joined(separator: ", "))")
+            DispatchQueue.main.async { [self] in
+                notify("Sutando", "Stopped \(stopped.count) services.")
             }
         }
     }
 
     @objc func checkForUpdates() {
         sparkle.checkForUpdates()
-    }
-
-    @objc func uninstallLaunchAgents() {
-        DispatchQueue.global(qos: .utility).async { [self] in
-            let installer = LaunchAgentInstaller()
-            let removed = installer.uninstall()
-            logToFile("uninstallLaunchAgents: removed \(removed.joined(separator: ", "))")
-            DispatchQueue.main.async { [self] in
-                notify("Sutando", "Removed \(removed.count) services.")
-            }
-        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

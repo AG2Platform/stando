@@ -22,6 +22,48 @@ import time
 from pathlib import Path
 
 
+def _resolve_gateway_for_image_gen():
+    """Detect whether to route image/video generation via the Sutando
+    cloud gateway. Returns {base_url, token} when:
+      1. cloud-auth.json exists (user signed in),
+      2. GET /api/me confirms paid plan (plus / pro / max),
+    otherwise None — caller stays on BYOK.
+
+    Network timeout 3s; failures fall through silently so a downed
+    cloud doesn't block local image gen for paid users.
+    """
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "src"))
+        from cloud_metrics import load_cloud_auth  # type: ignore
+    except Exception:  # noqa: BLE001
+        return None
+    auth = load_cloud_auth()
+    if not auth:
+        return None
+    import json
+    from urllib import request as _urlreq
+    from urllib.error import HTTPError, URLError
+    try:
+        req = _urlreq.Request(
+            f"{auth['apiBase'].rstrip('/')}/api/me",
+            method="GET",
+            headers={"Authorization": f"Bearer {auth['token']}"},
+        )
+        with _urlreq.urlopen(req, timeout=3.0) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except (HTTPError, URLError, OSError, TimeoutError, json.JSONDecodeError):
+        return None
+    plan = data.get("plan")
+    if plan not in ("plus", "pro", "max"):
+        return None
+    return {
+        # Trailing slash is significant — the SDK appends `v1beta/...` to
+        # base_url, and gateway's catch-all parses the path-after-`/llm/`.
+        "base_url": f"{auth['apiBase'].rstrip('/')}/api/gateway/llm/",
+        "token": auth["token"],
+    }
+
+
 def load_env():
     """Load GEMINI_API_KEY from .env files."""
     for env_path in [
@@ -94,6 +136,23 @@ def generate_image(client, args):
             ),
         )
     except Exception as e:
+        msg = str(e)
+        # Cloud gateway translates cap-hits to HTTP 402 / 429. The genai
+        # SDK surfaces the status as part of the exception string.
+        if "402" in msg or "insufficient_credits" in msg:
+            print(
+                "Error: Wallet empty for image generation. "
+                "Top up at https://sutando.ag2.ai/billing.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if "429" in msg or "fair_use_burst" in msg:
+            print(
+                "Error: Cloud rate-limited image generation (burst). "
+                "Try again in a minute.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         print(f"Error: Gemini API call failed: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -188,6 +247,21 @@ def generate_video(client, args):
                 config=config,
             )
     except Exception as e:
+        msg = str(e)
+        if "402" in msg or "insufficient_credits" in msg:
+            print(
+                "Error: Wallet empty for video generation. "
+                "Top up at https://sutando.ag2.ai/billing.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        if "429" in msg or "fair_use_burst" in msg:
+            print(
+                "Error: Cloud rate-limited video generation. "
+                "Try again in a minute.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         print(f"Error: Veo API call failed: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -232,17 +306,45 @@ def main():
     load_env()
 
     api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("Error: GEMINI_API_KEY not set. Add it to .env or export it.", file=sys.stderr)
-        sys.exit(1)
-
     try:
         from google import genai
+        from google.genai import types as genai_types
     except ImportError:
         print("Error: google-genai not installed. Run: pip3 install google-genai", file=sys.stderr)
         sys.exit(1)
 
-    client = genai.Client(api_key=api_key)
+    # Managed-gateway routing: when the user is signed in to a paid
+    # Sutando tier, route image/video generation through
+    # /api/gateway/llm/* so cloud master keys + per-call wallet debit
+    # apply. Falls back to BYOK if the auth file is missing or the
+    # user is on Free. Cloud returns 402/429 on cap-hit; we surface
+    # those as a clean error so callers can show "top up at /billing".
+    gateway = _resolve_gateway_for_image_gen()
+    sutando_kind = "video.gen" if args.video else "image.gen"
+    if gateway is not None:
+        client = genai.Client(
+            # api_key is ignored upstream because the gateway substitutes
+            # its own master key, but the SDK still requires *some* value
+            # to fall through its config validation.
+            api_key=api_key or "sutando-gateway",
+            http_options=genai_types.HttpOptions(
+                base_url=gateway["base_url"],
+                headers={
+                    "Authorization": f"Bearer {gateway['token']}",
+                    "X-Sutando-Kind": sutando_kind,
+                },
+            ),
+        )
+        print(f"  Routing via Sutando cloud gateway ({sutando_kind})", file=sys.stderr)
+    else:
+        if not api_key:
+            print(
+                "Error: GEMINI_API_KEY not set and no Sutando paid-tier sign-in. "
+                "Add GEMINI_API_KEY to .env or sign in via the Sutando menu bar.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        client = genai.Client(api_key=api_key)
 
     # Cloud telemetry: import lazily so missing src/cloud_metrics.py
     # doesn't break this script for users who haven't pulled main.

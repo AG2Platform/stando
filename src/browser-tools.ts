@@ -240,7 +240,11 @@ export const openUrlTool: ToolDefinition = {
 
 async function describeScreenshot(imagePath: string, previousDescs: string[] = []): Promise<string> {
 	const apiKey = process.env.GEMINI_API_KEY;
-	if (!apiKey) return 'Vision description unavailable (no GEMINI_API_KEY)';
+	// Lazy-load the gateway config — keeps this module decoupled from
+	// cloud-client when running in tools-only contexts.
+	const { gatewayBaseUrl } = await import('./cloud-client.js');
+	const gateway = gatewayBaseUrl('llm');
+	if (!apiKey && !gateway) return 'Vision description unavailable (no GEMINI_API_KEY and not signed in to cloud)';
 	try {
 		// Fixes CodeQL #27 (js/command-line-injection): use execFileSync argv array instead of shell string
 		const safePath = imagePath.replace(/[^a-zA-Z0-9_\-./]/g, '');
@@ -262,22 +266,45 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 			const recent = previousDescs.slice(-3).map((d, i) => `${i + 1}. ${d}`).join(' | ');
 			prompt = `You are narrating a screen recording aloud. Already spoken: ${recent}. Describe ONLY what is NEW or has changed. Use a natural continuation ("Scrolling down...", "Next...", "Now we see...", "Further down..."). Do NOT restart with "The screen shows/displays" — the viewer already knows what page this is. 1 short sentence, max 20 words. ${guard}`;
 		}
-		const res = await fetch(
-			`https://generativelanguage.googleapis.com/v1beta/models/${VISION_MODEL}:generateContent?key=${apiKey}`,
-			{
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					contents: [{
-						parts: [
-							{ text: prompt },
-							{ inlineData: { mimeType, data: imageData } },
-						],
-					}],
-					generationConfig: { maxOutputTokens: 40 },
-				}),
-			},
-		);
+		const body = JSON.stringify({
+			contents: [{
+				parts: [
+					{ text: prompt },
+					{ inlineData: { mimeType, data: imageData } },
+				],
+			}],
+			generationConfig: { maxOutputTokens: 40 },
+		});
+		// Prefer managed gateway when signed in (cloud uses master key
+		// + bills paid-tier usage). Fall back to BYOK on any non-2xx so
+		// Free tier still works.
+		let res: Response | null = null;
+		if (gateway) {
+			res = await fetch(
+				`${gateway.url}v1beta/models/${VISION_MODEL}:generateContent`,
+				{
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json',
+						Authorization: `Bearer ${gateway.token}`,
+						'X-Sutando-Kind': 'vision.gemini',
+					},
+					body,
+				},
+			);
+			if (!res.ok) res = null;
+		}
+		if (!res) {
+			if (!apiKey) return 'Vision description unavailable (gateway denied + no GEMINI_API_KEY)';
+			res = await fetch(
+				`https://generativelanguage.googleapis.com/v1beta/models/${VISION_MODEL}:generateContent?key=${apiKey}`,
+				{
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json' },
+					body,
+				},
+			);
+		}
 		const data = await res.json() as any;
 		if (!data?.candidates?.[0]) {
 			const reason = data?.promptFeedback?.blockReason || data?.error?.message || JSON.stringify(data).slice(0, 200);

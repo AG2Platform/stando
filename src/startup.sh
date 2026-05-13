@@ -259,6 +259,33 @@ else
   echo "  ~ discord bridge (no token — optional)"
 fi
 
+# 7.5 Cloud memory backup daemon — uploads $SUTANDO_MEMORY_DIR + notes/ on
+# a slow loop. No-op when signed out or on a free plan, so it's safe to
+# always start. Disable with SKIP_MEMORY_BACKUP=1 (e.g. when iterating on
+# the backup script itself).
+if [ "${SKIP_MEMORY_BACKUP:-}" = "1" ]; then
+  echo "  ~ memory backup loop (skipped via SKIP_MEMORY_BACKUP)"
+elif ! pgrep -f "memory-backup-loop" > /dev/null 2>&1; then
+  echo "  Starting memory backup loop..."
+  bash src/memory-backup-loop.sh > "$LOGS_DIR/memory-backup.log" 2>&1 &
+  echo "  ✓ memory backup loop (every ~20 min when signed-in + paid tier)"
+else
+  echo "  ✓ memory backup loop (already running)"
+fi
+
+# 7.6 Cloud-skill auto-installer loop — pulls user's installed-skill list
+# and extracts any bundles that aren't on disk. Lets dashboard installs
+# propagate to every Mac the user signs into. Disable with SKIP_SKILL_SYNC=1.
+if [ "${SKIP_SKILL_SYNC:-}" = "1" ]; then
+  echo "  ~ cloud-skill sync loop (skipped via SKIP_SKILL_SYNC)"
+elif ! pgrep -f "cloud-skill-sync-loop" > /dev/null 2>&1; then
+  echo "  Starting cloud-skill sync loop..."
+  bash src/cloud-skill-sync-loop.sh > "$LOGS_DIR/cloud-skill-sync.log" 2>&1 &
+  echo "  ✓ cloud-skill sync loop (every ~10 min)"
+else
+  echo "  ✓ cloud-skill sync loop (already running)"
+fi
+
 # 8. Phone conversation server + ngrok (optional — needs Twilio creds, skip with SKIP_PHONE=1)
 if [ "${SKIP_PHONE:-}" = "1" ]; then
   echo "  ~ conversation server (skipped via SKIP_PHONE)"

@@ -21,9 +21,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const tasksDir = process.argv[2] || path.resolve(here, '..', 'tasks');
+// Resolution order matches watch-tasks-stream.mjs: explicit argv,
+// then $SUTANDO_HOME/tasks (canonical for the .app), then $PWD/tasks
+// (dev workflow), then script-relative fallback.
+const sutandoHome = process.env.SUTANDO_HOME;
+const tasksDir = process.argv[2]
+    || (sutandoHome ? path.join(sutandoHome, 'tasks') : null)
+    || path.join(process.cwd(), 'tasks');
 fs.mkdirSync(tasksDir, { recursive: true });
-fs.mkdirSync(path.resolve(here, '..', 'results', 'calls'), { recursive: true });
+// `results/calls/` is also a SUTANDO_HOME concern, not a script-relative one.
+const resultsRoot = sutandoHome || process.cwd();
+fs.mkdirSync(path.join(resultsRoot, 'results', 'calls'), { recursive: true });
 
 function existingTxt() {
     try {

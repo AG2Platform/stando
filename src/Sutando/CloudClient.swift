@@ -82,6 +82,29 @@ enum CloudErrorSeverity: String {
     case info, warn, error, fatal
 }
 
+/// Tier-usage row mirroring the cloud's `UsagePanelRow` (lib/usage-rollup.ts).
+struct CloudUsagePanelRow: Decodable {
+    let group: String
+    let currentCanonical: Double
+    let capCanonical: Double
+    let percent: Double
+    let displayUnit: String
+    let overCap: Bool
+    let managedInCurrentRelease: Bool
+}
+
+/// Current-user snapshot returned by GET /api/me.
+struct CloudMeSnapshot: Decodable {
+    let id: String
+    let email: String
+    let plan: String
+    let walletCredits: Int
+    let autoTopupEnabled: Bool
+    let autoTopupThresholdCredits: Int
+    let hasSavedPaymentMethod: Bool
+    let usagePanel: [CloudUsagePanelRow]
+}
+
 enum CloudClient {
     /// Fire an onboarding milestone. Idempotent server-side
     /// (unique index on user_id+step). No-op when not signed in.
@@ -109,5 +132,52 @@ enum CloudClient {
         if let metadata = metadata { event["metadata"] = metadata }
         let body: [String: Any] = ["events": [event]]
         _postJSON(path: "/api/errors", body: body)
+    }
+
+    /// Async GET /api/me. Used by the Settings tier panel. Returns nil
+    /// when signed out, network errors, or the server returns
+    /// non-success. Caller MUST hop to the main thread before touching
+    /// UI with the result.
+    static func fetchMe(completion: @escaping (CloudMeSnapshot?) -> Void) {
+        guard let auth = _loadCloudAuth() else { completion(nil); return }
+        guard let url = URL(string: auth.apiBase + "/api/me") else { completion(nil); return }
+        var req = URLRequest(url: url, timeoutInterval: 5)
+        req.httpMethod = "GET"
+        req.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
+        let task = URLSession.shared.dataTask(with: req) { data, response, error in
+            if let error = error {
+                NSLog("CloudClient: GET /api/me failed: \(error.localizedDescription)")
+                completion(nil); return
+            }
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let data = data else {
+                completion(nil); return
+            }
+            do {
+                let snap = try JSONDecoder().decode(CloudMeSnapshot.self, from: data)
+                completion(snap)
+            } catch {
+                NSLog("CloudClient: /api/me decode failed: \(error)")
+                completion(nil)
+            }
+        }
+        task.resume()
+    }
+
+    /// Toggle the user's auto-topup preference. Fire-and-forget; the
+    /// next /api/me fetch will reflect the new state.
+    static func updateAutoTopup(enabled: Bool?, thresholdCredits: Int?) {
+        var body: [String: Any] = [:]
+        if let enabled = enabled { body["autoTopupEnabled"] = enabled }
+        if let thresholdCredits = thresholdCredits { body["autoTopupThresholdCredits"] = thresholdCredits }
+        guard !body.isEmpty, let auth = _loadCloudAuth(),
+              let url = URL(string: auth.apiBase + "/api/me"),
+              let payload = try? JSONSerialization.data(withJSONObject: body) else { return }
+        var req = URLRequest(url: url, timeoutInterval: 5)
+        req.httpMethod = "PATCH"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
+        req.httpBody = payload
+        URLSession.shared.dataTask(with: req).resume()
     }
 }

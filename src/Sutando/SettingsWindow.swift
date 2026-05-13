@@ -8,7 +8,8 @@ import AppKit
 //                          + disclosure for advanced (Twilio, X, ngrok)
 //   3. Permissions       — microphone / accessibility / screen-recording
 //                          status + System Settings deeplinks
-//   4. Background services — Install / Uninstall buttons
+//   4. Background services — live status; services auto-start with the app
+//                          and stop on quit (no manual Install button).
 //
 // Persistence: API keys go to $SUTANDO_HOME/.env (mode 0600) via EnvFile.
 // On Save, the running services are restarted (best-effort) so changes
@@ -128,6 +129,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var advancedDisclosure: NSButton?
     private var advancedContainer: NSView?
     private var statusBanner: NSTextField?
+    // Plan + usage panel — populated from GET /api/me. Rebuilt on every
+    // refresh tick (cheap: 5–7 small subviews) so the user sees fresh
+    // wallet balance + caps without restarting Settings.
+    private var tierPanelContainer: NSStackView?
+    private var tierPlanLabel: NSTextField?
+    private var tierWalletLabel: NSTextField?
+    private var tierAutoTopupCheckbox: NSButton?
+    private var tierBarsStack: NSStackView?
+    private var tierPanelEmptyLabel: NSTextField?
+    private var lastMeFetchTs: TimeInterval = 0
     private var claudeStatusLabel: NSTextField?
     private var claudeActionButton: NSButton?
     private var claudeSpinner: NSProgressIndicator?
@@ -138,6 +149,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var stepperContainer: NSStackView?
     private var stepperDots: [NSTextField] = []
     private var stepperLabels: [NSTextField] = []
+    private var servicesStatusLabel: NSTextField?
     /// Onboarding steps already emitted this app launch. Server enforces
     /// uniqueness too (unique index on user_id+step), but checking here
     /// avoids HTTP round trips from the 1.5s status-polling loop.
@@ -219,6 +231,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(sectionHeader("Sutando Cloud"))
         stack.addArrangedSubview(cloudAccountRow())
 
+        // Plan + usage panel. Populated from GET /api/me. Hidden if
+        // signed out; collapsed if no usage data yet.
+        stack.addArrangedSubview(sectionHeader("Plan & usage"))
+        stack.addArrangedSubview(tierUsagePanel())
+
         // API keys
         stack.addArrangedSubview(sectionHeader("API keys"))
         for field in SettingsField.basic {
@@ -268,6 +285,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // Background services
         stack.addArrangedSubview(sectionHeader("Background services"))
         stack.addArrangedSubview(servicesRow())
+
+        // Feedback / bug report — natural Settings affordance for ⌃⇧F.
+        stack.addArrangedSubview(sectionHeader("Help us improve"))
+        stack.addArrangedSubview(feedbackRow())
 
         // Danger zone — full uninstall.
         stack.addArrangedSubview(sectionHeader("Danger zone"))
@@ -349,6 +370,237 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
         updateCloudUI()
         return row
+    }
+
+    // MARK: - Plan & usage panel
+
+    private func tierUsagePanel() -> NSView {
+        let outer = NSStackView()
+        outer.orientation = .vertical
+        outer.alignment = .leading
+        outer.spacing = 10
+        outer.translatesAutoresizingMaskIntoConstraints = false
+
+        // Top row: plan badge + wallet + top-up + manage button.
+        let topRow = NSStackView()
+        topRow.orientation = .horizontal
+        topRow.alignment = .centerY
+        topRow.spacing = 10
+        topRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let plan = NSTextField(labelWithString: "—")
+        plan.font = .systemFont(ofSize: 13, weight: .semibold)
+        plan.maximumNumberOfLines = 1
+        tierPlanLabel = plan
+        topRow.addArrangedSubview(plan)
+
+        let wallet = NSTextField(labelWithString: "")
+        wallet.font = .systemFont(ofSize: 12)
+        wallet.textColor = .secondaryLabelColor
+        tierWalletLabel = wallet
+        topRow.addArrangedSubview(wallet)
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        topRow.addArrangedSubview(spacer)
+
+        let topup = NSButton(
+            title: "Top up",
+            target: self,
+            action: #selector(openBillingTopup)
+        )
+        topup.bezelStyle = .rounded
+        topRow.addArrangedSubview(topup)
+
+        let manage = NSButton(
+            title: "Open billing",
+            target: self,
+            action: #selector(openBillingDashboard)
+        )
+        manage.bezelStyle = .rounded
+        topRow.addArrangedSubview(manage)
+
+        outer.addArrangedSubview(topRow)
+
+        // Auto-topup toggle.
+        let auto = NSButton(
+            checkboxWithTitle: "Auto top-up $10 when wallet runs low",
+            target: self,
+            action: #selector(toggleAutoTopup(_:))
+        )
+        auto.font = .systemFont(ofSize: 11)
+        tierAutoTopupCheckbox = auto
+        outer.addArrangedSubview(auto)
+
+        // Per-group usage bars container — populated on refresh.
+        let bars = NSStackView()
+        bars.orientation = .vertical
+        bars.alignment = .leading
+        bars.spacing = 6
+        bars.translatesAutoresizingMaskIntoConstraints = false
+        bars.widthAnchor.constraint(equalToConstant: 504).isActive = true
+        tierBarsStack = bars
+        outer.addArrangedSubview(bars)
+
+        // Empty-state placeholder shown when signed out or no usage yet.
+        let empty = NSTextField(labelWithString: "Sign in to see plan, usage, and wallet balance.")
+        empty.font = .systemFont(ofSize: 11)
+        empty.textColor = .secondaryLabelColor
+        tierPanelEmptyLabel = empty
+        outer.addArrangedSubview(empty)
+
+        tierPanelContainer = outer
+        return outer
+    }
+
+    private func refreshTierPanel() {
+        // Throttle: at most once every 15s while the window is open.
+        let now = Date().timeIntervalSince1970
+        if now - lastMeFetchTs < 15.0 { return }
+        lastMeFetchTs = now
+
+        guard CloudAuth.shared.isSignedIn else {
+            applyTierPanel(snapshot: nil)
+            return
+        }
+        CloudClient.fetchMe { [weak self] snapshot in
+            DispatchQueue.main.async { self?.applyTierPanel(snapshot: snapshot) }
+        }
+    }
+
+    private func applyTierPanel(snapshot: CloudMeSnapshot?) {
+        guard let plan = tierPlanLabel,
+              let wallet = tierWalletLabel,
+              let auto = tierAutoTopupCheckbox,
+              let bars = tierBarsStack,
+              let empty = tierPanelEmptyLabel else { return }
+
+        bars.arrangedSubviews.forEach { $0.removeFromSuperview() }
+
+        guard let s = snapshot else {
+            plan.stringValue = "—"
+            wallet.stringValue = ""
+            auto.state = .off
+            auto.isEnabled = false
+            empty.isHidden = false
+            return
+        }
+
+        plan.stringValue = s.plan.capitalized
+        let dollars = Double(s.walletCredits) / 100.0
+        wallet.stringValue = String(format: "Wallet: %d cr ($%.2f)", s.walletCredits, dollars)
+        auto.isEnabled = true
+        auto.state = s.autoTopupEnabled ? .on : .off
+        auto.title = s.autoTopupEnabled
+            ? String(format: "Auto top-up $10 when wallet <  %d cr", s.autoTopupThresholdCredits)
+            : "Auto top-up $10 when wallet runs low"
+
+        if s.usagePanel.isEmpty {
+            empty.stringValue = "No tier caps — Free / BYOK plan."
+            empty.isHidden = false
+        } else {
+            empty.isHidden = true
+            for row in s.usagePanel {
+                bars.addArrangedSubview(makeUsageBar(row: row))
+            }
+        }
+    }
+
+    private func makeUsageBar(row: CloudUsagePanelRow) -> NSView {
+        let container = NSStackView()
+        container.orientation = .vertical
+        container.alignment = .leading
+        container.spacing = 3
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let head = NSStackView()
+        head.orientation = .horizontal
+        head.alignment = .firstBaseline
+        head.spacing = 6
+
+        let label = NSTextField(labelWithString: tierGroupLabel(row.group))
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        head.addArrangedSubview(label)
+
+        if !row.managedInCurrentRelease {
+            let byok = NSTextField(labelWithString: "BYOK")
+            byok.font = .systemFont(ofSize: 9, weight: .semibold)
+            byok.textColor = .secondaryLabelColor
+            head.addArrangedSubview(byok)
+        }
+        if row.overCap {
+            let over = NSTextField(labelWithString: "OVER CAP · WALLET")
+            over.font = .systemFont(ofSize: 9, weight: .semibold)
+            over.textColor = .systemRed
+            head.addArrangedSubview(over)
+        }
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        head.addArrangedSubview(spacer)
+
+        let amount = NSTextField(labelWithString: String(
+            format: "%@ / %@",
+            formatCanonical(value: row.currentCanonical, unit: row.displayUnit),
+            formatCanonical(value: row.capCanonical, unit: row.displayUnit)
+        ))
+        amount.font = .systemFont(ofSize: 11)
+        amount.textColor = .secondaryLabelColor
+        head.addArrangedSubview(amount)
+        container.addArrangedSubview(head)
+
+        let bar = TierUsageBarView(percent: row.percent)
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.widthAnchor.constraint(equalToConstant: 504).isActive = true
+        bar.heightAnchor.constraint(equalToConstant: 4).isActive = true
+        container.addArrangedSubview(bar)
+
+        return container
+    }
+
+    private func tierGroupLabel(_ group: String) -> String {
+        switch group {
+        case "voice": return "Voice"
+        case "phone": return "Phone"
+        case "channel": return "Channels"
+        case "image": return "Images"
+        case "video": return "Video"
+        case "tts": return "Speech (TTS)"
+        case "skill": return "Skills"
+        default: return group.capitalized
+        }
+    }
+
+    private func formatCanonical(value: Double, unit: String) -> String {
+        switch unit {
+        case "hours":    return String(format: "%.1f hr", value)
+        case "minutes":  return String(format: "%.0f min", value)
+        case "messages": return String(format: "%.0f msgs", value)
+        case "seconds":  return String(format: "%.0f s", value)
+        case "images":   return String(format: "%.0f", value)
+        case "runs":     return String(format: "%.0f", value)
+        default:         return String(format: "%.0f %@", value, unit)
+        }
+    }
+
+    @objc private func openBillingTopup() {
+        if let url = URL(string: "https://sutando.ag2.ai/dashboard?topup=open") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func openBillingDashboard() {
+        if let url = URL(string: "https://sutando.ag2.ai/dashboard") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func toggleAutoTopup(_ sender: NSButton) {
+        // Optimistic: send the new state immediately; the next refresh
+        // confirms it landed. Server validates the request itself.
+        CloudClient.updateAutoTopup(enabled: sender.state == .on, thresholdCredits: nil)
+        // Force a refresh on next poll tick.
+        lastMeFetchTs = 0
     }
 
     private func fieldRow(_ field: SettingsField) -> NSView {
@@ -433,7 +685,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - First-launch stepper
 
-    private static let stepNames = ["API key", "Claude Code", "Permissions", "Background services"]
+    // 3 steps — background services start automatically with the app, so
+    // the old 4th step ("Install Background Services") was removed.
+    private static let stepNames = ["API key", "Claude Code", "Permissions"]
 
     private func buildStepperView() -> NSStackView {
         let row = NSStackView()
@@ -479,11 +733,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // 3. Permissions — all required ones granted.
         let permissionsDone = SystemPermission.allCases.allSatisfy { $0.status() == .granted }
 
-        // 4. Background services — at least 5 of the 7 expected agents loaded.
-        let loaded = LaunchAgentInstaller().loadedLabels().count
-        let servicesDone = loaded >= 5
-
-        return [apiKeyDone, claudeDone, permissionsDone, servicesDone]
+        return [apiKeyDone, claudeDone, permissionsDone]
     }
 
     private func refreshStepperUI() {
@@ -762,22 +1012,49 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         row.alignment = .centerY
         row.spacing = 8
 
-        let info = NSTextField(labelWithString: "Voice agent, dashboard, bridges. Run in the background.")
-        info.font = .systemFont(ofSize: 12)
-        info.textColor = .secondaryLabelColor
-        row.addArrangedSubview(info)
+        let status = NSTextField(labelWithString: "Checking…")
+        status.font = .systemFont(ofSize: 12)
+        status.textColor = .secondaryLabelColor
+        status.lineBreakMode = .byWordWrapping
+        status.maximumNumberOfLines = 2
+        status.preferredMaxLayoutWidth = 360
+        servicesStatusLabel = status
+        row.addArrangedSubview(status)
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .horizontal)
         row.addArrangedSubview(spacer)
 
-        let install = NSButton(title: "Install", target: self, action: #selector(installServices))
-        install.bezelStyle = .rounded
-        let uninstall = NSButton(title: "Uninstall", target: self, action: #selector(uninstallServices))
-        uninstall.bezelStyle = .rounded
-        row.addArrangedSubview(install)
-        row.addArrangedSubview(uninstall)
+        let restart = NSButton(title: "Restart", target: self, action: #selector(restartServicesFromSettings))
+        restart.bezelStyle = .rounded
+        row.addArrangedSubview(restart)
+        refreshServicesUI()
         return row
+    }
+
+    /// Refresh the live "N/7 services running" string. Called on the
+    /// 1.5s status-polling tick the rest of Settings already uses.
+    private func refreshServicesUI() {
+        guard let label = servicesStatusLabel else { return }
+        DispatchQueue.global(qos: .utility).async {
+            let count = LaunchAgentInstaller().loadedLabels().count
+            DispatchQueue.main.async {
+                let text: String
+                let color: NSColor
+                if count == 0 {
+                    text = "Services are not running. Click Restart, or quit and reopen Sutando."
+                    color = .systemOrange
+                } else if count < 5 {
+                    text = "\(count) services running — some may have failed. Click Restart."
+                    color = .systemOrange
+                } else {
+                    text = "\(count) services running. Auto-managed: start with Sutando, stop on quit."
+                    color = .secondaryLabelColor
+                }
+                label.stringValue = text
+                label.textColor = color
+            }
+        }
     }
 
     // MARK: - Actions
@@ -884,9 +1161,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
-    @objc private func installServices() {
+    @objc private func restartServicesFromSettings() {
         DispatchQueue.global(qos: .utility).async { [self] in
             let installer = LaunchAgentInstaller()
+            _ = installer.stopAll()
             let paths = LaunchAgentInstaller.defaultPaths(workspace: appDelegate?.workspace ?? "")
             do {
                 let summary = try installer.install(paths: paths)
@@ -901,20 +1179,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                         metadata: ["label": failure.label]
                     )
                 }
-                if summary.failed.isEmpty {
-                    DispatchQueue.main.async { [self] in
-                        var msg = "Installed \(summary.installed.count) services."
-                        if !summary.skippedDisabled.isEmpty {
-                            msg += " Skipped \(summary.skippedDisabled.joined(separator: ", ")) (disabled)."
-                        }
-                        showBanner(msg, color: .systemGreen)
+                DispatchQueue.main.async { [self] in
+                    if summary.failed.isEmpty {
+                        showBanner("Restarted \(summary.installed.count) services.", color: .systemGreen)
                         emitOnboardingOnce("services_installed")
+                    } else {
+                        let errs = summary.failed.map { "\($0.label): \($0.message)" }.joined(separator: "; ")
+                        showBanner("Restarted \(summary.installed.count). Failed: \(errs)", color: .systemOrange)
                     }
-                } else {
-                    let errs = summary.failed.map { "\($0.label): \($0.message)" }.joined(separator: "; ")
-                    DispatchQueue.main.async { [self] in
-                        showBanner("Installed \(summary.installed.count). Failed: \(errs)", color: .systemOrange)
-                    }
+                    refreshServicesUI()
                 }
             } catch {
                 CloudClient.recordError(
@@ -923,19 +1196,38 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                     message: error.localizedDescription
                 )
                 DispatchQueue.main.async { [self] in
-                    showBanner("Install failed: \(error.localizedDescription)", color: .systemRed)
+                    showBanner("Restart failed: \(error.localizedDescription)", color: .systemRed)
                 }
             }
         }
     }
 
-    @objc private func uninstallServices() {
-        DispatchQueue.global(qos: .utility).async { [self] in
-            let removed = LaunchAgentInstaller().uninstall()
-            DispatchQueue.main.async { [self] in
-                showBanner("Removed \(removed.count) services.", color: .systemOrange)
-            }
-        }
+    private func feedbackRow() -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+
+        let info = NSTextField(labelWithString: "Report a bug, request a feature, or send a note. ⌃⇧F also opens this form.")
+        info.font = .systemFont(ofSize: 12)
+        info.textColor = .secondaryLabelColor
+        info.maximumNumberOfLines = 2
+        info.lineBreakMode = .byWordWrapping
+        info.preferredMaxLayoutWidth = 360
+        row.addArrangedSubview(info)
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        row.addArrangedSubview(spacer)
+
+        let button = NSButton(title: "Report an issue…", target: self, action: #selector(openFeedbackFromSettings))
+        button.bezelStyle = .rounded
+        row.addArrangedSubview(button)
+        return row
+    }
+
+    @objc private func openFeedbackFromSettings() {
+        appDelegate?.openFeedbackForm(initialBody: "")
     }
 
     private func dangerZoneRow() -> NSView {
@@ -1013,9 +1305,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         refreshCLIDelegateUI(.codex)
         refreshCLIDelegateUI(.gemini)
         refreshStepperUI()
-        // Refresh permission + cloud + Claude Code + stepper status while
-        // the window is open so returning from System Settings, a Terminal
-        // install, or a Background Services Install reflects the new state.
+        refreshTierPanel()
+        refreshServicesUI()
+        // Refresh permission + cloud + Claude Code + stepper + services
+        // status while the window is open so returning from System
+        // Settings, a Terminal install, or a Restart click reflects the
+        // new state.
         Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
             guard let self = self, let window = self.window, window.isVisible else {
                 timer.invalidate()
@@ -1027,6 +1322,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             self.refreshCLIDelegateUI(.codex)
             self.refreshCLIDelegateUI(.gemini)
             self.refreshStepperUI()
+            self.refreshServicesUI()
+            // refreshTierPanel throttles internally to ~15s — safe to
+            // call from the 1.5s tick.
+            self.refreshTierPanel()
         }
     }
 
@@ -1077,5 +1376,41 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         let env = EnvFile.at(envFilePath())
         let key = env.value(for: SettingsField.GEMINI_API_KEY.rawValue) ?? ""
         return key.isEmpty
+    }
+}
+
+/// Custom NSView for the per-group usage bar. Pure draw — avoids the
+/// heavier `NSProgressIndicator` for what's just a horizontal pill with
+/// a tinted fill. Tone shifts from neutral → amber (>80%) → red (>100%)
+/// so over-cap usage is glanceable.
+final class TierUsageBarView: NSView {
+    private let percent: Double
+    init(percent: Double) {
+        self.percent = percent
+        super.init(frame: .zero)
+        wantsLayer = true
+    }
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let radius = bounds.height / 2
+        let track = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
+        NSColor.tertiaryLabelColor.withAlphaComponent(0.25).setFill()
+        track.fill()
+
+        let clamped = max(0, min(100, percent))
+        let fillRect = NSRect(
+            x: bounds.origin.x,
+            y: bounds.origin.y,
+            width: bounds.width * CGFloat(clamped / 100.0),
+            height: bounds.height
+        )
+        let fill = NSBezierPath(roundedRect: fillRect, xRadius: radius, yRadius: radius)
+        let tone: NSColor
+        if percent >= 100 { tone = .systemRed }
+        else if percent >= 80 { tone = .systemOrange }
+        else { tone = .controlAccentColor }
+        tone.setFill()
+        fill.fill()
     }
 }

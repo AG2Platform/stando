@@ -175,6 +175,13 @@ func cloudMachineId() -> String {
 
 // MARK: - Public API
 
+extension Notification.Name {
+    /// Posted on the main thread after `CloudAuth.handle(url:)` accepts
+    /// a sutando:// auth callback and persists the new record. Observers
+    /// (e.g. memory backup hydrate) can trigger one-shot setup work.
+    static let cloudAuthDidSignIn = Notification.Name("CloudAuthDidSignIn")
+}
+
 final class CloudAuth {
     /// Singleton. Created lazily — safe to construct from main.swift's
     /// `applicationDidFinishLaunching`.
@@ -239,6 +246,11 @@ final class CloudAuth {
         // Fire a heartbeat to register the device. Best-effort, async.
         DispatchQueue.global(qos: .utility).async {
             self.heartbeat()
+        }
+        // Notify observers — main.swift kicks off cloud-memory hydrate
+        // when the user signs in on a fresh Mac.
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: .cloudAuthDidSignIn, object: nil)
         }
         return true
     }

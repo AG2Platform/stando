@@ -1,0 +1,7 @@
+{
+	"name": "report-feedback",
+	"description": "Send a structured bug report, feature request, or other feedback to the Sutando cloud. Voice-callable: 'report a bug', 'send feedback', 'request a feature'.",
+	"enabled": true,
+	"access_tier": "owner",
+	"tools": "./tools.ts"
+}

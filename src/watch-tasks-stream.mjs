@@ -16,9 +16,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const tasksDir = process.argv[2] || path.resolve(here, '..', 'tasks');
+// Resolve tasksDir in this order:
+//   1. argv[2] — explicit override (test harness, oddball wiring)
+//   2. $SUTANDO_HOME/tasks — canonical when running as the .app
+//      (the bundled .mjs lives inside Resources/repo/src; script-
+//      relative resolution would point at the bundle's empty tasks/
+//      dir, while real tasks land in SUTANDO_HOME).
+//   3. $PWD/tasks — dev workflow, where CWD is the repo root.
+//   4. <script-dir>/../tasks — last-resort fallback.
+const sutandoHome = process.env.SUTANDO_HOME;
+const tasksDir = process.argv[2]
+    || (sutandoHome ? path.join(sutandoHome, 'tasks') : null)
+    || path.join(process.cwd(), 'tasks');
 fs.mkdirSync(tasksDir, { recursive: true });
 const tasksDirAbs = fs.realpathSync(tasksDir);
+console.error(`[watch-tasks-stream] watching ${tasksDirAbs}`);
 
 // Initial sweep — surface tasks that arrived during a restart gap.
 for (const entry of fs.readdirSync(tasksDirAbs)) {

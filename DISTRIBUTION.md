@@ -41,6 +41,7 @@ on a different network. Phase 4.10 below sequences exactly that.
 | Phase 4.9 — Fresh-Mac install validation | **DONE** (commit `8f96454`) | Six bugs surfaced by walking the install flow on a clean user account: hardened-runtime mic entitlement key, LSUIElement TCC prompt suppression, missing skills symlinks, Claude 2.1.x bypass-permissions warning auto-accept, `screencapture` PATH, python3 Screen Recording grant trigger. |
 | Phase 4.10 — Distribution test (different-Mac, different-network) | **PENDING** | Three parallel tracks: cloud deploy, signed/notarized DMG, fresh-Mac validation. See section below for the ordered task list. |
 | Phase 4.11 — Admin panel | **DONE** (`agent-universe` commit pending) | `/admin/*` routes — overview, funnel, retention, margins, features, reliability. Schema additions: `users.is_admin`, `usage_events.app_version` + `provider_cost_cents`, three new tables (`onboarding_events`, `error_events`, `sessions`). Three new ingestion endpoints (`/api/onboarding`, `/api/errors`, `/api/sessions`). See section below. |
+| Phase 4.12 — Onboarding lifecycle (services tied to app process) | **DONE** | Plists now render into `$SUTANDO_HOME/LaunchAgents/` (not auto-loaded by macOS), bootstrap on app launch, bootout on cmd+Q. Voice web window auto-opens on launch. Stepper down to 3 steps; Install/Uninstall UI removed. See section below. |
 | Phase 5 — Architectural redesign | **PENDING** | Intentionally deferred until after internal release. |
 
 Operational gaps before we can hand a build to an external internal user:
@@ -560,11 +561,14 @@ New section between API keys and Permissions:
 
 ### First-launch stepper
 
-Horizontal 4-step indicator at the top of Settings:
+Horizontal 3-step indicator at the top of Settings:
 
 ```
-① API key › ② Claude Code › ③ Permissions › ④ Background services
+① API key › ② Claude Code › ③ Permissions
 ```
+
+(Originally 4 steps; "Background services" was removed in Phase 4.12
+once service install + start became automatic on app launch.)
 
 Each step shows ○ / ✓ based on live state checked every 1.5s. Hides
 once `$SUTANDO_HOME/.firstrun-complete` exists (written on first
@@ -632,6 +636,59 @@ machine had accumulated state that masked them.
    Recording still needs manual grant for the `screen-record` skill —
    no clean way to register python3 for that without ScreenCaptureKit
    audio bindings.)
+
+## Phase 4.12 — Onboarding lifecycle: services tied to app process [DONE]
+
+Done in the same session as the PRODUCT.md beta wave work. The original
+model installed plists into `~/Library/LaunchAgents/` from a Settings
+button, then macOS auto-loaded them on every user login. Two real-world
+problems with that:
+
+- Required a manual "Install Background Services" click before anything
+  worked — non-technical beta users got stuck here.
+- Services kept running across reboots even when the user wasn't using
+  Sutando — confusing surface area; harder to reason about.
+
+The new model binds service lifecycle to the app process:
+
+- **App open** → render plist templates to `$SUTANDO_HOME/LaunchAgents/`
+  (writable, NOT auto-loaded by macOS at user login), `launchctl
+  bootstrap` each one, then open the voice web window 1.5s later
+  (WebWindowController retries cold-start failures for 30s so the race
+  is covered).
+- **App quit (cmd+Q)** → `launchctl bootout` every loaded com.sutando.*
+  service synchronously before NSApplication exits.
+- **First launch on upgraded machine** → `migrateLegacyPlists()` boots
+  out + deletes any leftover `~/Library/LaunchAgents/com.sutando.*.plist`
+  from the old install model, so users don't get double instances (one
+  from login auto-load, one from the new app).
+
+UX consequences:
+
+- Install / Uninstall Background Services menu items removed.
+- Settings "Background services" row no longer has Install/Uninstall —
+  shows a live "N services running" status with a single Restart
+  button.
+- First-launch stepper drops from 4 → 3 steps (API key → Claude Code
+  → Permissions). The 4th step disappeared because background services
+  are now automatic.
+
+Files touched:
+
+- `src/Sutando/LaunchAgentInstaller.swift` — `runDir`,
+  `legacyLaunchAgentsDir`, `migrateLegacyPlists()`, `stopAll()`,
+  `booteachLabel(in:deletePlist:)` helper. Existing `install()` /
+  `uninstall()` keep the same external shape; they just write to the
+  new runDir.
+- `src/Sutando/main.swift` — `applicationDidFinishLaunching` calls
+  `autoBootstrapServices()` + `scheduleAutoOpenWebUI()`;
+  `applicationWillTerminate` calls `LaunchAgentInstaller().stopAll()`;
+  menu items for install/uninstall removed; in-app Restart/Stop
+  buttons rewired through `LaunchAgentInstaller` instead of pkill.
+- `src/Sutando/SettingsWindow.swift` — `stepNames` collapsed from 4 →
+  3; new `servicesStatusLabel` + `refreshServicesUI()` + Restart
+  button replace the old install row; `restartServicesFromSettings`
+  handler.
 
 ## Phase 4.10 — Distribution test (different Mac, different network) [PENDING]
 
