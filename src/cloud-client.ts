@@ -189,6 +189,26 @@ export function isCloudSignedIn(): boolean {
 	return loadCloudAuth() !== null;
 }
 
+// ============================================================
+// Managed gateway routing
+// ============================================================
+// Paid users route Gemini + Cartesia through the cloud's managed
+// gateway routes; the cloud uses our master keys and tracks usage. Free
+// users (signed out, or signed in but on the Free tier) stay BYOK — the
+// helper returns null and the caller falls back to its direct API path.
+//
+// gatewayBaseUrl(kind) returns {url, token} when an active sign-in
+// exists. On 403 from the gateway (Free tier), callers should retry
+// with direct API keys — try-gateway-first / fall-back-to-direct is the
+// beta pattern. Track-and-bill happens server-side.
+
+export function gatewayBaseUrl(kind: 'llm' | 'tts'): { url: string; token: string } | null {
+	const auth = loadCloudAuth();
+	if (!auth) return null;
+	const base = auth.apiBase.replace(/\/+$/, '');
+	return { url: `${base}/api/gateway/${kind}/`, token: auth.token };
+}
+
 /** Authenticated fetch. Returns null when not signed in (caller should
  * skip rather than throw — most cloud features are best-effort). */
 export async function cloudFetch(path: string, init: RequestInit = {}): Promise<Response | null> {
