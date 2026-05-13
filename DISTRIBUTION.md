@@ -125,8 +125,12 @@ Findings from the audit (2026-05-04) that constrain the design:
 - Three of seven service ports have no env override (`dashboard.py:30`,
   `agent-api.py`, `screen-capture-server.py:17`).
 - `bodhi-realtime-agent` is pinned to a GitHub commit
-  (`package.json:17` → `github:sonichi/bodhi_realtime_agent#ffec0cd`) — won't
-  survive a notarization audit.
+  (`package.json:17` → `github:sonichi/bodhi_realtime_agent#ffec0cd`). Reviewed
+  2026-05-12: notarization actually traverses node_modules to re-sign Mach-O
+  binaries (which `build-app.sh` does) but doesn't care about the source URL,
+  so the pin is safe to keep. The npm 0.1.5 release sends the deprecated
+  `media`/`media_chunks` wire format that Gemini 3.1 closes with code 1007;
+  the github commit pin restores the new `audio`/`video` slot routing.
 - `claude-agent-sdk` (`package.json:13`) is a dependency but unused; we still
   exec the `claude` CLI through tmux.
 
@@ -141,8 +145,12 @@ Findings from the audit (2026-05-04) that constrain the design:
    `SCREEN_CAPTURE_PORT`, `SUTANDO_SCREENSHOT_DIR` added.
 3. **Stable memory dir** [DONE]. `SUTANDO_MEMORY_DIR` was already supported in
    `voice-context.ts` and `health-check.py`; documented in `.env.example`.
-4. **Vendor `bodhi-realtime-agent`** [DONE]. Switched from
-   `github:sonichi/bodhi_realtime_agent#ffec0cd` to npm `0.1.5`.
+4. **Vendor `bodhi-realtime-agent`** [SUPERSEDED]. Originally intended to
+   switch to npm `0.1.5` but reverted: npm 0.1.5 sends the deprecated
+   `media`/`media_chunks` realtimeInput wire format which Gemini 3.1 closes
+   with code 1007. Kept at `github:sonichi/bodhi_realtime_agent#ffec0cd` —
+   notarization re-signs the bundled Mach-O binaries (sharp, etc.) and
+   doesn't care about the source URL, so the pin is safe.
 5. **Convert inline launches to launchd** [DONE]. LaunchAgent templates ship
    in `app/LaunchAgents/`. Final service list (8, not 8 — task-bridge dropped
    because it's a module not a process; core-agent added later in Phase

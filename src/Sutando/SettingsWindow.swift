@@ -131,6 +131,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var claudeStatusLabel: NSTextField?
     private var claudeActionButton: NSButton?
     private var claudeSpinner: NSProgressIndicator?
+    private var codexStatusLabel: NSTextField?
+    private var codexActionButton: NSButton?
+    private var geminiStatusLabel: NSTextField?
+    private var geminiActionButton: NSButton?
     private var stepperContainer: NSStackView?
     private var stepperDots: [NSTextField] = []
     private var stepperLabels: [NSTextField] = []
@@ -246,6 +250,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // Claude Code (prereq for the core-agent service)
         stack.addArrangedSubview(sectionHeader("Claude Code"))
         stack.addArrangedSubview(claudeCodeRow())
+
+        // Optional CLI delegates (codex / gemini). Used by the
+        // claude-codex, claude-gemini, and claude-router skills. Sutando
+        // works without them — these are surfaced so power users know
+        // why those skills fail until they install the CLIs.
+        stack.addArrangedSubview(sectionHeader("Optional CLI delegates"))
+        stack.addArrangedSubview(cliDelegateRow(.codex))
+        stack.addArrangedSubview(cliDelegateRow(.gemini))
 
         // Permissions
         stack.addArrangedSubview(sectionHeader("System permissions"))
@@ -635,6 +647,115 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
     }
 
+    private enum CLIDelegate {
+        case codex
+        case gemini
+
+        var binaryName: String {
+            switch self {
+            case .codex: return "codex"
+            case .gemini: return "gemini"
+            }
+        }
+        var displayName: String {
+            switch self {
+            case .codex: return "Codex CLI"
+            case .gemini: return "Gemini CLI"
+            }
+        }
+        var docsURL: String {
+            switch self {
+            case .codex: return "https://github.com/openai/codex"
+            case .gemini: return "https://github.com/google-gemini/gemini-cli"
+            }
+        }
+        var description: String {
+            switch self {
+            case .codex: return "Used by /claude-codex and /claude-router for second-opinion code reviews and delegations."
+            case .gemini: return "Used by /claude-gemini and /claude-router for large-context repo scans."
+            }
+        }
+    }
+
+    private func cliDelegateRow(_ tool: CLIDelegate) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+
+        let status = NSTextField(labelWithString: "Checking…")
+        status.font = .systemFont(ofSize: 12)
+        status.lineBreakMode = .byWordWrapping
+        status.maximumNumberOfLines = 2
+        status.cell?.wraps = true
+        row.addArrangedSubview(status)
+
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        row.addArrangedSubview(spacer)
+
+        let button = NSButton(title: "…", target: self, action: nil)
+        button.bezelStyle = .rounded
+        button.identifier = .init(tool.docsURL)
+        button.action = #selector(openHelpLink(_:))
+        row.addArrangedSubview(button)
+
+        switch tool {
+        case .codex:
+            codexStatusLabel = status
+            codexActionButton = button
+        case .gemini:
+            geminiStatusLabel = status
+            geminiActionButton = button
+        }
+        refreshCLIDelegateUI(tool)
+        return row
+    }
+
+    /// Resolve the CLI on PATH or the same well-known locations checked by
+    /// `claudeCodePath()`. Mirrors that function so both detection paths
+    /// stay consistent.
+    private func cliDelegatePath(_ binaryName: String) -> String? {
+        var dirs = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":").map(String.init)
+        dirs.append(contentsOf: [
+            NSHomeDirectory() + "/.local/bin",
+            "/usr/local/bin",
+            "/opt/homebrew/bin",
+            NSHomeDirectory() + "/.npm-global/bin",
+        ])
+        for dir in dirs where !dir.isEmpty {
+            let path = dir + "/" + binaryName
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
+    }
+
+    private func refreshCLIDelegateUI(_ tool: CLIDelegate) {
+        let label: NSTextField?
+        let button: NSButton?
+        switch tool {
+        case .codex:
+            label = codexStatusLabel
+            button = codexActionButton
+        case .gemini:
+            label = geminiStatusLabel
+            button = geminiActionButton
+        }
+        if let path = cliDelegatePath(tool.binaryName) {
+            let homeRel = path.hasPrefix(NSHomeDirectory())
+                ? "~" + path.dropFirst(NSHomeDirectory().count)
+                : path
+            label?.stringValue = "\(tool.displayName) installed at \(homeRel)."
+            label?.textColor = .labelColor
+            button?.title = "Docs"
+        } else {
+            label?.stringValue = "\(tool.displayName) not installed. \(tool.description)"
+            label?.textColor = .secondaryLabelColor
+            button?.title = "Install instructions"
+        }
+    }
+
     private func servicesRow() -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
@@ -889,6 +1010,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         updatePermissionUI()
         updateCloudUI()
         refreshClaudeCodeUI()
+        refreshCLIDelegateUI(.codex)
+        refreshCLIDelegateUI(.gemini)
         refreshStepperUI()
         // Refresh permission + cloud + Claude Code + stepper status while
         // the window is open so returning from System Settings, a Terminal
@@ -901,6 +1024,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             self.updatePermissionUI()
             self.updateCloudUI()
             self.refreshClaudeCodeUI()
+            self.refreshCLIDelegateUI(.codex)
+            self.refreshCLIDelegateUI(.gemini)
             self.refreshStepperUI()
         }
     }
