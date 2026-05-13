@@ -158,6 +158,27 @@ class LaunchAgentInstaller {
             proc.waitUntilExit()
         }
 
+        // Install Python skill deps (image-generation, make-viral-video,
+        // discord-bridge). System python3 on macOS 15 is PEP 668-managed
+        // ("externally-managed-environment") so plain `pip install --user`
+        // refuses. `--break-system-packages` is the documented override.
+        // pip itself is shipped with system python3 (invoked as `python3
+        // -m pip`). Best-effort: skip silently if pip is unavailable so a
+        // broken install of one skill doesn't block service bootstrap.
+        // Idempotent (pip is a no-op on already-installed packages of the
+        // same version) so we run it on every install.
+        installPythonSkillDeps()
+
+        // Build the macos-use MCP server (~35s `xcrun swift build`) and
+        // register it with Claude Code. Fire-and-forget on a background
+        // thread so the install bootstrap doesn't stall while waiting on
+        // the network clone + Swift compile. If xcode-select hasn't been
+        // run, build.sh fails fast — that's surfaced via the skill's own
+        // SKILL.md doc rather than blocking service install. Idempotent:
+        // build.sh skips when the binary already exists, install-mcp.sh
+        // no-ops when the MCP server is already registered.
+        buildMacosUseAsync(repoDir: paths.repoDir)
+
         let phs = placeholders(paths)
         let files = try FileManager.default.contentsOfDirectory(atPath: templatesDir)
         var summary = LaunchAgentInstallSummary()
@@ -197,6 +218,85 @@ class LaunchAgentInstaller {
             }
         }
         return summary
+    }
+
+    /// Build the macos-use MCP server in the background so the install
+    /// bootstrap returns immediately. Logs to
+    /// `$SUTANDO_HOME/logs/macos-use-build.log` for post-mortem when the
+    /// user later wonders why the skill isn't available.
+    private func buildMacosUseAsync(repoDir: String) {
+        let buildScript = repoDir + "/skills/macos-use/scripts/build.sh"
+        let installScript = repoDir + "/skills/macos-use/scripts/install-mcp.sh"
+        guard FileManager.default.fileExists(atPath: buildScript) else { return }
+        let logDir = (NSHomeDirectory() as NSString)
+            .appendingPathComponent("Library/Application Support/Sutando/logs")
+        try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+        let logPath = logDir + "/macos-use-build.log"
+        DispatchQueue.global(qos: .background).async {
+            // build.sh shells out to git + xcrun. Both come from system
+            // PATH on macOS 15, so a vanilla launchd PATH is enough.
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = [buildScript]
+            if let log = FileHandle(forWritingAtPath: logPath) {
+                log.seekToEndOfFile()
+                proc.standardOutput = log
+                proc.standardError = log
+            } else if FileManager.default.createFile(atPath: logPath, contents: Data()),
+                      let log = FileHandle(forWritingAtPath: logPath) {
+                proc.standardOutput = log
+                proc.standardError = log
+            }
+            try? proc.run()
+            proc.waitUntilExit()
+            if proc.terminationStatus == 0 && FileManager.default.fileExists(atPath: installScript) {
+                let mcp = Process()
+                mcp.executableURL = URL(fileURLWithPath: "/bin/bash")
+                mcp.arguments = [installScript]
+                mcp.standardOutput = FileHandle.nullDevice
+                mcp.standardError = FileHandle.nullDevice
+                try? mcp.run()
+                mcp.waitUntilExit()
+            }
+        }
+    }
+
+    /// Install Python deps required by bundled skills. Fire-and-forget on
+    /// a background thread because pip resolution + wheel install can
+    /// take ~30s on a fresh Mac; no service plist imports these deps at
+    /// boot, so a delayed install is fine. Logs to
+    /// `$SUTANDO_HOME/logs/pip-skill-deps.log` for post-mortem.
+    private func installPythonSkillDeps() {
+        // Canonical list (verified by grepping non-stdlib imports across
+        // skills/ + src/):
+        //   - google-genai  → image-generation
+        //   - Pillow         → image-generation + make-viral-video
+        //   - discord.py     → discord-bridge
+        // Other skills (telegram-bridge, openai-tts, x-twitter) either use
+        // urllib or self-install on demand.
+        let packages = ["google-genai", "Pillow", "discord.py"]
+        let logDir = (NSHomeDirectory() as NSString)
+            .appendingPathComponent("Library/Application Support/Sutando/logs")
+        try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
+        let logPath = logDir + "/pip-skill-deps.log"
+        DispatchQueue.global(qos: .background).async {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            proc.arguments = ["-m", "pip", "install",
+                              "--break-system-packages",
+                              "--user",
+                              "--disable-pip-version-check"] + packages
+            if !FileManager.default.fileExists(atPath: logPath) {
+                FileManager.default.createFile(atPath: logPath, contents: Data())
+            }
+            if let log = FileHandle(forWritingAtPath: logPath) {
+                log.seekToEndOfFile()
+                proc.standardOutput = log
+                proc.standardError = log
+            }
+            try? proc.run()
+            proc.waitUntilExit()
+        }
     }
 
     /// Match `<key>Disabled</key>` followed by `<true/>` (allowing whitespace).

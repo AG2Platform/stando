@@ -55,7 +55,7 @@ def _has_audio_device():
     """Check if avfoundation reports any audio device. Headless Macs (no mic) have none."""
     try:
         result = subprocess.run(
-            ["/opt/homebrew/bin/ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+            ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
             capture_output=True, text=True, timeout=5,
         )
         out = result.stderr
@@ -91,7 +91,7 @@ def start():
 
     # Use ffmpeg instead of screencapture -v (which requires TTY)
     proc = subprocess.Popen(
-        ["/opt/homebrew/bin/ffmpeg", "-f", "avfoundation",
+        ["ffmpeg", "-f", "avfoundation",
          "-i", input_spec,
          "-r", "15", "-pix_fmt", "yuv420p", "-y", path],
         stdin=subprocess.DEVNULL,

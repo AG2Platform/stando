@@ -4,6 +4,10 @@
 # Bundles:
 #   bin/node, bin/npm, bin/npx                — official Node 22 LTS tarball
 #   bin/tmux                                  — Homebrew tmux (re-rpathed)
+#   bin/ffmpeg, bin/ffprobe                   — evermeet.cx static x86_64 builds
+#                                                (run under Rosetta on Apple
+#                                                Silicon; native arm64 is a
+#                                                follow-up)
 #   lib/lib{event,ncurses,...}.*.dylib        — tmux dylib chain (re-rpathed)
 #   share/terminfo/                           — ncurses terminfo (so tmux can
 #                                                resolve $TERM under launchd)
@@ -183,6 +187,49 @@ done
 echo "  Verifying..."
 TMUX_VERSION=$("$RUNTIME/bin/tmux" -V) || { echo "  ✗ bundled tmux failed to run"; exit 1; }
 echo "    $TMUX_VERSION"
+
+# =============================================================
+# ffmpeg + ffprobe — evermeet.cx static x86_64 builds
+# =============================================================
+#
+# Unlocks make-viral-video, screen-record, and the mp3 path in gemini-tts.
+# evermeet.cx ships static x86_64 binaries (no dylib deps) which run on
+# Apple Silicon under Rosetta. First invocation on an arm64-only Mac
+# triggers the system Rosetta install prompt. Native arm64 is a follow-up
+# (no clean single-source static build).
+
+fetch_evermeet_zip() {
+    # $1 = "ffmpeg" or "ffprobe"
+    local name=$1
+    local zip="$CACHE/$name-evermeet.zip"
+    if [ ! -f "$zip" ] || [ ! -s "$zip" ]; then
+        echo "  Downloading $name from evermeet.cx..." >&2
+        curl -fsSL --retry 3 -o "$zip" "https://evermeet.cx/ffmpeg/getrelease/$name/zip" >&2
+    fi
+    echo "$zip"
+}
+
+for name in ffmpeg ffprobe; do
+    ZIP=$(fetch_evermeet_zip "$name")
+    # The zip contains a single binary at the top level. Extract into a
+    # per-tool dir under cache/ so re-runs don't conflict.
+    EXTRACT_DIR="$CACHE/${name}-evermeet"
+    rm -rf "$EXTRACT_DIR"
+    mkdir -p "$EXTRACT_DIR"
+    unzip -q -o "$ZIP" -d "$EXTRACT_DIR"
+    BIN=$(find "$EXTRACT_DIR" -type f -name "$name" -perm +111 | head -1)
+    if [ -z "$BIN" ] || [ ! -f "$BIN" ]; then
+        echo "  ✗ $name binary not found in $ZIP"
+        exit 1
+    fi
+    cp "$BIN" "$RUNTIME/bin/$name"
+    chmod +x "$RUNTIME/bin/$name"
+    # Re-sign — evermeet's binaries ship signed by a different identity;
+    # hardened-runtime in our notarized bundle needs our ad-hoc signature
+    # so the outer build-app.sh re-sign pass (with Developer ID) can land.
+    codesign --force --sign - "$RUNTIME/bin/$name" 2>/dev/null || true
+    echo "  ✓ $name $("$RUNTIME/bin/$name" -version 2>&1 | head -1 | awk '{print $3}') staged"
+done
 
 echo ""
 echo "✓ Runtime bundle ready: $(du -sh "$RUNTIME" | cut -f1)"
