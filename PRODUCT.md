@@ -18,15 +18,85 @@ end-to-end from DMG, the cloud control plane runs locally with the
 admin panel landed. We have beta users waiting. The next chapter is
 turning capability into a product.
 
-## Implementation status (2026-05-13)
+## Implementation status (2026-05-13, late session)
 
-Wave 1 (gate, meter, enforce, feedback, branding placeholder) and
-Wave 3 (skill marketplace + cloud tools) are functionally complete.
-Wave 2 (managed mode) is partial: Gemini + Cartesia gateway routes
-ship and the desktop Gemini vision caller uses them; voice (Vertex
-AI Live) and the hosted Twilio relay are explicitly deferred to
-dedicated follow-up sessions per scope discussion. Memory snapshot
-storage is wired but waits on Tigris bucket credentials.
+All three waves are functionally complete except items explicitly
+scoped out: managed Gemini Live voice (2.3 / 2.4), hosted Twilio
+relay (2.5 / 2.6 / 2.7), WhatsApp bridge (1.6), and the cloud-tools
+real implementations (3.7 — specialist routing / deep-research worker
+/ vector RAG). Those land in dedicated follow-up sessions.
+
+### Onboarding lifecycle (2026-05-13, this session)
+
+Services are now bound to the app process — open Sutando.app and the
+voice agent / dashboard / bridges / core agent start automatically; the
+voice web window opens 1.5s after launch; cmd+Q tears every service
+back down. Replaces the old "click Install Background Services in
+Settings, then they auto-start on every user login" model.
+
+Mechanism: `LaunchAgentInstaller` now renders plist templates into
+`$SUTANDO_HOME/LaunchAgents/` instead of `~/Library/LaunchAgents/`.
+Plists outside the system-watched directory don't auto-load at login —
+launchctl only runs them when we explicitly `bootstrap`. `AppDelegate
+.applicationDidFinishLaunching` runs `migrateLegacyPlists()` (one-shot
+`bootout` + `rm` of anything in `~/Library/LaunchAgents/com.sutando.*`,
+covering upgraders), then `bootstrapAll()`, then opens the voice
+window. `applicationWillTerminate` calls `stopAll()` to bootout every
+service synchronously. The Install/Uninstall menu items and Settings
+buttons are gone; the first-launch stepper drops from 4 → 3 steps
+(API key → Claude Code → Permissions). Settings shows a live
+"N services running" status row instead, with a single Restart button.
+
+Files touched: `src/Sutando/LaunchAgentInstaller.swift` (runDir,
+migrateLegacyPlists, stopAll, booteachLabel helper), `src/Sutando/main
+.swift` (autoBootstrapServices, scheduleAutoOpenWebUI,
+applicationWillTerminate, removed install menu items),
+`src/Sutando/SettingsWindow.swift` (3-step stepper, status-only
+services row, restartServicesFromSettings).
+
+What's new vs the morning snapshot:
+
+- Cap-hit graceful response wired end-to-end (voice-agent `injectText`,
+  Discord + Telegram replies, image/video structured errors via
+  gateway 402 / 429).
+- Burst protection live in `lib/rate-limit.ts` (60s + 5min windows
+  per cap group; gateway/llm now routed through `checkAndConsume`).
+- Auto-topup off-session charges land via the `users.default_payment_method_id`
+  column + Stripe PaymentIntent flow (migration 0009). Dashboard
+  exposes a toggle in the wallet card; Settings panel mirrors it.
+- Settings (Swift) gained a Plan & usage section: tier label, wallet
+  balance, per-cap progress bars, top-up + manage buttons, auto-topup
+  checkbox. Polls `/api/me` on the existing 1.5s timer with internal
+  throttle.
+- `⌃⇧F` opens the new native feedback form (kind / severity / title /
+  body / optional screen attach). Settings now has a "Report an issue"
+  button that opens the same form.
+- Cloud memory backup is plaintext for beta (open decision #2 below).
+  Background loop (`src/memory-backup-loop.sh`) uploads tar.gz of
+  $SUTANDO_MEMORY_DIR + notes/ every ~20 min on paid tiers. On a
+  fresh Mac, signing in fires `CloudAuth.cloudAuthDidSignIn` which
+  triggers `python3 src/memory-backup.py hydrate`.
+- Cartesia gateway routing lands via REST (`/tts/bytes`) — paid tiers
+  no longer need `CARTESIA_API_KEY`. Falls back to BYOK WebSocket on
+  any non-cap-hit failure. Image / video generation gateway-route
+  through `genai.Client(http_options=HttpOptions(base_url=…))` and
+  surface 402 / 429 as a clean "top up" / "rate limit" error.
+- Cloud-skill auto-install loop (`src/cloud-skill-sync-loop.sh`) pulls
+  `GET /api/skills/installed` every ~10 min and extracts any bundles
+  missing locally — dashboard installs propagate to every Mac.
+- Skill marketplace gained a submission flow (`/skills/submit` +
+  `POST /api/skills/submit`) and admin approve / deny / deprecate
+  actions on `/admin/skills`. Decisions email the author via Loops
+  (template `LOOPS_TRANSACTIONAL_SKILL_DECISION`).
+- Loops lifecycle templates: invoice receipts, skill decisions,
+  feedback resolved.
+- Menu-bar template icon (monochrome, auto-tinted) bundled at
+  `Contents/Resources/menubar.png`; falls back to the legacy
+  stand-avatar if absent.
+
+Memory snapshot storage and the Stripe / Loops / bucket credentials
+remain operational (`ops`) tasks documented in the post-merge
+checklist.
 
 Pricing math adjusted from the original proposal: voice allowances
 cut to 10 / 40 / 120 hr (Plus / Pro / Max) and Veo re-priced to
@@ -298,22 +368,28 @@ users.
 **Mechanism**:
 - Tigris bucket per user (already in stack).
 - Files synced: `$SUTANDO_MEMORY_DIR/*`, `notes/*`.
-- **End-to-end encrypted**: encryption key in macOS keychain, derived
-  from user passphrase on first paid-tier activation. Cloud stores
-  ciphertext only.
-- Sync on every proactive-loop pass (~5 min) plus on demand.
-- Hydration on new device: first launch downloads + decrypts.
+- **Beta: plaintext** with server-side AES-at-rest only. Open decision
+  #2 was resolved 2026-05-13 in favor of skipping E2E for beta; the
+  passphrase + KDF design lands post-beta once we see real demand
+  signal for the audit story.
+- Sync from a background daemon (`src/memory-backup-loop.sh`) every
+  ~20 min, plus on demand via `python3 src/memory-backup.py upload`.
+- Hydration on new device: signing in fires
+  `cloudAuthDidSignIn`; `AppDelegate.runMemoryHydrate()` invokes
+  `python3 src/memory-backup.py hydrate`, which downloads + extracts
+  only when the local memory dir is empty (idempotent).
 
 **Per-tier**:
 - Free — BYO (rsync between own Macs via existing `cross-node-sync`
   skill). No cloud backup.
 - Plus+ — cloud backup + multi-device sync.
 
-**Privacy positioning**: "Cloud literally cannot read your memory."
-Make this a published claim — schema, encryption details, audit
-instructions in `agent-universe` `/privacy`. For a meaningful slice of
-power users, "I can audit what leaves my machine" is the upgrade
-trigger.
+**Privacy positioning (beta)**: Memory leaves the Mac in plaintext
+(over TLS) and is stored encrypted at rest by Tigris. The "cloud can't
+read your memory" claim is process- and access-control based, not
+mathematically guaranteed, until E2E encryption ships post-beta.
+`/privacy` should reflect that honestly — overpromising in marketing
+is a worse outcome than the absence of a hard guarantee.
 
 ### 4. Managed phone & channels
 
@@ -576,7 +652,7 @@ each bucket; buckets can partially overlap.
 | # | Item | Repo | Status |
 |---|---|---|---|
 | 1.5 | Per-skill `skill.run` metering (in `voice-agent.ts:onToolResult` rather than `task-bridge.ts` — covers every tool invoked from voice) | sutando | done |
-| 1.6 | Channel-message emission (`channel.<discord\|telegram>.<in\|out>`) wired in each bridge | sutando | partial — Discord + Telegram done; WhatsApp bridge not built yet |
+| 1.6 | Channel-message emission (`channel.<discord\|telegram>.<in\|out>`) wired in each bridge | sutando | partial — Discord + Telegram done; WhatsApp bridge **deferred to post-beta** per scope discussion |
 | 1.7 | Voice-hour aggregation (`tierUsagePanelForUser` rolls voice.gemini seconds into hours for display + cap check) | agent-universe | done |
 | 1.8 | TTFV + funnel-completion metrics on `/admin` | agent-universe | done |
 
@@ -586,25 +662,25 @@ each bucket; buckets can partially overlap.
 |---|---|---|---|
 | 1.9 | Plus / Pro / Max products in Stripe at $29 / $99 / $199; plan catalog row shape | agent-universe | partial — plan catalog + Max tier in code; Stripe products themselves are `ops` |
 | 1.10 | Credit wallet: `users.wallet_credits` materialized column + `credits_ledger` debit/credit writers | agent-universe | done |
-| 1.11 | Rate-limit policies (TS constant in `lib/billing/policies.ts`, not DB table — promote later); `usage_rollups` denormalization on each event; `lib/rate-limit.ts checkAndConsume` entry point | agent-universe | partial — burst protection (60s + 5min window) deferred; PRODUCT.md acknowledges this is beta-acceptable |
-| 1.12 | Stripe webhook on `invoice.payment_succeeded` → monthly tier reset + credit grant; `/api/billing/topup` for manual top-up | agent-universe | partial — auto-topup config columns exist (`auto_topup_enabled`, `auto_topup_threshold_credits`); auto-charge logic deferred |
+| 1.11 | Rate-limit policies (TS constant in `lib/billing/policies.ts`, not DB table — promote later); `usage_rollups` denormalization on each event; `lib/rate-limit.ts checkAndConsume` entry point | agent-universe | done — burst protection (60s + 5min sliding windows over usage_events) landed; gateway/llm now routed through `checkAndConsume` |
+| 1.12 | Stripe webhook on `invoice.payment_succeeded` → monthly tier reset + credit grant; `/api/billing/topup` for manual top-up | agent-universe | done — auto-topup off-session PaymentIntent fires from `lib/billing/auto-topup.ts` (called fire-and-forget from `debitWallet`); daily + monthly caps + CAS mutex on `users.last_auto_topup_at`; dashboard toggle + Settings checkbox |
 
 **1d — Enforcement UX (in-app)**
 
 | # | Item | Repo | Status |
 |---|---|---|---|
-| 1.13 | Tier-aware Settings UI + voice-tool routing (Free vs Plus vs Pro vs Max) | sutando | partial — gateway conditional routing for Gemini vision lands; Settings tier badge deferred |
-| 1.14 | Cap-hit graceful response across surfaces: voice cleanly closes with TTS message; phone returns voice template; bridges reply "top up"; skill / image / video surface as structured tool errors | sutando | partial — cloud-client `onCapHit` listener + dashboard panel ship; voice-agent / bridge wiring deferred |
-| 1.15 | Per-user usage panel — Settings + dashboard: per-kind progress bars, wallet balance, inline top-up button | both | partial — dashboard panel done; Settings panel on desktop deferred |
+| 1.13 | Tier-aware Settings UI + voice-tool routing (Free vs Plus vs Pro vs Max) | sutando | done — Settings shows tier label + bars + wallet + top-up. Gateway routing wired for Gemini vision, Cartesia TTS, image / video generation. |
+| 1.14 | Cap-hit graceful response across surfaces: voice cleanly closes with TTS message; phone returns voice template; bridges reply "top up"; skill / image / video surface as structured tool errors | sutando | done — voice-agent subscribes to `onCapHit` and `injectText`s a "limit reached / burst throttle" message (closes session on voice-cap exhaust); Discord + Telegram bridges short-circuit inbound + reply once per ~5 min per chat; image / video map gateway 402 → "wallet empty" + 429 → "rate limited". Phone wiring waits on hosted Twilio relay. |
+| 1.15 | Per-user usage panel — Settings + dashboard: per-kind progress bars, wallet balance, inline top-up button | both | done — Settings.app surfaces tier label + per-cap bars + wallet + top-up / billing / auto-topup checkbox. Cloud dashboard already had it; auto-topup toggle added. |
 
 **1e — Feedback + branding**
 
 | # | Item | Repo | Status |
 |---|---|---|---|
 | 1.16 | Feedback ingestion schema + routes + admin view | agent-universe | done |
-| 1.17 | `report-feedback` built-in skill + `⌃⇧F` hotkey + Settings button | sutando | partial — skill done (voice-callable); ⌃⇧F hotkey + Settings button deferred (Swift work) |
-| 1.18 | Logo, icon set, Settings + menu-bar visual refresh | sutando | partial — `app/AppIcon.icns` placeholder generated from `app/assets/icon.svg`; Settings window + menu-bar icon refresh deferred |
-| 1.19 | Cloud dashboard minimalist redesign + waitlist landing page styled | agent-universe | partial — landing page rebuilt as waitlist gate; dashboard improved (Skills nav, usage panel, wallet card) but not full redesign |
+| 1.17 | `report-feedback` built-in skill + `⌃⇧F` hotkey + Settings button | sutando | done — `⌃⇧F` registered in `main.swift` defaultHotkeys; native `FeedbackWindowController` form (kind / severity / title / body / optional screen attach) posts to `/api/feedback`; "Report an issue" button in Settings + menu-bar entry call the same form |
+| 1.18 | Logo, icon set, Settings + menu-bar visual refresh | sutando | done — `app/AppIcon.icns` rebuilt; new monochrome menubar template (`app/assets/menubar.png` / `@2x.png`) loaded as `isTemplate=true` so macOS tints it for dark + light bars. Settings polish: tier panel + feedback section + auto-topup row; full-app redesign deferred to post-beta. |
+| 1.19 | Cloud dashboard minimalist redesign + waitlist landing page styled | agent-universe | done (light pass) — card hover states + featured-plan ring + table-header tone consistency. Full minimalist redesign deferred per scope discussion (Linear/Vercel/Raycast direction lands post-beta). |
 
 ### Wave 2 — Managed mode infrastructure
 
@@ -617,22 +693,23 @@ each bucket; buckets can partially overlap.
 | 2.5 | Hosted Twilio relay: number provisioning, webhook relay, inbound forwarder | agent-universe | deferred — dedicated follow-up session |
 | 2.6 | Desktop `phone-conversation` skill switches to cloud-relay URL when paid tier active | sutando | deferred — paired with 2.5 |
 | 2.7 | `VERIFIED_CALLERS` migrate from `.env` to cloud-managed allowlist | both | deferred — paired with 2.5 |
-| 2.8 | Cloud memory backup — Tigris bucket per user, e2e-encrypted, sync from proactive loop | both | partial — `/api/memory/snapshot` upload + presigned download routes + `memory_snapshots` table land; bucket creds are `ops`; desktop proactive-loop sync logic + E2E passphrase derivation deferred |
-| 2.9 | First-launch hydration from cloud memory backup on new Mac | sutando | partial — `GET /api/memory/snapshot` returns presigned URL; desktop restore-on-signin logic deferred |
-| 2.10 | Desktop conditional gateway routing — `gatewayBaseUrl(kind)` helper + try-gateway-fall-back-to-BYOK pattern in `browser-tools.ts` (Gemini vision) | sutando | partial — Gemini vision wired; `cartesia-tts.ts` + `image-generation/generate.py` deferred (SDKs don't expose base-URL override cleanly) |
+| 2.8 | Cloud memory backup — Tigris bucket per user, e2e-encrypted, sync from proactive loop | both | done (plaintext) — `src/memory-backup.py` + `src/memory-backup-loop.sh` upload tar.gz of `$SUTANDO_MEMORY_DIR` + `notes/` every ~20 min on paid tiers; started in `src/startup.sh`. **E2E encryption deferred to post-beta** per open decision #2 — beta is server-side encrypted at rest (Tigris) only. Bucket creds remain `ops`. |
+| 2.9 | First-launch hydration from cloud memory backup on new Mac | sutando | done — `CloudAuth.handle(url:)` posts `cloudAuthDidSignIn`; `AppDelegate.runMemoryHydrate()` shells out to `python3 src/memory-backup.py hydrate`, which downloads + extracts only when the local memory dir is empty |
+| 2.10 | Desktop conditional gateway routing — `gatewayBaseUrl(kind)` helper + try-gateway-fall-back-to-BYOK pattern in `browser-tools.ts` (Gemini vision) | sutando | done — Gemini vision (existing), Cartesia TTS via REST `/tts/bytes` (`cartesia-tts.ts` falls back to BYOK WebSocket on non-cap failures), image / video generation via `genai.Client(http_options=HttpOptions(base_url=…))` with `X-Sutando-Kind` headers. 402 / 429 surface as clean "top up" / "rate limited" errors |
 
 ### Wave 3 — Skill marketplace + cloud tools
 
 | # | Item | Repo | Status |
 |---|---|---|---|
-| 3.1 | Skill bundle format + signing pipeline (Apple Developer ID) | sutando | partial — bundle format defined; signing pipeline + tarball hosting deferred. Install path verifies SHA-256 today (Apple signing post-beta). |
+| 3.1 | Skill bundle format + signing pipeline (Apple Developer ID) | sutando | partial — bundle format defined; tarball hosting (CDN + signed-URL upload) + Apple Developer ID signing pipeline deferred to post-beta. Install path verifies SHA-256 today against the manifest's `signing_hash`. |
+| 3.0 | Skill submission flow (paid-tier publish) + admin approve / deny / deprecate | both | done — `/skills/submit` form (paid tier only) + `POST /api/skills/submit` (slug ownership + re-submit support). Admin `/admin/skills` gets per-row Approve / Deny / Deprecate buttons via server actions; decisions email the author via Loops (`LOOPS_TRANSACTIONAL_SKILL_DECISION`). |
 | 3.2 | Skill catalog tables (`skills`, `skill_installs`, `skill_reviews`) + routes | agent-universe | done |
 | 3.3 | `skill-installer` built-in skill in desktop | sutando | done |
 | 3.4 | Skill catalog UI on cloud dashboard (`/skills` + `/skills/[slug]`) | agent-universe | done |
 | 3.5 | Rating + review submission flow | both | done — `POST /api/skills/[id]/review` (requires prior install), star UI on detail page |
 | 3.6 | Per-skill author analytics view (our skills initially) — `/admin/skills` | agent-universe | done — install count + 7d delta + rating + revenue + err24h join on `error_events` |
-| 3.7 | Cloud tools v1 — `agent-delegation`, `deep-research`, `hosted-RAG` services | agent-universe | partial — routes ship as wallet-debiting stubs + catalog seed; real specialist routing / worker pool / RAG index deferred |
-| 3.8 | Activation flow + auto-install on desktop | both | partial — install flow ships via marketplace UI; "activate from dashboard tool card" specific UX subsumed by the marketplace install button. Auto-install on heartbeat sync deferred. |
+| 3.7 | Cloud tools v1 — `agent-delegation`, `deep-research`, `hosted-RAG` services | agent-universe | partial — routes ship as wallet-debiting stubs + catalog seed. **Real specialist routing / worker pool / vector RAG explicitly deferred to post-beta** per scope discussion (large infra; beta validates marketplace economics with stubs). |
+| 3.8 | Activation flow + auto-install on desktop | both | done — `GET /api/skills/installed` (new) lists user's installed skills with bundleUrl + signingHash; `src/cloud-skill-sync.ts` diffs against local `cloud-skills/<slug>/` and extracts missing tarballs; `src/cloud-skill-sync-loop.sh` runs the diff every ~10 min, started from `src/startup.sh`. Dashboard installs now propagate to every Mac the user signs into. |
 
 ## What's out of scope for beta
 
@@ -642,7 +719,11 @@ shipped:
 
 - **Managed Anthropic / Claude Code subscription pooling** — terms
   forbid, architectural rewrite. Beta requires the user's own CC sub.
-- **Public skill submissions** — curated catalog only.
+- **Public skill submissions** — *paid-tier* submissions land in
+  `status='review'` and require admin approval before they appear in
+  the catalog. Free-tier sideloading via `$SUTANDO_PRIVATE_DIR/skills/`
+  stays available on any tier. Anonymous / Free submissions remain out
+  of scope.
 - **Real sandboxing of marketplace skills** — disclosure only; trust
   the curation gate.
 - **Multi-tenant Discord / Telegram bot** — user-provisioned tokens.
@@ -685,7 +766,14 @@ Things to weigh in on before we start implementation:
 2. **Encryption key for cloud memory** — derived from a passphrase
    (user can lose it; recovery story?), or from a hardware-backed
    keychain key (can't share across devices without first-device
-   pairing)? 
+   pairing)?
+   **Resolved 2026-05-13: skip E2E for beta.** Cloud stores plaintext
+   tarballs under server-side AES-at-rest (Tigris). The privacy
+   positioning in §3 (`Self-learning cloud backup`) is updated to
+   reflect that the "cloud can't read your memory" claim is process-
+   and access-control based for beta, not mathematically guaranteed.
+   The passphrase + KDF flow is the first thing to revisit post-beta
+   once we know how many users care about the audit story.
 3. **Skill author revenue share** — 70/30 like App Store, or higher
    author share to bootstrap? (Beta is curated, so mostly theoretical
    until Wave 3.) 80/20
@@ -707,18 +795,23 @@ Things to weigh in on before we start implementation:
 
 User actions required before paid beta users can complete an install:
 
-1. **Migrations** — `npm run db:migrate` against Neon applies 0004 → 0008
-   (beta gate, billing caps, feedback, skills, memory snapshots).
+1. **Migrations** — `npm run db:migrate` against Neon applies 0004 → 0009
+   (beta gate, billing caps, feedback, skills, memory snapshots,
+   auto-topup payment method + mutex).
 2. **Seed cloud tools** — `psql $DATABASE_URL -f lib/db/seeds/cloud-tools.sql`
    adds the three v1 cloud tools (delegate / research / recall) to the catalog.
 3. **Stripe** — create Plus / Pro / Max products at $29 / $99 / $199;
    set `STRIPE_PRICE_{PLUS,PRO,MAX}_MONTHLY`; add
    `checkout.session.completed` to the webhook event subscriptions
    (already handles `invoice.payment_succeeded`).
-4. **Loops.so** — create a transactional template with data variables
-   `{code, signupUrl, expiresAt}`; set `LOOPS_API_KEY` +
-   `LOOPS_TRANSACTIONAL_BETA_INVITE`. Without these, invite emails are
-   logged to the server console instead of sent.
+4. **Loops.so** — set `LOOPS_API_KEY` plus the four transactional template IDs:
+   - `LOOPS_TRANSACTIONAL_BETA_INVITE` — vars `{code, signupUrl, expiresAt}`
+   - `LOOPS_TRANSACTIONAL_SKILL_DECISION` — vars `{decision, skillName, skillSlug, catalogUrl, reason}`
+   - `LOOPS_TRANSACTIONAL_FEEDBACK_RESOLVED` — vars `{title, body, status, appUrl}`
+   - `LOOPS_TRANSACTIONAL_BILLING_RECEIPT` — vars `{planName, amount, periodEnd, dashboardUrl, invoiceUrl}`
+
+   Without each ID, the corresponding email logs to the server console
+   instead of sending — fine for staging, must be flipped for prod.
 5. **Managed-gateway provider keys** — `GEMINI_MASTER_API_KEY` +
    `CARTESIA_MASTER_API_KEY`. Without them, gateway routes 503 and the
    desktop falls back to BYOK.

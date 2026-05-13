@@ -59,6 +59,7 @@ SWIFT_SOURCES=(
     "$REPO/src/Sutando/CloudAuth.swift"
     "$REPO/src/Sutando/CloudClient.swift"
     "$REPO/src/Sutando/EnvFile.swift"
+    "$REPO/src/Sutando/FeedbackWindow.swift"
     "$REPO/src/Sutando/Permissions.swift"
     "$REPO/src/Sutando/SettingsWindow.swift"
     "$REPO/src/Sutando/Uninstaller.swift"
@@ -100,6 +101,15 @@ elif [ -f "$REPO/assets/stand-avatar.png" ]; then
     # Lazy fallback: copy PNG so the bundle has *something* under Resources/.
     # Real .icns generation is part of Phase 1.6.
     cp "$REPO/assets/stand-avatar.png" "$APP/Contents/Resources/AppIcon.png"
+fi
+
+# 4.1 Menubar template icon — monochrome PNG that macOS tints for dark
+# vs light menubars. main.swift loads from Bundle.main.resourcePath first.
+if [ -f "$REPO/app/assets/menubar.png" ]; then
+    cp "$REPO/app/assets/menubar.png" "$APP/Contents/Resources/menubar.png"
+fi
+if [ -f "$REPO/app/assets/menubar@2x.png" ]; then
+    cp "$REPO/app/assets/menubar@2x.png" "$APP/Contents/Resources/menubar@2x.png"
 fi
 
 # 5. Stage the repo source (src + skills + package.json + node_modules) into

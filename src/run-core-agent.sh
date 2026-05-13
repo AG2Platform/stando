@@ -56,17 +56,28 @@ export PATH="$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin"
 # (tasks/, results/, core-status.json) lives there, while the actual
 # scripts ship inside the .app at Resources/repo/. Without these symlinks,
 # every relative path in proactive-loop's SKILL.md fails on a fresh user
-# who doesn't have a dev clone at ~/stando. Replace dangling links so a
-# .app move (Sparkle relocation, /Applications drag) self-heals on next
-# boot. Skip when SUTANDO_HOME already has a real file or dir at the path
-# — never overwrite user content.
+# who doesn't have a dev clone at ~/stando. Replace symlinks pointing at
+# the wrong target so a .app move (Sparkle relocation, drag to /Applications,
+# /tmp test build) self-heals on next boot — the prior "only replace if
+# dangling" check missed the case where the old target dir still exists
+# but is empty (e.g. a deleted prod app that left behind an empty
+# /Applications/Sutando.app shell). Real files/dirs at the link path are
+# never touched.
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 mkdir -p "$SUTANDO_HOME"
 for name in src skills node_modules package.json package-lock.json tsconfig.json CLAUDE.md; do
     target="$REPO_DIR/$name"
     link="$SUTANDO_HOME/$name"
-    if [ -L "$link" ] && [ ! -e "$link" ]; then rm "$link"; fi
-    if [ -e "$target" ] && [ ! -e "$link" ]; then ln -s "$target" "$link"; fi
+    if [ -L "$link" ]; then
+        # Existing symlink — replace when it points anywhere except $target
+        current=$(readlink "$link" 2>/dev/null || echo "")
+        if [ "$current" != "$target" ]; then
+            rm -f "$link"
+        fi
+    fi
+    if [ -e "$target" ] && [ ! -e "$link" ] && [ ! -L "$link" ]; then
+        ln -s "$target" "$link"
+    fi
 done
 
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }

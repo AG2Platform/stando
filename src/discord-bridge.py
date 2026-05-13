@@ -21,7 +21,10 @@ import discord
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from util_paths import shared_personal_path  # noqa: E402
-from cloud_metrics import record_event as _cloud_record_event  # noqa: E402
+from cloud_metrics import (  # noqa: E402
+    record_event as _cloud_record_event,
+    cap_status as _cloud_cap_status,
+)
 
 
 def _emit_channel_metric(direction: str, metadata: dict | None = None) -> None:
@@ -37,6 +40,33 @@ def _emit_channel_metric(direction: str, metadata: dict | None = None) -> None:
         )
     except Exception:
         pass
+
+
+# Cap-hit reply throttle: per-channel last-notice timestamp so a chatty
+# channel doesn't see the "monthly cap reached" message on every single
+# inbound. ~5 min between repeats matches the cloud_metrics cap-status
+# TTL, so when the cap clears (renewal / topup) the next message is
+# processed normally instead of bounced.
+_channel_cap_notice: dict[int, float] = {}
+_CAP_NOTICE_REMINDER_S = 300.0
+
+
+def _cap_hit_reply_text(reason: str | None) -> str:
+    if reason == "fair_use_burst":
+        return (
+            "Sutando paused briefly — short-burst rate-limit hit. "
+            "Try again in a minute."
+        )
+    if reason == "tier_exhausted_no_wallet":
+        return (
+            "Sutando: monthly channel-message cap reached and your credit "
+            "wallet is empty. Top up at https://sutando.ag2.ai/billing or "
+            "upgrade at https://sutando.ag2.ai/dashboard."
+        )
+    return (
+        "Sutando: cloud throttled this channel. Check "
+        "https://sutando.ag2.ai/dashboard for details."
+    )
 
 # Load token from channels config
 TOKEN = ""
@@ -2447,6 +2477,31 @@ async def _handle_discord_message(message, force=False):
             "===END SUTANDO SYSTEM INSTRUCTIONS===\n"
         ),
     }
+
+    # Cap-hit short-circuit. If the cloud denied a recent channel.*
+    # accounting (monthly cap exhausted, wallet empty, or fair-use
+    # burst), skip the task entirely and reply once per ~5 min so the
+    # sender knows. Owner tier is exempt — capping the operator's own
+    # ability to use Sutando defeats the purpose of the gate.
+    if access_tier != "owner":
+        cap_hit, cap_reason = _cloud_cap_status("channel")
+        if cap_hit:
+            last_notice = _channel_cap_notice.get(message.channel.id, 0.0)
+            now = time.time()
+            if now - last_notice > _CAP_NOTICE_REMINDER_S:
+                _channel_cap_notice[message.channel.id] = now
+                try:
+                    for chunk in _chunk_for_discord(_cap_hit_reply_text(cap_reason)):
+                        await message.channel.send(chunk)
+                except Exception as e:
+                    print(f"  [cap-hit-reply] failed: {e}", flush=True)
+            else:
+                print(
+                    f"  [cap-hit] suppressing reply in #{channel_name} "
+                    f"(last notice {int(now - last_notice)}s ago)",
+                    flush=True,
+                )
+            return
 
     # Auto-react BEFORE writing the task — gives the user an instant visual ack
     # at gateway-event speed, while the rest of task processing (file write,

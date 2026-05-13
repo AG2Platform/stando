@@ -5,8 +5,16 @@ import Foundation
 // Reads `com.sutando.*.plist.template` files from the .app bundle's
 // `Resources/LaunchAgents/` directory, substitutes placeholders to point at
 // the bundled runtime + the user's `SUTANDO_HOME`, and writes them to
-// `~/Library/LaunchAgents/`. Then runs `launchctl bootstrap` so launchd
+// `$SUTANDO_HOME/LaunchAgents/`. Then runs `launchctl bootstrap` so launchd
 // picks them up.
+//
+// Lifecycle: plists live OUTSIDE `~/Library/LaunchAgents/` on purpose. The
+// system auto-loads anything in that directory at user login, which conflicts
+// with our model where services are bound to the app process — they start when
+// Sutando.app opens, stop when it quits. Writing to a non-auto-loaded path
+// means launchd only runs them when we explicitly `bootstrap`. Plists left
+// behind from older Sutando versions in `~/Library/LaunchAgents/` are
+// `bootout`'d and deleted by `migrateLegacyPlists()` on first launch.
 //
 // Placeholders match `app/LaunchAgents/README.md`:
 //   {{REPO_DIR}}       — bundled repo source root
@@ -112,8 +120,27 @@ class LaunchAgentInstaller {
         return out
     }
 
-    /// Where deployed plists live on this user's machine.
-    var userLaunchAgentsDir: String {
+    /// Where this app version writes rendered plists. NOT in
+    /// `~/Library/LaunchAgents/` — that directory auto-loads at user
+    /// login, and the new lifecycle binds services to the app process.
+    /// Plists land under `SUTANDO_HOME/LaunchAgents/`; launchctl loads
+    /// them by path on app launch and unloads on app quit.
+    var runDir: String {
+        let home: String
+        if let env = ProcessInfo.processInfo.environment["SUTANDO_HOME"], !env.isEmpty {
+            home = (env as NSString).expandingTildeInPath
+        } else {
+            home = (NSHomeDirectory() as NSString)
+                .appendingPathComponent("Library/Application Support/Sutando")
+        }
+        return home + "/LaunchAgents"
+    }
+
+    /// Legacy install directory. Older Sutando versions wrote plists
+    /// here, which causes services to auto-load on user login. The new
+    /// app moves away from this; `migrateLegacyPlists()` cleans up any
+    /// stragglers on first launch of the new version.
+    var legacyLaunchAgentsDir: String {
         (NSHomeDirectory() as NSString).appendingPathComponent("Library/LaunchAgents")
     }
 
@@ -127,9 +154,12 @@ class LaunchAgentInstaller {
     }
 
     /// Install the LaunchAgent set. Reads templates, substitutes
-    /// placeholders, writes plists to ~/Library/LaunchAgents, and bootstraps
-    /// each one that isn't marked `Disabled=true`. Continues past
-    /// individual failures so one broken plist doesn't block the rest.
+    /// placeholders, writes plists to `runDir`
+    /// (`$SUTANDO_HOME/LaunchAgents/`), and bootstraps each one that
+    /// isn't marked `Disabled=true`. Continues past individual failures
+    /// so one broken plist doesn't block the rest. Idempotent — every
+    /// bootstrap is preceded by a bootout so re-installing replaces
+    /// rather than collides.
     @discardableResult
     func install(paths: LaunchAgentPaths, templatesDirOverride: String? = nil) throws -> LaunchAgentInstallSummary {
         let templatesDir = templatesDirOverride ?? bundleTemplatesDir ?? (paths.repoDir + "/app/LaunchAgents")
@@ -137,8 +167,8 @@ class LaunchAgentInstaller {
             throw LaunchAgentError.bundleResourcesMissing
         }
 
-        // Ensure ~/Library/LaunchAgents and SUTANDO_HOME/logs exist.
-        try FileManager.default.createDirectory(atPath: userLaunchAgentsDir, withIntermediateDirectories: true)
+        // Ensure run-dir (where rendered plists land) and SUTANDO_HOME/logs exist.
+        try FileManager.default.createDirectory(atPath: runDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(atPath: paths.sutandoHome + "/logs", withIntermediateDirectories: true)
 
         // Install Sutando skills into ~/.claude/skills/. Skills are required
@@ -190,7 +220,7 @@ class LaunchAgentInstaller {
                 continue
             }
             let rendered = render(template, placeholders: phs)
-            let destPath = userLaunchAgentsDir + "/" + label + ".plist"
+            let destPath = runDir + "/" + label + ".plist"
             do {
                 try rendered.write(toFile: destPath, atomically: true, encoding: .utf8)
             } catch {
@@ -311,6 +341,14 @@ class LaunchAgentInstaller {
 
     /// Bootout + bootstrap an agent. Idempotent — bootout first to avoid
     /// "service already loaded" errors.
+    ///
+    /// **Bootout/bootstrap race**: `launchctl bootout` returns when
+    /// launchd accepts the request, NOT when the service finishes
+    /// tearing down. A subsequent `bootstrap` racing against a still-
+    /// terminating service hits "Bootstrap failed: 37" (service in flux)
+    /// for the slowest services — voice-agent + web-client (network
+    /// teardown in their shutdown hooks). `waitUntilLabelStopped()` is
+    /// called between the two to drain the bootout before bootstrap.
     private func bootstrap(label: String, plistPath: String) throws {
         let uid = String(getuid())
 
@@ -322,6 +360,10 @@ class LaunchAgentInstaller {
         out.standardError = FileHandle.nullDevice
         try? out.run()
         out.waitUntilExit()
+
+        // Drain — wait for launchd to actually unload the service before
+        // bootstrapping again. Skips when never loaded (the fast path).
+        waitUntilLabelStopped(label: label, timeoutSeconds: 10)
 
         // Bootstrap.
         let proc = Process()
@@ -338,24 +380,46 @@ class LaunchAgentInstaller {
         }
     }
 
-    /// Bootout all com.sutando.* agents and remove their plists.
+    /// Poll `launchctl print gui/<uid>/<label>` until it exits non-zero
+    /// (service is fully unloaded) or the timeout expires. Non-blocking
+    /// to the launchctl process — uses short sleeps between checks.
+    /// Returns true if the service stopped within the timeout, false
+    /// otherwise (caller can still proceed; bootstrap will surface the
+    /// real error if there is one).
+    @discardableResult
+    private func waitUntilLabelStopped(label: String, timeoutSeconds: Double) -> Bool {
+        let uid = String(getuid())
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        let pollInterval: UInt32 = 100_000  // 100ms
+        while Date() < deadline {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            proc.arguments = ["print", "gui/\(uid)/\(label)"]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            do {
+                try proc.run()
+            } catch {
+                return true  // can't probe; let bootstrap try
+            }
+            proc.waitUntilExit()
+            if proc.terminationStatus != 0 {
+                return true  // service is gone
+            }
+            usleep(pollInterval)
+        }
+        return false  // timed out — still loaded
+    }
+
+    /// Bootout all com.sutando.* agents and remove their plists. Walks
+    /// BOTH the new runDir and the legacy `~/Library/LaunchAgents/` —
+    /// covers users upgrading from older versions whose plists may still
+    /// live in the legacy directory.
     @discardableResult
     func uninstall() -> [String] {
-        let uid = String(getuid())
-        let files = (try? FileManager.default.contentsOfDirectory(atPath: userLaunchAgentsDir)) ?? []
         var removed: [String] = []
-        for file in files where file.hasPrefix("com.sutando.") && file.hasSuffix(".plist") {
-            let label = String(file.dropLast(".plist".count))
-            let plistPath = userLaunchAgentsDir + "/" + file
-            let out = Process()
-            out.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            out.arguments = ["bootout", "gui/\(uid)/\(label)"]
-            out.standardOutput = FileHandle.nullDevice
-            out.standardError = FileHandle.nullDevice
-            try? out.run()
-            out.waitUntilExit()
-            try? FileManager.default.removeItem(atPath: plistPath)
-            removed.append(label)
+        for dir in [runDir, legacyLaunchAgentsDir] {
+            removed.append(contentsOf: booteachLabel(in: dir, deletePlist: true))
         }
         // The core-agent wrapper (run-core-agent.sh) starts a detached tmux
         // server on /tmp/sutando-tmux.sock. tmux daemonizes out of the
@@ -363,6 +427,58 @@ class LaunchAgentInstaller {
         // session running. Kill it explicitly here.
         killCoreAgentTmux()
         return removed
+    }
+
+    /// Bootout all com.sutando.* in `runDir` but leave the rendered plists
+    /// in place. Used at `applicationWillTerminate` so cmd+Q shuts down
+    /// every service without permanently uninstalling anything — the
+    /// next app launch re-bootstraps from the same plists in `runDir`.
+    @discardableResult
+    func stopAll() -> [String] {
+        let stopped = booteachLabel(in: runDir, deletePlist: false)
+        killCoreAgentTmux()
+        return stopped
+    }
+
+    /// One-time cleanup of plists left behind by older Sutando versions.
+    /// Older versions installed into `~/Library/LaunchAgents/`, which
+    /// causes services to auto-load on user login. The new lifecycle
+    /// owns service start/stop via the app process, so we bootout +
+    /// delete any legacy plists on first launch. Idempotent.
+    @discardableResult
+    func migrateLegacyPlists() -> [String] {
+        booteachLabel(in: legacyLaunchAgentsDir, deletePlist: true)
+    }
+
+    /// Helper: bootout every com.sutando.* plist in `dir`. When
+    /// `deletePlist` is true, removes the plist after bootout. Silent on
+    /// errors — bootout fails routinely (e.g. service not loaded) and
+    /// that's fine. Waits for each service to fully unload before
+    /// returning (see `waitUntilLabelStopped`); a follow-up bootstrap
+    /// against the same label would otherwise race a still-terminating
+    /// service.
+    @discardableResult
+    private func booteachLabel(in dir: String, deletePlist: Bool) -> [String] {
+        let uid = String(getuid())
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        var processed: [String] = []
+        for file in files where file.hasPrefix("com.sutando.") && file.hasSuffix(".plist") {
+            let label = String(file.dropLast(".plist".count))
+            let plistPath = dir + "/" + file
+            let out = Process()
+            out.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            out.arguments = ["bootout", "gui/\(uid)/\(label)"]
+            out.standardOutput = FileHandle.nullDevice
+            out.standardError = FileHandle.nullDevice
+            try? out.run()
+            out.waitUntilExit()
+            waitUntilLabelStopped(label: label, timeoutSeconds: 10)
+            if deletePlist {
+                try? FileManager.default.removeItem(atPath: plistPath)
+            }
+            processed.append(label)
+        }
+        return processed
     }
 
     private func killCoreAgentTmux() {
@@ -387,13 +503,19 @@ class LaunchAgentInstaller {
     }
 
     /// Query loaded com.sutando.* agents. Returns labels for which
-    /// `launchctl print gui/<uid>/<label>` exits 0.
+    /// `launchctl print gui/<uid>/<label>` exits 0. Walks both runDir
+    /// and the legacy dir so the count is accurate during migration.
     func loadedLabels() -> [String] {
         let uid = String(getuid())
-        let files = (try? FileManager.default.contentsOfDirectory(atPath: userLaunchAgentsDir)) ?? []
+        var labels = Set<String>()
+        for dir in [runDir, legacyLaunchAgentsDir] {
+            let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+            for file in files where file.hasPrefix("com.sutando.") && file.hasSuffix(".plist") {
+                labels.insert(String(file.dropLast(".plist".count)))
+            }
+        }
         var loaded: [String] = []
-        for file in files where file.hasPrefix("com.sutando.") && file.hasSuffix(".plist") {
-            let label = String(file.dropLast(".plist".count))
+        for label in labels {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
             proc.arguments = ["print", "gui/\(uid)/\(label)"]

@@ -23,9 +23,13 @@ RESULTS_DIR = REPO / "results"
 # no-ops on any failure; telemetry must never break the bridge.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from cloud_metrics import record_event as _cloud_record_event
+    from cloud_metrics import (
+        record_event as _cloud_record_event,
+        cap_status as _cloud_cap_status,
+    )
 except Exception:  # pragma: no cover — best-effort
     _cloud_record_event = None  # type: ignore[assignment]
+    _cloud_cap_status = None  # type: ignore[assignment]
 
 
 def _emit_channel_metric(direction: str, metadata: dict | None = None) -> None:
@@ -41,6 +45,30 @@ def _emit_channel_metric(direction: str, metadata: dict | None = None) -> None:
         )
     except Exception:
         pass
+
+
+# Cap-hit reply throttle. Mirrors the Discord bridge's behavior: one
+# "monthly cap reached" notice per ~5 min per chat so a chatty user
+# doesn't see the message on every send.
+_chat_cap_notice: dict[int, float] = {}
+_CAP_NOTICE_REMINDER_S = 300.0
+
+
+def _cap_hit_reply_text(reason: str | None) -> str:
+    if reason == "fair_use_burst":
+        return (
+            "Sutando paused briefly — short-burst rate-limit. "
+            "Try again in a minute."
+        )
+    if reason == "tier_exhausted_no_wallet":
+        return (
+            "Sutando: monthly channel-message cap reached and wallet is "
+            "empty. Top up at https://sutando.ag2.ai/billing or upgrade."
+        )
+    return (
+        "Sutando: cloud throttled this channel. Check "
+        "https://sutando.ag2.ai/dashboard for details."
+    )
 
 # Allowlist for paths that may be sent via Telegram [file: /path] markers.
 # Mirrors _is_path_sendable() in discord-bridge.py.
@@ -367,6 +395,35 @@ def main():
                     continue
 
                 print(f"  @{username}: {text}{attachment_note}")
+
+                # Cap-hit short-circuit. Cloud denied a recent channel.*
+                # accounting → reply once per ~5 min per chat and skip
+                # task processing entirely.
+                if _cloud_cap_status is not None:
+                    try:
+                        cap_hit, cap_reason = _cloud_cap_status("channel")
+                    except Exception:
+                        cap_hit, cap_reason = False, None
+                    if cap_hit:
+                        last_notice = _chat_cap_notice.get(chat_id, 0.0)
+                        now2 = time.time()
+                        if now2 - last_notice > _CAP_NOTICE_REMINDER_S:
+                            _chat_cap_notice[chat_id] = now2
+                            try:
+                                api(
+                                    "sendMessage",
+                                    chat_id=chat_id,
+                                    text=_cap_hit_reply_text(cap_reason),
+                                )
+                            except Exception as e:
+                                print(f"  [cap-hit-reply] failed: {e}", flush=True)
+                        else:
+                            print(
+                                f"  [cap-hit] suppressing reply for chat {chat_id} "
+                                f"(last notice {int(now2 - last_notice)}s ago)",
+                                flush=True,
+                            )
+                        continue
 
                 # Write as task (same format as voice bridge)
                 ts = int(time.time() * 1000)

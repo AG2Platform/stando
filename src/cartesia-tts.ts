@@ -23,7 +23,10 @@
 import Cartesia from '@cartesia/cartesia-js';
 import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { recordEvent as cloudRecordEvent } from './cloud-client.js';
+import {
+	recordEvent as cloudRecordEvent,
+	gatewayBaseUrl,
+} from './cloud-client.js';
 
 const getCartesiaApiKey = () => process.env.CARTESIA_API_KEY || '';
 const getCartesiaVoiceId = () => process.env.CARTESIA_VOICE_ID || 'f786b574-daa5-4673-aa0c-cbe3e8534c02';
@@ -54,8 +57,34 @@ export async function generateSpeech(
 	text: string,
 	options: { outputPath?: string; category?: string; label?: string } = {},
 ): Promise<string> {
-	if (!getCartesiaApiKey()) throw new Error('CARTESIA_API_KEY not set');
 	if (!text.trim()) throw new Error('Empty text');
+
+	// Managed-gateway path: when the user is signed in, route through
+	// /api/gateway/tts/. The cloud uses our master key and bills the
+	// paid tier; on 403 (Free) or 503 (gateway unconfigured) we fall
+	// back to the BYOK websocket path below.
+	const gateway = gatewayBaseUrl('tts');
+	if (gateway) {
+		try {
+			return await generateSpeechViaGateway(text, options, gateway);
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			// Falling back is safe for "gateway not configured" and "free
+			// tier" responses. For cap-hits (402 / 429) we rethrow so the
+			// caller can surface "top up" / "rate limited" rather than
+			// silently burning the user's BYOK key. For any other gateway
+			// failure (502, network, etc.) fall back so paid users don't
+			// lose TTS to a cloud outage.
+			if (/_cap_/.test(msg)) throw err;
+			console.warn(`[cartesia] gateway path failed, falling back to BYOK: ${msg}`);
+		}
+	}
+
+	if (!getCartesiaApiKey()) {
+		throw new Error(
+			'CARTESIA_API_KEY not set. Set it in .env (BYOK) or sign in to a paid Sutando tier.',
+		);
+	}
 
 	// Organize: results/audio/{category}/{label}-{timestamp}.wav
 	const category = options.category || 'general';
@@ -112,6 +141,87 @@ export async function generateSpeech(
 	} finally {
 		ws.close();
 	}
+}
+
+/**
+ * Cartesia generation via Sutando's HTTP gateway. Used by paid-tier
+ * sign-ins. Single REST request returning raw PCM (or WAV-wrapped),
+ * matching the existing on-disk format the BYOK path produces.
+ *
+ * Why not WebSocket? The cloud gateway proxies HTTP only — adding WS
+ * proxy support is post-beta. REST is fine for our use case (non-
+ * realtime TTS for task results, briefings, proactive messages).
+ *
+ * Cap-hit handling: 402 (insufficient credits) and 429 (burst limit)
+ * are rethrown with `_cap_` in the message so the caller knows not
+ * to fall back to BYOK silently.
+ */
+async function generateSpeechViaGateway(
+	text: string,
+	options: { outputPath?: string; category?: string; label?: string },
+	gateway: { url: string; token: string },
+): Promise<string> {
+	const category = options.category || 'general';
+	const label = options.label || 'tts';
+	const outDir = join(getWorkspace(), 'results', 'audio', category);
+	mkdirSync(outDir, { recursive: true });
+	const outPath = options.outputPath || join(outDir, `${label}-${Date.now()}.wav`);
+
+	const body = {
+		model_id: 'sonic-3',
+		transcript: text,
+		voice: { mode: 'id', id: getCartesiaVoiceId() },
+		language: 'en',
+		output_format: {
+			container: 'raw',
+			encoding: 'pcm_s16le',
+			sample_rate: SAMPLE_RATE,
+		},
+	};
+
+	const res = await fetch(`${gateway.url}tts/bytes`, {
+		method: 'POST',
+		headers: {
+			Authorization: `Bearer ${gateway.token}`,
+			'Content-Type': 'application/json',
+			'Cartesia-Version': '2024-06-10',
+			'X-Sutando-Kind': 'tts.cartesia',
+		},
+		body: JSON.stringify(body),
+	});
+
+	if (!res.ok) {
+		const errBody = await res.text().catch(() => '');
+		if (res.status === 402) {
+			throw new Error(
+				`Cartesia gateway _cap_402: wallet empty — top up at sutando.ag2.ai/billing`,
+			);
+		}
+		if (res.status === 429) {
+			throw new Error(`Cartesia gateway _cap_429: rate limited — try again in a minute`);
+		}
+		// 403 = free tier; 503 = master key missing. Caller catches and
+		// falls back to the BYOK websocket path.
+		throw new Error(`Cartesia gateway ${res.status}: ${errBody.slice(0, 200)}`);
+	}
+
+	const pcm = Buffer.from(await res.arrayBuffer());
+	const header = createWavHeader(pcm.length, SAMPLE_RATE, CHANNELS, BIT_DEPTH);
+	writeFileSync(outPath, Buffer.concat([header, pcm]));
+
+	const durationSec = pcm.length / (SAMPLE_RATE * CHANNELS * (BIT_DEPTH / 8));
+	if (durationSec > 0.05) {
+		// The gateway logs its own usage_events row for billing. We emit a
+		// second one keyed `tts.cartesia` from desktop so the admin view
+		// keeps tracking time-grain attribution (the gateway row is
+		// count-grain only).
+		cloudRecordEvent({
+			kind: 'tts.cartesia',
+			units: durationSec,
+			metadata: { model: 'sonic-3', category, label, via: 'gateway' },
+		});
+	}
+	return outPath;
 }
 
 export function createWavHeader(dataSize: number, sampleRate: number, channels: number, bitDepth: number): Buffer {
