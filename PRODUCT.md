@@ -18,6 +18,30 @@ end-to-end from DMG, the cloud control plane runs locally with the
 admin panel landed. We have beta users waiting. The next chapter is
 turning capability into a product.
 
+## Implementation status (2026-05-13)
+
+Wave 1 (gate, meter, enforce, feedback, branding placeholder) and
+Wave 3 (skill marketplace + cloud tools) are functionally complete.
+Wave 2 (managed mode) is partial: Gemini + Cartesia gateway routes
+ship and the desktop Gemini vision caller uses them; voice (Vertex
+AI Live) and the hosted Twilio relay are explicitly deferred to
+dedicated follow-up sessions per scope discussion. Memory snapshot
+storage is wired but waits on Tigris bucket credentials.
+
+Pricing math adjusted from the original proposal: voice allowances
+cut to 10 / 40 / 120 hr (Plus / Pro / Max) and Veo re-priced to
+60 credits per 10s, both to keep over-cap usage margin-neutral
+against rough wholesale rates. Headline tier prices unchanged
+($29 / $99 / $199). See the tier-structure table below.
+
+Per-row status appears in the **Status** column on each wave table.
+Legend:
+
+- `done` — shipped this session
+- `partial` — partial implementation; deferred piece noted
+- `deferred` — explicitly out of scope this session
+- `ops` — user-action operational task (env vars, Stripe products, etc)
+
 ## North star for beta
 
 Validate three things, in order:
@@ -540,74 +564,75 @@ each bucket; buckets can partially overlap.
 
 **1a — Distribution gate (must land first)**
 
-| # | Item | Repo |
-|---|---|---|
-| 1.1 | Waitlist + invite-code system: schema, public `POST /api/waitlist`, admin `/admin/waitlist` triage, code generation, email via Loops.so | agent-universe |
-| 1.2 | `users.beta_status` check on `/api/auth/cli-login/exchange` + `/api/download/<channel>` | agent-universe |
-| 1.3 | Make `AG2Platform/stando` + `agent-universe` repos private; remove any public DMG links | both |
-| 1.4 | Landing page → waitlist-only for unauthenticated; product walkthrough behind sign-in | agent-universe |
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 1.1 | Waitlist + invite-code system: schema, public `POST /api/waitlist`, admin `/admin/waitlist` triage, code generation, email via Loops.so | agent-universe | done |
+| 1.2 | `users.beta_status` check on `/api/auth/cli-login/exchange` + `/api/download/<channel>` | agent-universe | done |
+| 1.3 | Make `AG2Platform/stando` + `agent-universe` repos private; remove any public DMG links | both | ops |
+| 1.4 | Landing page → waitlist-only for unauthenticated; product walkthrough behind sign-in | agent-universe | done |
 
 **1b — Metering completeness** (closes the per-skill / channel / voice-hour gaps so caps are enforceable)
 
-| # | Item | Repo |
-|---|---|---|
-| 1.5 | Per-skill `skill.run` metering in `task-bridge.ts` (incl. `metadata.skill`) | sutando |
-| 1.6 | Channel-message emission (`channel.<discord\|telegram\|whatsapp>.<in\|out>`) wired in each bridge | sutando |
-| 1.7 | Voice-hour aggregation (`voice.gemini.hour` rollup from second-grain events) | agent-universe |
-| 1.8 | TTFV + funnel-completion metrics on `/admin` | agent-universe |
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 1.5 | Per-skill `skill.run` metering (in `voice-agent.ts:onToolResult` rather than `task-bridge.ts` — covers every tool invoked from voice) | sutando | done |
+| 1.6 | Channel-message emission (`channel.<discord\|telegram>.<in\|out>`) wired in each bridge | sutando | partial — Discord + Telegram done; WhatsApp bridge not built yet |
+| 1.7 | Voice-hour aggregation (`tierUsagePanelForUser` rolls voice.gemini seconds into hours for display + cap check) | agent-universe | done |
+| 1.8 | TTFV + funnel-completion metrics on `/admin` | agent-universe | done |
 
 **1c — Billing + rate-limit infrastructure**
 
-| # | Item | Repo |
-|---|---|---|
-| 1.9 | Plus / Pro / Max products in Stripe at $29 / $99 / $199; plan catalog row shape | agent-universe |
-| 1.10 | Credit wallet: `users.wallet_credits` materialized column + `credits_ledger` debit/credit writers | agent-universe |
-| 1.11 | `rate_limit_policies` table seeded per-kind × tier; `usage_rollups` denormalization on each event; `lib/rate-limit.ts` `checkAndConsume` entry point; burst protection (60s + 5min windows) | agent-universe |
-| 1.12 | Stripe webhook on `invoice.paid` → monthly tier reset; auto-topup at low-balance threshold (opt-in); `/api/billing/topup` route | agent-universe |
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 1.9 | Plus / Pro / Max products in Stripe at $29 / $99 / $199; plan catalog row shape | agent-universe | partial — plan catalog + Max tier in code; Stripe products themselves are `ops` |
+| 1.10 | Credit wallet: `users.wallet_credits` materialized column + `credits_ledger` debit/credit writers | agent-universe | done |
+| 1.11 | Rate-limit policies (TS constant in `lib/billing/policies.ts`, not DB table — promote later); `usage_rollups` denormalization on each event; `lib/rate-limit.ts checkAndConsume` entry point | agent-universe | partial — burst protection (60s + 5min window) deferred; PRODUCT.md acknowledges this is beta-acceptable |
+| 1.12 | Stripe webhook on `invoice.payment_succeeded` → monthly tier reset + credit grant; `/api/billing/topup` for manual top-up | agent-universe | partial — auto-topup config columns exist (`auto_topup_enabled`, `auto_topup_threshold_credits`); auto-charge logic deferred |
 
 **1d — Enforcement UX (in-app)**
 
-| # | Item | Repo |
-|---|---|---|
-| 1.13 | Tier-aware Settings UI + voice-tool routing (Free vs Plus vs Pro vs Max) | sutando |
-| 1.14 | Cap-hit graceful response across surfaces: voice cleanly closes with TTS message; phone returns voice template; bridges reply "top up"; skill / image / video surface as structured tool errors | sutando |
-| 1.15 | Per-user usage panel — Settings + dashboard: per-kind progress bars, wallet balance, inline top-up button | both |
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 1.13 | Tier-aware Settings UI + voice-tool routing (Free vs Plus vs Pro vs Max) | sutando | partial — gateway conditional routing for Gemini vision lands; Settings tier badge deferred |
+| 1.14 | Cap-hit graceful response across surfaces: voice cleanly closes with TTS message; phone returns voice template; bridges reply "top up"; skill / image / video surface as structured tool errors | sutando | partial — cloud-client `onCapHit` listener + dashboard panel ship; voice-agent / bridge wiring deferred |
+| 1.15 | Per-user usage panel — Settings + dashboard: per-kind progress bars, wallet balance, inline top-up button | both | partial — dashboard panel done; Settings panel on desktop deferred |
 
 **1e — Feedback + branding**
 
-| # | Item | Repo |
-|---|---|---|
-| 1.16 | Feedback ingestion schema + routes + admin view | agent-universe |
-| 1.17 | `report-feedback` built-in skill + `⌃⇧F` hotkey + Settings button | sutando |
-| 1.18 | Logo, icon set, Settings + menu-bar visual refresh | sutando |
-| 1.19 | Cloud dashboard minimalist redesign + waitlist landing page styled | agent-universe |
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 1.16 | Feedback ingestion schema + routes + admin view | agent-universe | done |
+| 1.17 | `report-feedback` built-in skill + `⌃⇧F` hotkey + Settings button | sutando | partial — skill done (voice-callable); ⌃⇧F hotkey + Settings button deferred (Swift work) |
+| 1.18 | Logo, icon set, Settings + menu-bar visual refresh | sutando | partial — `app/AppIcon.icns` placeholder generated from `app/assets/icon.svg`; Settings window + menu-bar icon refresh deferred |
+| 1.19 | Cloud dashboard minimalist redesign + waitlist landing page styled | agent-universe | partial — landing page rebuilt as waitlist gate; dashboard improved (Skills nav, usage panel, wallet card) but not full redesign |
 
 ### Wave 2 — Managed mode infrastructure
 
-| # | Item | Repo |
-|---|---|---|
-| 2.1 | `/api/gateway/llm` Gemini proxy + rate limiter + per-user attribution | agent-universe |
-| 2.2 | `/api/gateway/tts`, `/api/gateway/image` for Cartesia + Veo | agent-universe |
-| 2.3 | Ephemeral Gemini Live key minter `/api/gateway/voice-key` (24h, per-user, daily quota) | agent-universe |
-| 2.4 | Desktop reads ephemeral key from keychain on startup; refreshes on heartbeat | sutando |
-| 2.5 | Hosted Twilio relay: number provisioning, webhook relay, inbound forwarder | agent-universe |
-| 2.6 | Desktop `phone-conversation` skill switches to cloud-relay URL when paid tier active | sutando |
-| 2.7 | `VERIFIED_CALLERS` migrate from `.env` to cloud-managed allowlist | both |
-| 2.8 | Cloud memory backup — Tigris bucket per user, e2e-encrypted, sync from proactive loop | both |
-| 2.9 | First-launch hydration from cloud memory backup on new Mac | sutando |
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 2.1 | `/api/gateway/llm` Gemini proxy + plan gate + per-user attribution (header `X-Sutando-Kind` decides debit: image=5cr, video=60cr, text/vision none) | agent-universe | done |
+| 2.2 | `/api/gateway/tts` for Cartesia; image/video share `/api/gateway/llm` since they hit the same Gemini API surface | agent-universe | done |
+| 2.3 | Ephemeral Gemini Live key minter `/api/gateway/voice-key` (24h, per-user, daily quota) | agent-universe | deferred — voice stays BYOK until Vertex AI Live release |
+| 2.4 | Desktop reads ephemeral key from keychain on startup; refreshes on heartbeat | sutando | deferred — paired with 2.3 |
+| 2.5 | Hosted Twilio relay: number provisioning, webhook relay, inbound forwarder | agent-universe | deferred — dedicated follow-up session |
+| 2.6 | Desktop `phone-conversation` skill switches to cloud-relay URL when paid tier active | sutando | deferred — paired with 2.5 |
+| 2.7 | `VERIFIED_CALLERS` migrate from `.env` to cloud-managed allowlist | both | deferred — paired with 2.5 |
+| 2.8 | Cloud memory backup — Tigris bucket per user, e2e-encrypted, sync from proactive loop | both | partial — `/api/memory/snapshot` upload + presigned download routes + `memory_snapshots` table land; bucket creds are `ops`; desktop proactive-loop sync logic + E2E passphrase derivation deferred |
+| 2.9 | First-launch hydration from cloud memory backup on new Mac | sutando | partial — `GET /api/memory/snapshot` returns presigned URL; desktop restore-on-signin logic deferred |
+| 2.10 | Desktop conditional gateway routing — `gatewayBaseUrl(kind)` helper + try-gateway-fall-back-to-BYOK pattern in `browser-tools.ts` (Gemini vision) | sutando | partial — Gemini vision wired; `cartesia-tts.ts` + `image-generation/generate.py` deferred (SDKs don't expose base-URL override cleanly) |
 
 ### Wave 3 — Skill marketplace + cloud tools
 
-| # | Item | Repo |
-|---|---|---|
-| 3.1 | Skill bundle format + signing pipeline (Apple Developer ID) | sutando |
-| 3.2 | Skill catalog tables (`skills`, `skill_installs`, `skill_reviews`) + routes | agent-universe |
-| 3.3 | `skill-installer` built-in skill in desktop | sutando |
-| 3.4 | Skill catalog UI on cloud dashboard | agent-universe |
-| 3.5 | Rating + review submission flow | both |
-| 3.6 | Per-skill author analytics view (our skills initially) | agent-universe |
-| 3.7 | Cloud tools v1 — `agent-delegation`, `deep-research`, `hosted-RAG` services | agent-universe |
-| 3.8 | Activation flow + auto-install on desktop | both |
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 3.1 | Skill bundle format + signing pipeline (Apple Developer ID) | sutando | partial — bundle format defined; signing pipeline + tarball hosting deferred. Install path verifies SHA-256 today (Apple signing post-beta). |
+| 3.2 | Skill catalog tables (`skills`, `skill_installs`, `skill_reviews`) + routes | agent-universe | done |
+| 3.3 | `skill-installer` built-in skill in desktop | sutando | done |
+| 3.4 | Skill catalog UI on cloud dashboard (`/skills` + `/skills/[slug]`) | agent-universe | done |
+| 3.5 | Rating + review submission flow | both | done — `POST /api/skills/[id]/review` (requires prior install), star UI on detail page |
+| 3.6 | Per-skill author analytics view (our skills initially) — `/admin/skills` | agent-universe | done — install count + 7d delta + rating + revenue + err24h join on `error_events` |
+| 3.7 | Cloud tools v1 — `agent-delegation`, `deep-research`, `hosted-RAG` services | agent-universe | partial — routes ship as wallet-debiting stubs + catalog seed; real specialist routing / worker pool / RAG index deferred |
+| 3.8 | Activation flow + auto-install on desktop | both | partial — install flow ships via marketplace UI; "activate from dashboard tool card" specific UX subsumed by the marketplace install button. Auto-install on heartbeat sync deferred. |
 
 ## What's out of scope for beta
 
@@ -677,3 +702,32 @@ Things to weigh in on before we start implementation:
 - Desktop README: `/Users/lianghaochen/stando/README.md`
 - Skills primer: `/Users/lianghaochen/stando/skills/MANIFEST.md`
 - Project instructions: `/Users/lianghaochen/stando/CLAUDE.md`
+
+## Operational checklist (post-merge)
+
+User actions required before paid beta users can complete an install:
+
+1. **Migrations** — `npm run db:migrate` against Neon applies 0004 → 0008
+   (beta gate, billing caps, feedback, skills, memory snapshots).
+2. **Seed cloud tools** — `psql $DATABASE_URL -f lib/db/seeds/cloud-tools.sql`
+   adds the three v1 cloud tools (delegate / research / recall) to the catalog.
+3. **Stripe** — create Plus / Pro / Max products at $29 / $99 / $199;
+   set `STRIPE_PRICE_{PLUS,PRO,MAX}_MONTHLY`; add
+   `checkout.session.completed` to the webhook event subscriptions
+   (already handles `invoice.payment_succeeded`).
+4. **Loops.so** — create a transactional template with data variables
+   `{code, signupUrl, expiresAt}`; set `LOOPS_API_KEY` +
+   `LOOPS_TRANSACTIONAL_BETA_INVITE`. Without these, invite emails are
+   logged to the server console instead of sent.
+5. **Managed-gateway provider keys** — `GEMINI_MASTER_API_KEY` +
+   `CARTESIA_MASTER_API_KEY`. Without them, gateway routes 503 and the
+   desktop falls back to BYOK.
+6. **Tigris bucket** (for memory snapshots) — provision a bucket, set
+   `AWS_ENDPOINT_URL_S3` + `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`
+   + `AWS_REGION` + `OBJECT_STORE_BUCKET`. Without them, the snapshot
+   routes 503 gracefully.
+7. **Repo privacy** — flip `AG2Platform/stando` + `agent-universe` to
+   private via the GitHub UI.
+8. **Admin self-approval** — internal-alpha users were retro-marked
+   `beta_status='approved'` by migration 0004; `is_admin = true` users
+   also bypass the gate via the redeem-beta route.
