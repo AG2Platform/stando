@@ -933,6 +933,23 @@ async function main() {
 				voiceToolCalls.push({ name: toolName, durationMs: e.durationMs, timestamp: new Date().toISOString() });
 				voiceEvents.push({ event: `tool_result:${toolName}:${e.durationMs}ms`, timestamp: new Date().toISOString() });
 				console.log(`${ts()} [Tool] result: ${toolName} (${e.status}, ${e.durationMs}ms)`);
+				// Per-skill metering for the marketplace. One event per tool
+				// call. metadata.skill names the tool; metadata.source pins
+				// the invocation channel so admin can split voice vs bridge.
+				// metadata.work=true on the `work` tool flags claude-code
+				// dispatches so they don't get conflated with inline skills.
+				cloudRecordEvent({
+					kind: 'skill.run',
+					units: 1,
+					metadata: {
+						skill: toolName,
+						source: 'voice',
+						durationMs: e.durationMs,
+						status: e.status,
+						sessionId: SESSION_ID,
+						work: toolName === 'work',
+					},
+				});
 				// Clear the tool track; browser track takes over immediately.
 				fetch('http://localhost:8080/mute-state?state=idle&source=tool').catch(() => {});
 			},

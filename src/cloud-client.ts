@@ -70,6 +70,53 @@ let _queue: UsageEventInput[] = [];
 let _flushTimer: NodeJS.Timeout | null = null;
 let _flushing = false;
 
+// ============================================================
+// Cap-hit accounting hook
+// ============================================================
+// /api/usage now returns an `accounting` array describing the rate-limit
+// outcome for each event in the batch. When the server denies a kind
+// (tier cap exhausted + wallet empty), the entry has `allowed: false`
+// — surface those so callers (voice-agent, bridges) can react.
+//
+// Beta posture: voice-agent reads the listener to set an `exhausted`
+// flag that biases its next turn toward explaining the cap; phone /
+// channel surfaces use it via planned cap-hit handlers (currently TODO).
+// Other code can ignore the hook entirely; the events are still
+// recorded server-side regardless.
+
+export interface CapHitInfo {
+	kind: string;
+	chargedTo: 'tier' | 'wallet' | 'denied' | 'free' | 'admin';
+	group: string | null;
+	reason?: string;
+	walletBalance: number;
+	tierRemainingCanonical: number;
+}
+
+export interface UsageAccountingResult {
+	allowed: boolean;
+	chargedTo: 'tier' | 'wallet' | 'denied' | 'free' | 'admin';
+	group: string | null;
+	tierRemainingCanonical: number;
+	walletBalance: number;
+	walletDebited?: number;
+	reason?: string;
+}
+
+let _capHitListener: ((info: CapHitInfo) => void) | null = null;
+let _lastWalletBalance: number | null = null;
+
+export function onCapHit(listener: ((info: CapHitInfo) => void) | null): void {
+	_capHitListener = listener;
+}
+
+/** Wallet balance from the most recent /api/usage response. Null until
+ * the first flush completes (or while not signed in). Useful for the
+ * menu-bar to surface "Wallet: $X" without an extra round-trip. */
+export function lastKnownWalletCredits(): number | null {
+	return _lastWalletBalance;
+}
+
 // Cached app version. Read once from the bundled Info.plist or
 // package.json at first use and stamped onto every event so the cloud
 // admin views can do release-vs-release regression analysis.
@@ -202,6 +249,33 @@ export async function flush(): Promise<void> {
 			// Re-queue at the head so we retry on the next interval, unless
 			// the response is 401 (drop everything; user is signed out).
 			if (res.status !== 401) _queue.unshift(...batch);
+			return;
+		}
+		// Surface per-event rate-limit accounting back to subscribers.
+		try {
+			const body = (await res.json().catch(() => ({}))) as {
+				accounting?: Array<{ kind: string; result: UsageAccountingResult }>;
+			};
+			if (body.accounting && body.accounting.length > 0) {
+				const last = body.accounting[body.accounting.length - 1];
+				if (last) _lastWalletBalance = last.result.walletBalance;
+				if (_capHitListener) {
+					for (const a of body.accounting) {
+						if (!a.result.allowed) {
+							_capHitListener({
+								kind: a.kind,
+								chargedTo: a.result.chargedTo,
+								group: a.result.group,
+								reason: a.result.reason,
+								walletBalance: a.result.walletBalance,
+								tierRemainingCanonical: a.result.tierRemainingCanonical,
+							});
+						}
+					}
+				}
+			}
+		} catch {
+			// Body parse failure — events accepted, no accounting to surface.
 		}
 	} catch {
 		_queue.unshift(...batch);

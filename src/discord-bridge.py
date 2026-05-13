@@ -21,6 +21,22 @@ import discord
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from util_paths import shared_personal_path  # noqa: E402
+from cloud_metrics import record_event as _cloud_record_event  # noqa: E402
+
+
+def _emit_channel_metric(direction: str, metadata: dict | None = None) -> None:
+    """Beta tier-cap accounting: emit one `channel.discord.<in|out>`
+    per accepted message. Cap to "real" traffic — bot heartbeats and
+    control messages (pairing/access prompts) skip this call. Silent on
+    failure; telemetry must never crash the bridge."""
+    try:
+        _cloud_record_event(
+            f"channel.discord.{direction}",
+            units=1,
+            metadata=metadata or None,
+        )
+    except Exception:
+        pass
 
 # Load token from channels config
 TOKEN = ""
@@ -2457,6 +2473,18 @@ async def _handle_discord_message(message, force=False):
     )
     pending_replies[task_id] = message.channel
     save_pending_replies()
+    # Tier-cap accounting: one inbound counts toward the user's monthly
+    # channel allowance. access_tier carries owner/team/other for splits
+    # in admin views.
+    _emit_channel_metric(
+        "in",
+        metadata={
+            "channel_id": str(message.channel.id),
+            "is_dm": is_dm,
+            "access_tier": access_tier,
+            "task_id": task_id,
+        },
+    )
 
     # Typing indicator
     async with message.channel.typing():
@@ -2649,6 +2677,15 @@ async def poll_results():
                             print(f"  REJECTED file (not in allowlist): {fpath}", flush=True)
 
                     print(f"  Replied: {reply_text[:80]}...", flush=True)
+                    _emit_channel_metric(
+                        "out",
+                        metadata={
+                            "channel_id": str(channel.id),
+                            "task_id": task_id,
+                            "reply_chunks": len(_chunk_for_discord(clean_text)) if clean_text else 0,
+                            "file_count": len(files),
+                        },
+                    )
                 except Exception as e:
                     print(f"  Reply failed: {e}", flush=True)
                 # Archive (not delete) so we can mine patterns later.
@@ -2750,6 +2787,15 @@ async def poll_proactive():
                                 await dm.send(f"(file not allowed: {fpath})")
                                 print(f"  [proactive] REJECTED file: {fpath}", flush=True)
                         print(f"  [proactive] sent to {owner_id}: {clean_text[:80]}")
+                        _emit_channel_metric(
+                            "out",
+                            metadata={
+                                "channel_id": "dm",
+                                "kind": "proactive",
+                                "owner_id": owner_id,
+                                "file_count": len(files),
+                            },
+                        )
                     except Exception as e:
                         print(f"  [proactive] failed to DM {owner_id}: {e}")
                     f.unlink(missing_ok=True)
