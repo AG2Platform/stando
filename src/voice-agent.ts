@@ -40,10 +40,12 @@ import { classifyTransportClose, type ClassifiedClose } from './voice-error-clas
 import { personalPath, sharedPersonalPath, statePath, stateDir } from './util_paths.js';
 import {
 	recordEvent as cloudRecordEvent,
+	recordOnboarding as cloudRecordOnboarding,
 	startSession as cloudStartSession,
 	endSession as cloudEndSession,
 	recordError as cloudRecordError,
 	onCapHit as cloudOnCapHit,
+	flush as cloudFlush,
 	type CapHitInfo,
 } from './cloud-client.js';
 
@@ -871,6 +873,10 @@ async function main() {
 					toolCalls: voiceToolCalls.length,
 				},
 			});
+			// Funnel: first usable voice session marks activation.
+			// recordOnboarding dedupes server-side via (user_id, step) unique
+			// index — safe to fire on every session.
+			cloudRecordOnboarding('first_voice');
 		}
 	}
 
@@ -1294,19 +1300,35 @@ async function main() {
 		console.log(`${ts()} [VoiceSession] user interrupt detected — userHasInterrupted=true`);
 	});
 
-	const shutdown = async () => {
-		console.log(`\n${ts()} Shutting down...`);
-		writeVoiceMetrics();
-		await session.close('user_hangup');
+	let shuttingDown = false;
+	const shutdown = async (reason: string) => {
+		if (shuttingDown) return;
+		shuttingDown = true;
+		console.log(`\n${ts()} Shutting down (${reason})...`);
+		// Order matters: writeVoiceMetrics queues a voice.gemini event;
+		// session.close → onSessionEnd → closeCloudSession PATCHes the
+		// cloud session row; cloudFlush drains the queue before exit so
+		// neither the usage_event nor the session-end POST is dropped.
+		try { writeVoiceMetrics(); } catch (e) { console.error('shutdown writeVoiceMetrics:', e); }
+		try { await session.close('user_hangup'); } catch (e) { console.error('shutdown session.close:', e); }
+		try { await cloudFlush(); } catch (e) { console.error('shutdown cloudFlush:', e); }
 		process.exit(0);
 	};
-	process.on('SIGINT', shutdown);
-	process.on('SIGTERM', shutdown);
+	process.on('SIGINT', () => { void shutdown('SIGINT'); });
+	process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+	// SIGHUP: launchd sends this when bouncing the service.
+	process.on('SIGHUP', () => { void shutdown('SIGHUP'); });
 	process.on('uncaughtException', (err) => {
 		console.error(`${ts()} [FATAL] uncaught exception (staying alive):`, err);
+		// Best-effort: flush the queue so the error_event we just recorded
+		// (if any) gets out before a follow-up signal kills us.
+		try { cloudRecordError({ kind: 'voice.uncaught', severity: 'fatal', message: String((err as Error)?.message ?? err), stack: (err as Error)?.stack }); } catch {}
+		void cloudFlush().catch(() => {});
 	});
 	process.on('unhandledRejection', (err) => {
 		console.error(`${ts()} [FATAL] unhandled rejection (staying alive):`, err);
+		try { cloudRecordError({ kind: 'voice.unhandled_rejection', severity: 'fatal', message: String((err as Error)?.message ?? err), stack: (err as Error)?.stack }); } catch {}
+		void cloudFlush().catch(() => {});
 	});
 
 	voiceSessionRef = session;

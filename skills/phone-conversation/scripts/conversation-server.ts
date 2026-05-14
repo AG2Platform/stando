@@ -82,6 +82,8 @@ import {
 	startSession as cloudStartSession,
 	endSession as cloudEndSession,
 	recordError as cloudRecordError,
+	recordEvent as cloudRecordEvent,
+	recordOnboarding as cloudRecordOnboarding,
 } from '../../../src/cloud-client.js';
 
 // --- Config ---
@@ -227,6 +229,7 @@ interface CallSession {
 	callerVerified: boolean;
 	isOwner: boolean;
 	isMeeting: boolean;
+	direction: 'outbound' | 'inbound';
 	meetingId?: string;
 	passcode?: string;
 	parentCallSid?: string;
@@ -647,6 +650,7 @@ async function createCallSession(params: {
 	callerVerified: boolean;
 	isOwner: boolean;
 	isMeeting: boolean;
+	direction: 'outbound' | 'inbound';
 	meetingId?: string;
 	passcode?: string;
 	parentCallSid?: string;
@@ -937,6 +941,45 @@ function cleanupCall(callSid: string): void {
 	// Observability: write per-call metrics to data/call-metrics.jsonl
 	session.events.push({ event: 'call_ended', timestamp: new Date().toISOString() });
 	const durationMs = Date.now() - session.startTime;
+	const durationSeconds = Math.max(0, Math.round(durationMs / 1000));
+
+	// Cloud billing: emit usage_event keyed by direction, close the
+	// session row. Idempotent on the cloud session because
+	// _cloudSessionPromiseByCallSid is delete-then-read.
+	const cloudSessionPromise = _cloudSessionPromiseByCallSid.get(callSid);
+	_cloudSessionPromiseByCallSid.delete(callSid);
+	if (durationSeconds > 0) {
+		cloudRecordEvent({
+			kind: session.direction === 'inbound' ? 'phone.twilio.inbound' : 'phone.twilio.outbound',
+			units: durationSeconds,
+			metadata: {
+				callSid,
+				isMeeting: session.isMeeting,
+				isOwner: session.isOwner,
+			},
+		});
+		if (session.direction === 'outbound') {
+			cloudRecordOnboarding('first_phone');
+		}
+	}
+	if (cloudSessionPromise) {
+		void (async () => {
+			try {
+				const id = await cloudSessionPromise;
+				const toolsUsed: Record<string, number> = {};
+				for (const t of session.toolCalls) {
+					toolsUsed[t.name] = (toolsUsed[t.name] ?? 0) + 1;
+				}
+				await cloudEndSession(id, {
+					endedReason: 'user',
+					turnCount: session.transcript.length,
+					toolsUsed,
+				});
+			} catch (e) {
+				console.error(`${ts()} [Cloud] endSession error:`, e);
+			}
+		})();
+	}
 	const metrics = {
 		timestamp: new Date().toISOString(),
 		callSid,
@@ -1025,27 +1068,19 @@ function cleanupCall(callSid: string): void {
 /// if hangup fires before startSession resolves.
 const _cloudSessionPromiseByCallSid = new Map<string, Promise<string | null>>();
 
-// [Goodbye chain] Final step — tells Twilio to end the call
+// [Goodbye chain] Final step — tells Twilio to end the call. The
+// cloud session + usage event are closed in cleanupCall, which fires
+// from /twilio/status, the WebSocket stop, AND from here (via the
+// statusCallback Twilio sends back). Keeping the close out of here
+// covers calls that end without going through hang_up (caller hangs
+// up first, network drop, Twilio-side timeout).
 async function twilioHangup(callSid: string): Promise<void> {
 	const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
-	const sessionPromise = _cloudSessionPromiseByCallSid.get(callSid);
-	_cloudSessionPromiseByCallSid.delete(callSid);
-	try {
-		await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`, {
-			method: 'POST',
-			body: new URLSearchParams({ Status: 'completed' }).toString(),
-			headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
-		});
-	} finally {
-		// Close the cloud session row even if the Twilio API failed —
-		// the call really did end on our side.
-		if (sessionPromise) {
-			void (async () => {
-				const id = await sessionPromise;
-				await cloudEndSession(id, { endedReason: 'user' });
-			})();
-		}
-	}
+	await fetch(`https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}.json`, {
+		method: 'POST',
+		body: new URLSearchParams({ Status: 'completed' }).toString(),
+		headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+	});
 }
 
 // [Concurrent call chain] Creates outbound Twilio call — used by /call, /concurrent-call, /meeting
@@ -1543,6 +1578,21 @@ wss.on('connection', (ws: WebSocket) => {
 
 					console.log(`${ts()} [WS] stream started: ${callSid}, meeting: ${isMeeting}, verified: ${callerVerified}, owner: ${isOwner}, stirVerstat: ${stirVerstat}, personOnLine: ${personOnLine}, normalized: ${normalizePhone(personOnLine)}, verifiedSet: ${[...VERIFIED_CALLERS].join(',')}`);
 
+					// twilioCall (outbound) already tracked a cloud session for this
+					// callSid. Anything not in the map is an inbound call hitting
+					// /twilio/voice — open one now so billing + lifecycle works.
+					const direction: 'outbound' | 'inbound' =
+						_cloudSessionPromiseByCallSid.has(callSid) ? 'outbound' : 'inbound';
+					if (direction === 'inbound') {
+						_cloudSessionPromiseByCallSid.set(
+							callSid,
+							cloudStartSession({
+								kind: 'phone.inbound',
+								metadata: { callSid, from: (callerNumber || '').slice(0, 4) + '…' },
+							}),
+						);
+					}
+
 					try {
 						callSession = await createCallSession({
 							callSid,
@@ -1553,6 +1603,7 @@ wss.on('connection', (ws: WebSocket) => {
 							callerVerified,
 							isOwner,
 							isMeeting,
+							direction,
 							meetingId: meetingId ? meetingId.replace(/\D/g, '') : undefined,
 							passcode: cp.passcode || undefined,
 							parentCallSid: cp.parentCallSid || undefined,
@@ -1702,9 +1753,45 @@ async function start(): Promise<void> {
 	}
 }
 
-process.on('SIGINT', () => { cleanupNgrok(); process.exit(0); });
-process.on('SIGTERM', () => { cleanupNgrok(); process.exit(0); });
-process.on('uncaughtException', (err) => { console.error(`${ts()} [FATAL]`, err); cleanupNgrok(); process.exit(1); });
-process.on('unhandledRejection', (err) => { console.error(`${ts()} [FATAL]`, err); cleanupNgrok(); process.exit(1); });
+// Lazy import — keep this module loadable for testing without a signed-in
+// cloud client. cloudFlush is wired in shutdownAll below.
+async function _shutdownCloud(): Promise<void> {
+	try {
+		const { flush } = await import('../../../src/cloud-client.js');
+		await flush();
+	} catch { /* best effort */ }
+}
+
+let shuttingDown = false;
+async function shutdownAll(reason: string, code: number): Promise<void> {
+	if (shuttingDown) return;
+	shuttingDown = true;
+	console.log(`${ts()} [Shutdown] ${reason} — closing ${activeCalls.size} active call(s)`);
+	// cleanupCall is sync — it kicks off async cloud-session close +
+	// task-summary writes but doesn't await them. Snapshot the keys
+	// first so we don't mutate while iterating.
+	for (const callSid of [...activeCalls.keys()]) {
+		try { cleanupCall(callSid); } catch (e) { console.error(`${ts()} [Shutdown] cleanupCall ${callSid}:`, e); }
+	}
+	// Give the async cloud closes ~1s to drain before we flush + exit.
+	await new Promise((r) => setTimeout(r, 1000));
+	await _shutdownCloud();
+	cleanupNgrok();
+	process.exit(code);
+}
+
+process.on('SIGINT', () => { void shutdownAll('SIGINT', 0); });
+process.on('SIGTERM', () => { void shutdownAll('SIGTERM', 0); });
+process.on('SIGHUP', () => { void shutdownAll('SIGHUP', 0); });
+process.on('uncaughtException', (err) => {
+	console.error(`${ts()} [FATAL]`, err);
+	cloudRecordError({ kind: 'phone.uncaught', severity: 'fatal', message: String((err as Error)?.message ?? err), stack: (err as Error)?.stack });
+	void shutdownAll('uncaughtException', 1);
+});
+process.on('unhandledRejection', (err) => {
+	console.error(`${ts()} [FATAL]`, err);
+	cloudRecordError({ kind: 'phone.unhandled_rejection', severity: 'fatal', message: String((err as Error)?.message ?? err), stack: (err as Error)?.stack });
+	void shutdownAll('unhandledRejection', 1);
+});
 
 start().catch(err => { console.error('Fatal:', err); cleanupNgrok(); process.exit(1); });

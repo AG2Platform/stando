@@ -234,10 +234,11 @@ re-engagement) so we don't add a second ESP.
 | **Credit wallet** | $10 increments | Top-up for over-cap usage (voice / phone / channels / skills). Never expires. Available on all paid tiers. |
 
 Every tier's allowance is denominated in credits internally
-(1 voice-hour ≈ 60 credits, 1 channel message ≈ 0.3 credits, 1 phone
-minute ≈ 2 credits — see open decision #1). The table shows the
-human-readable view. Over-cap usage debits the credit wallet, or
-fails closed when the wallet is empty (configurable per user).
+(1 voice-hour = 200 credits, 1 channel message = 0.3 credits, 1
+phone minute = 2.5 credits — see open decision #1 for the full
+table). The table shows the human-readable view. Over-cap usage
+debits the credit wallet, or fails closed when the wallet is empty
+(configurable per user).
 
 **Voice hour** = active Gemini Live time (audio bytes flowing either
 direction). Connected-but-silent doesn't draw. **Channel message** =
@@ -741,28 +742,34 @@ shipped:
 
 Things to weigh in on before we start implementation:
 
-1. **Credit unit pricing finalization.** Proposed thumb-pricing
-   (every line item denominated in credits so over-cap usage debits
-   the wallet uniformly):
+1. **Credit unit pricing — finalized 2026-05-13** (per
+   `lib/billing/policies.ts`). Every line item denominated in
+   credits so over-cap usage debits the wallet uniformly:
 
    | Unit | Credits | Notional $ @ $0.01/credit |
    |---|---|---|
-   | 1 voice-hour (Gemini Live, active) | 60 | $0.60 |
-   | 1 phone-minute (outbound) | 2 | $0.02 |
-   | 1 phone-minute (inbound) | 1.5 | $0.015 |
+   | 1 voice-hour (Gemini Live, active) | 200 | $2.00 |
+   | 1 phone-minute (outbound or inbound) | 2.5 | $0.025 |
    | 1 channel message (Discord/Telegram/WhatsApp) | 0.3 | $0.003 |
    | 1 image (Gemini Flash Image) | 5 | $0.05 |
-   | 10 seconds of video (Veo) | 30 | $0.30 |
+   | 1 second of video (Veo) | 6 | $0.06 |
    | 1 Cartesia TTS second | 0.5 | $0.005 |
-   | 1 cloud-tool invocation (delegate / research / recall) | varies | tbd |
+   | Cloud-tool: delegate | 50 | $0.50 |
+   | Cloud-tool: research | 100 | $1.00 |
+   | Cloud-tool: recall | 5 | $0.05 |
 
-   Sanity at Plus's 500 skill-credits: ~100 images OR ~16 10s-videos.
-   At full-utilization the per-tier provider cost runs roughly
-   Plus $32 / Pro $135 / Max $420 — meaning margins depend on
-   typical-use being ~30 % of cap (standard SaaS distribution).
-   **Needs a real margin pass against the wholesale rate sheet before
-   prices freeze** — especially Max, where heavy users can drag unit
-   economics without a fair-use clause.
+   Rates were tuned to keep over-cap usage margin-neutral against
+   rough wholesale rates (the original draft at 60 cr/hr for voice
+   was sub-cost once Gemini Live's per-minute audio billing landed;
+   the 200 cr/hr figure absorbs that). Phone collapsed to one rate
+   for both lanes — the inbound discount we'd originally proposed
+   didn't survive Twilio's per-minute symmetric pricing.
+
+   Sanity at Plus's 500-credit monthly grant: ~100 images OR ~83 sec
+   of video OR ~2.5 voice-hours of over-cap. Worst-case full-cap
+   provider cost is roughly Plus $36 / Pro $145 / Max $440 — margins
+   depend on typical-use being ~30 % of cap (standard SaaS shape).
+   Margin re-check post-beta once we have real distribution data.
 2. **Encryption key for cloud memory** — derived from a passphrase
    (user can lose it; recovery story?), or from a hardware-backed
    keychain key (can't share across devices without first-device

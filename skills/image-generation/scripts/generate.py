@@ -356,9 +356,38 @@ def main():
         except Exception:  # noqa: BLE001 — telemetry must never break the call
             pass
 
+    def _emit_first_step(step: str) -> None:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "src"))
+            from cloud_metrics import record_onboarding
+            record_onboarding(step)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _probe_video_seconds(path: Path) -> int:
+        """Return integer seconds for the saved video, or 8 (Veo 3 default)
+        if ffprobe isn't available. Billing is per-second so a small under-
+        count is preferable to over-counting."""
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+                capture_output=True, text=True, timeout=5,
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                return max(1, int(round(float(out.stdout.strip()))))
+        except Exception:
+            pass
+        return 8
+
     if args.video:
         generate_video(client, args)
-        _emit_cloud_metric("video.gen", units=1, model=args.model)
+        # video.gen is billed per second of generated video — probe the
+        # saved file rather than charging 1 unit per generation.
+        out_path = Path(args.output) if args.output else None
+        seconds = _probe_video_seconds(out_path) if out_path and out_path.exists() else 8
+        _emit_cloud_metric("video.gen", units=seconds, model=args.model)
     else:
         try:
             from PIL import Image
@@ -367,6 +396,7 @@ def main():
             sys.exit(1)
         generate_image(client, args)
         _emit_cloud_metric("image.gen", units=1, model=args.model)
+        _emit_first_step("first_image")
 
 
 if __name__ == "__main__":

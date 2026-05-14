@@ -240,9 +240,9 @@ export const openUrlTool: ToolDefinition = {
 
 async function describeScreenshot(imagePath: string, previousDescs: string[] = []): Promise<string> {
 	const apiKey = process.env.GEMINI_API_KEY;
-	// Lazy-load the gateway config — keeps this module decoupled from
-	// cloud-client when running in tools-only contexts.
-	const { gatewayBaseUrl } = await import('./cloud-client.js');
+	// Lazy-load the gateway config + telemetry — keeps this module decoupled
+	// from cloud-client when running in tools-only contexts.
+	const { gatewayBaseUrl, recordEvent: cloudRecordEvent } = await import('./cloud-client.js');
 	const gateway = gatewayBaseUrl('llm');
 	if (!apiKey && !gateway) return 'Vision description unavailable (no GEMINI_API_KEY and not signed in to cloud)';
 	try {
@@ -276,9 +276,13 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 			generationConfig: { maxOutputTokens: 40 },
 		});
 		// Prefer managed gateway when signed in (cloud uses master key
-		// + bills paid-tier usage). Fall back to BYOK on any non-2xx so
-		// Free tier still works.
+		// + bills paid-tier usage). 402/429 from the gateway means cap
+		// hit / rate limit: do NOT fall back to BYOK — paid users would
+		// silently consume their own quota and never see the cap.
+		// 5xx / network errors fall back to BYOK so transient gateway
+		// outages don't break vision for paid users.
 		let res: Response | null = null;
+		let viaGateway = false;
 		if (gateway) {
 			res = await fetch(
 				`${gateway.url}v1beta/models/${VISION_MODEL}:generateContent`,
@@ -292,7 +296,15 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 					body,
 				},
 			);
-			if (!res.ok) res = null;
+			if (res.status === 402 || res.status === 429) {
+				const label = res.status === 402 ? 'wallet empty' : 'rate limited';
+				return `Vision capped — ${label}. Top up at sutando.ag2.ai/billing to continue.`;
+			}
+			if (res.ok) {
+				viaGateway = true;
+			} else {
+				res = null;
+			}
 		}
 		if (!res) {
 			if (!apiKey) return 'Vision description unavailable (gateway denied + no GEMINI_API_KEY)';
@@ -304,7 +316,13 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 					body,
 				},
 			);
+			// BYOK path: gateway didn't count this, so emit our own
+			// usage_event so free-tier vision is visible on /admin/features.
+			if (res.ok) {
+				cloudRecordEvent({ kind: 'vision.gemini', units: 1, metadata: { byok: true } });
+			}
 		}
+		void viaGateway; // gateway accounting is server-side; marker only
 		const data = await res.json() as any;
 		if (!data?.candidates?.[0]) {
 			const reason = data?.promptFeedback?.blockReason || data?.error?.message || JSON.stringify(data).slice(0, 200);

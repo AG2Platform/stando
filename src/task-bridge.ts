@@ -230,6 +230,14 @@ export const workTool: ToolDefinition = {
 		_pendingTasks.set(taskId, { submittedAt: Date.now(), timeoutMs, dmOnTimeout: dm_on_timeout === true });
 		// Record owner activity for status-aware-pivot in proactive loop
 		writeOwnerActivity('voice', task);
+		// Funnel: first task submission marks activation. recordOnboarding
+		// dedupes server-side via (user_id, step) unique index.
+		void (async () => {
+			try {
+				const { recordOnboarding } = await import('./cloud-client.js');
+				recordOnboarding('first_task');
+			} catch { /* telemetry must never break the call */ }
+		})();
 		console.log(`${ts()} [TaskBridge] Task ${taskId}: ${task.slice(0, 100)}`);
 		_sendTaskStatus?.(taskId, 'working', task.slice(0, 60));
 		return {

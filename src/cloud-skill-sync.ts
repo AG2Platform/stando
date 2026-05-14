@@ -20,7 +20,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { cloudFetch, isCloudSignedIn } from './cloud-client.js';
+import { cloudFetch, isCloudSignedIn, recordEvent as cloudRecordEvent, recordError as cloudRecordError } from './cloud-client.js';
 
 interface InstalledRow {
 	skillId: string;
@@ -120,8 +120,22 @@ export async function syncOnce(): Promise<void> {
 		if (result.ok) {
 			console.log(`[skill-sync] installed ${row.slug}@${row.version}`);
 			installedCount += 1;
+			// Auto-installs via the dashboard bypass POST /api/skills/{id}/install
+			// (which is the analytics counter). Emit a skill.install usage_event
+			// so marketplace install counts include this surface too.
+			cloudRecordEvent({
+				kind: 'skill.install',
+				units: 1,
+				metadata: { slug: row.slug, version: row.version, surface: 'auto_sync' },
+			});
 		} else {
 			console.log(`[skill-sync] skip ${row.slug}: ${result.reason}`);
+			cloudRecordError({
+				kind: 'skill.install_failed',
+				severity: 'warn',
+				message: `${row.slug}: ${result.reason}`,
+				metadata: { slug: row.slug, version: row.version },
+			});
 		}
 	}
 	if (installedCount > 0) {
