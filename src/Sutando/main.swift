@@ -1444,7 +1444,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Default hotkey config used when ~/.config/sutando/hotkeys.json is missing.
     /// Keys: action name → (key letter, modifier names).
     private static let defaultHotkeys: [(action: String, key: String, modifiers: [String])] = [
-        ("drop_context",     "C", ["control"]),
+        // drop_context is ⌃⇧C (not plain ⌃C) so the Core CLI terminal pane
+        // keeps Ctrl+C for SIGINT — interrupting a runaway claude prompt or
+        // killing a foreground subprocess. Same shift-modifier pattern as
+        // report_feedback. Users can override via ~/.config/sutando/hotkeys.json.
+        ("drop_context",     "C", ["control", "shift"]),
         ("drop_screenshot",  "S", ["control"]),
         ("toggle_voice",     "V", ["control"]),
         ("toggle_mute",      "M", ["control"]),

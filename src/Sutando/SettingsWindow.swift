@@ -981,10 +981,19 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func claudeCodeAction() {
         if claudeCodePath() != nil {
-            // Installed → open Terminal so the user can run `claude auth login`
-            // interactively. We can't drive the auth flow from inside the app
-            // because Anthropic's flow opens a browser + reads stdin.
-            openTerminalRunning("claude auth login")
+            // Installed → the Core CLI tmux pane already has claude attached.
+            // Send `/login` as a slash-command so the in-process claude opens
+            // its browser auth flow; switch the unified window to the CLI pane
+            // so the user sees the prompt land. Fall back to Terminal only if
+            // the tmux session isn't reachable (cold start, before startup.sh
+            // has booted the core-agent service).
+            let sent = appDelegate?.tmuxSendKeys(session: "sutando-core", keys: "/login") ?? false
+            if sent {
+                appDelegate?.unifiedWindow?.showAndFocus(pane: .cli)
+                showBanner("Sent /login to Core CLI — follow the prompt there.", color: .systemGreen)
+            } else {
+                openTerminalRunning("claude /login")
+            }
         } else {
             runClaudeCodeInstaller()
         }

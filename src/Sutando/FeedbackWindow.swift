@@ -43,10 +43,10 @@ private func _loadFeedbackAuth() -> _FeedbackAuth? {
     return try? JSONDecoder().decode(_FeedbackAuth.self, from: data)
 }
 
-/// Up to 3 image attachments, ~1MB each (the cloud /api/feedback route
-/// caps the base64 dataB64 field at 1.5MB).
+/// Up to 3 image attachments, ~5MB raw each (the cloud /api/feedback route
+/// caps the base64 dataB64 field at 7MB, which fits a 5MB binary payload).
 private let _maxAttachments = 3
-private let _maxAttachmentRawBytes = 1_000_000
+private let _maxAttachmentRawBytes = 5_000_000
 private let _supportedAttachmentMimes: Set<String> = ["image/png", "image/jpeg", "image/gif", "image/webp"]
 
 private struct FeedbackAttachment {
@@ -358,7 +358,7 @@ final class FeedbackWindowController: NSWindowController, NSWindowDelegate {
             return
         }
         if data.count > _maxAttachmentRawBytes {
-            setStatus("\"\(suggestedName)\" is over 1MB — please resize before attaching.", error: true)
+            setStatus("\"\(suggestedName)\" is over 5MB — please resize before attaching.", error: true)
             return
         }
         guard _supportedAttachmentMimes.contains(mime) else {
