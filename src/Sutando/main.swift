@@ -242,12 +242,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.pollMuteState()
         }
 
-        // Watcher health: every 30s, verify the task watcher is running.
-        // If it's dead AND there are pending tasks AND it's been >60s since
-        // we last intervened, restart it and fire a notification. Chi's ask
-        // 2026-04-18: "can the app remind the CLI about watcher" — this
-        // goes one better by auto-restarting so no reminder is needed.
-        Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+        // Watcher health: every 5 min, verify the task watcher is running.
+        // Bumped from 30s → 300s on 2026-05-14 (Chi greenlit) — with Claude
+        // Code's `Monitor` tool now driving `watch-tasks-stream.sh` as the
+        // canonical persistent watcher, the menu-bar Timer is purely a
+        // safety net (catches Monitor crash / session-restart race / tmux
+        // pane death). 30s polling was overkill; 5 min keeps recovery in
+        // human-interactive territory (worst-case lag = ~5 min stale before
+        // auto-restart) while cutting 12× the wake-ups.
+        //
+        // Original design context (Chi 2026-04-18): "can the app remind the
+        // CLI about watcher" — auto-restart instead of remind, no UX
+        // change beyond cadence.
+        Timer.scheduledTimer(withTimeInterval: 300.0, repeats: true) { [weak self] _ in
             self?.checkWatcher()
         }
 
@@ -412,7 +419,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         modePresenterMenuItem?.title = (active == "presenter" ? "● " : "  ") + "Mode: Presenter"
     }
 
-    var lastWatcherAlert: Date = .distantPast
     func checkWatcher() {
         // pgrep -f watch-tasks
         let proc = Process()
@@ -453,10 +459,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Throttle: don't alert more than once every 120s so the CLI doesn't
-        // get flooded if it's slow to restart.
-        if Date().timeIntervalSince(lastWatcherAlert) < 120 { return }
-        lastWatcherAlert = Date()
+        // (Removed 120s inner throttle 2026-05-14: now strictly dead code under
+        // the 300s outer Timer cadence — two consecutive ticks are always 300s
+        // apart, so the throttle never gated. Flood-protection is now solely
+        // the watcherKeystrokesQueued() check above + the Timer interval.)
 
         // If Claude Code is running inside the `sutando-core` tmux session
         // (launch via scripts/start-cli.sh), send the word `watcher` to
