@@ -160,23 +160,38 @@ HTML = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sutando Dashboard</title>
 <style>
+/* Cloud-matching palette — see web-client.ts header for the full spec.
+   Light-first, dark via prefers-color-scheme. Variables let us swap
+   surfaces without forking the rule set. State accents (score green,
+   error red, etc.) keep their literal hex codes since the colors carry
+   meaning. */
+:root {
+  --bg: #fafafa; --surface: #ffffff; --border: #e5e5e5;
+  --text: var(--surface); --text-muted: #525252; --text-faint: #a3a3a3;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a0a0a; --surface: var(--surface); --border: var(--border);
+    --text: #f5f5f5; --text-muted: #a3a3a3; --text-faint: #525252;
+  }
+}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,sans-serif;background:#0a0a12;color:#c0c0d0;min-height:100vh;padding:20px}
+body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:20px}
 .grid{max-width:900px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:600px){.grid{grid-template-columns:1fr}}
-.card{background:#12121e;border:1px solid #1e1e30;border-radius:10px;padding:16px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px}
 .card.full{grid-column:1/-1}
-h1{font-size:16px;color:#fff;margin-bottom:2px}
+h1{font-size:16px;color:var(--text);margin-bottom:2px}
 .sub{font-size:11px;color:#444;margin-bottom:16px}
 h2{font-size:12px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:10px}
 .score{font-size:28px;font-weight:600;color:#4ecca3;margin-bottom:4px}
 .stat-row{display:flex;gap:16px;flex-wrap:wrap}
 .stat{text-align:center;flex:1;min-width:60px}
-.stat-val{font-size:18px;font-weight:600;color:#fff}
+.stat-val{font-size:18px;font-weight:600;color:var(--text)}
 .stat-label{font-size:10px;color:#555;text-transform:uppercase}
 .check{display:flex;align-items:center;gap:6px;font-size:12px;padding:3px 0;color:#888}
 .check .ok{color:#4ecca3}.check .bad{color:#e94560}
-.activity-item{padding:6px 0;border-bottom:1px solid #1a1a2a}
+.activity-item{padding:6px 0;border-bottom:1px solid var(--border)}
 .activity-item:last-child{border:none}
 .activity-time{font-size:10px;color:#444}
 .activity-title{font-size:12px;color:#aaa}
@@ -390,15 +405,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif urlparse(self.path).path == "/notes-ui":
             html = """<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sutando Notes</title>
 <style>
-body{font-family:-apple-system,sans-serif;background:#1a1a2e;color:#e0e0e0;margin:0;padding:20px;max-width:900px;margin:0 auto}
+body{font-family:-apple-system,sans-serif;background:var(--border);color:#e0e0e0;margin:0;padding:20px;max-width:900px;margin:0 auto}
 a{color:#7c83ff;text-decoration:none}a:hover{text-decoration:underline}
-h1{color:#fff;border-bottom:1px solid #333;padding-bottom:10px}
-.note-list{list-style:none;padding:0}.note-list li{padding:8px 12px;border-bottom:1px solid #2a2a3e}
-.note-list li:hover{background:#2a2a3e;border-radius:4px}
-.note-content{background:#2a2a3e;padding:20px;border-radius:8px;font-size:14px;line-height:1.6}
-.note-content h1,.note-content h2,.note-content h3{color:#fff;margin-top:20px}
-.note-content code{background:#1a1a2e;padding:2px 6px;border-radius:3px;font-size:13px}
-.note-content pre{background:#1a1a2e;padding:12px;border-radius:6px;overflow-x:auto}
+h1{color:var(--text);border-bottom:1px solid #333;padding-bottom:10px}
+.note-list{list-style:none;padding:0}.note-list li{padding:8px 12px;border-bottom:1px solid var(--border)}
+.note-list li:hover{background:var(--border);border-radius:4px}
+.note-content{background:var(--border);padding:20px;border-radius:8px;font-size:14px;line-height:1.6}
+.note-content h1,.note-content h2,.note-content h3{color:var(--text);margin-top:20px}
+.note-content code{background:var(--border);padding:2px 6px;border-radius:3px;font-size:13px}
+.note-content pre{background:var(--border);padding:12px;border-radius:6px;overflow-x:auto}
 .note-content ul,.note-content ol{padding-left:20px}
 .note-content li{margin:4px 0}
 .note-content a{color:#7c83ff}

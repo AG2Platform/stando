@@ -25,10 +25,35 @@ const HTML = /* html */ `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sutando Web UI</title>
 <style>
+  /* Cloud-matching palette — light-first, dark via prefers-color-scheme.
+     Mirrors agent-universe/app/globals.css so the desktop voice client
+     and the cloud dashboard read as the same product. Surface variables
+     swap; state accents (voice on / agent state pulses) keep their hex
+     codes since those colors carry information. */
+  :root {
+    --bg:           #fafafa;  /* neutral-50  */
+    --surface:      #ffffff;  /* card / header */
+    --surface-elev: #f5f5f5;  /* slightly grayer panel — neutral-100 */
+    --border:       #e5e5e5;  /* neutral-200 */
+    --text:         #171717;  /* neutral-900 */
+    --text-muted:   #525252;  /* neutral-600 */
+    --text-faint:   #a3a3a3;  /* neutral-400 */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:           #0a0a0a;  /* neutral-950 */
+      --surface:      #171717;  /* neutral-900 */
+      --surface-elev: #1f1f1f;
+      --border:       #262626;  /* neutral-800 */
+      --text:         #f5f5f5;  /* neutral-100 */
+      --text-muted:   #a3a3a3;  /* neutral-400 */
+      --text-faint:   #525252;  /* neutral-600 */
+    }
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-user-select: text; user-select: text; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #0a0a12; color: #c0c0d0;
+    background: var(--bg); color: var(--text);
     display: flex; flex-direction: column; align-items: center;
     min-height: 100vh; padding: 0 0 60px 0;
   }
@@ -36,7 +61,7 @@ const HTML = /* html */ `<!DOCTYPE html>
   .header {
     width: 100%; padding: 16px 20px;
     display: flex; align-items: center; gap: 14px;
-    background: #0e0e18; border-bottom: 1px solid #1a1a2e;
+    background: var(--surface); border-bottom: 1px solid var(--border);
   }
   .header .avatar-wrap {
     position: relative; width: 60px; height: 60px; flex-shrink: 0;
@@ -120,8 +145,17 @@ const HTML = /* html */ `<!DOCTYPE html>
     width: 100%; height: 100%; overflow: visible; display: block;
   }
   .avatar-svg-default .stand-body,
-  .avatar-svg-default .stand-head {
+  .avatar-svg-default .stand-head,
+  .avatar-svg-default .stand-glyph {
     fill: var(--accent, #7c83ff); transition: fill 0.4s ease;
+  }
+  .avatar-svg-default .stand-glyph {
+    /* The S letterform replaces the previous humanoid-figure body/head.
+       Keeps the same --accent variable so all state colors (idle indigo,
+       listening violet, speaking green, working blue, seeing amber) flow
+       through without per-state overrides. */
+    paint-order: stroke fill;
+    letter-spacing: -2;
   }
   .avatar-svg-default .stand-visor { fill: #0f1117; }
   .avatar-svg-default .stand-arm {
@@ -140,7 +174,8 @@ const HTML = /* html */ `<!DOCTYPE html>
   /* idle — indigo, faint breathe */
   .s-idle .avatar-svg-default { --accent: #7c83ff; }
   .s-idle .avatar-svg-default .stand-body,
-  .s-idle .avatar-svg-default .stand-head {
+  .s-idle .avatar-svg-default .stand-head,
+  .s-idle .avatar-svg-default .stand-glyph {
     animation: svg-breathe 4s ease-in-out infinite; transform-origin: 50% 55%;
   }
   @keyframes svg-breathe {
@@ -209,7 +244,7 @@ const HTML = /* html */ `<!DOCTYPE html>
   .hero-svg-wrap { width: 80px; height: 80px; margin-bottom: 16px; display: none; }
 
   .header .info { flex: 1; }
-  .header h1 { color: #fff; font-size: 1.15em; font-weight: 500; }
+  .header h1 { color: var(--text); font-size: 1.15em; font-weight: 500; }
   .header .meta { font-size: 16px; color: #888; display: flex; gap: 14px; align-items: center; margin-top: 4px; }
   .header .meta a { color: #999; text-decoration: none; border-bottom: 1px dotted #555; }
   .header .meta a:hover { color: #bbb; }
@@ -218,7 +253,7 @@ const HTML = /* html */ `<!DOCTYPE html>
     padding: 4px 12px; border-radius: 12px; font-size: 16px; font-weight: 500;
   }
   .status-pill.voice-on { background: #1a2e24; color: #4ecca3; }
-  .status-pill.voice-off { background: #1a1a2e; color: #666; }
+  .status-pill.voice-off { background: var(--border); color: #666; }
   .status-pill .dot {
     width: 6px; height: 6px; border-radius: 50%; background: #333;
   }
@@ -237,7 +272,7 @@ const HTML = /* html */ `<!DOCTYPE html>
   .btn-voice:hover { background: #277334; box-shadow: 0 0 16px rgba(78, 204, 163, 0.25); }
   .btn-voice.active { background: #8b1a1a; border-color: #a52222; box-shadow: none; }
   .btn-voice.active:hover { background: #a52222; }
-  .btn-mute { background: #2a2a3e; color: #888; }
+  .btn-mute { background: var(--border); color: #888; }
   .btn-mute:hover { background: #3a3a4e; color: #fff; }
   .btn-mute.muted { background: #4a1a1a; color: #e94560; }
   .btn-subtle { background: transparent; color: #444; font-size: 11px; padding: 5px 8px; }
@@ -249,14 +284,14 @@ const HTML = /* html */ `<!DOCTYPE html>
   /* Conversation */
   #transcript {
     min-height: 80px; max-height: 30vh;
-    background: #0e0e18; border-radius: 12px; padding: 10px 14px;
+    background: var(--surface); border-radius: 12px; padding: 10px 14px;
     overflow-y: auto; font-size: 16px; line-height: 1.6;
     margin-bottom: 6px;
   }
   .t-entry { margin-bottom: 8px; position: relative; user-select: text; }
   .t-entry .copy-btn {
     display: none; position: absolute; right: 0; top: 0;
-    background: #1e1e30; border: 1px solid #2a2a40; color: #666; font-size: 10px;
+    background: var(--border); border: 1px solid var(--border); color: #666; font-size: 10px;
     padding: 2px 6px; border-radius: 4px; cursor: pointer;
   }
   .t-entry:hover .copy-btn { display: inline-block; }
@@ -272,8 +307,8 @@ const HTML = /* html */ `<!DOCTYPE html>
   /* Input bar */
   #bottom-panel {
     position: fixed; bottom: 0; left: 0; right: 0; max-width: 960px; margin: 0 auto;
-    background: #12121e; z-index: 10;
-    border-top: 1px solid #1e1e30;
+    background: var(--surface); z-index: 10;
+    border-top: 1px solid var(--border);
     padding: 8px 16px 12px;
   }
   .input-bar {
@@ -281,7 +316,7 @@ const HTML = /* html */ `<!DOCTYPE html>
   }
   .input-bar input {
     flex: 1; padding: 12px 16px; border-radius: 10px;
-    border: 1px solid #1e1e30; background: #0e0e18; color: #fff; font-size: 16px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 16px;
     outline: none;
   }
   .input-bar input:focus { border-color: #4ecca3; }
@@ -291,7 +326,7 @@ const HTML = /* html */ `<!DOCTYPE html>
 
   /* Tasks */
   #tasks {
-    background: #0e0e18; border-radius: 10px; padding: 8px 14px;
+    background: var(--surface); border-radius: 10px; padding: 8px 14px;
     margin-bottom: 10px; font-size: 12px;
   }
   #tasks:empty { display: none; }
@@ -401,19 +436,19 @@ const HTML = /* html */ `<!DOCTYPE html>
   #dynamic-region .dr-chips { text-align: center; }
   #dynamic-region .dr-chips .suggestions-label { margin-bottom: 8px; }
   #dynamic-region .dr-chips .suggestion {
-    display: inline-block; background: #1a1a2e; border: 1px solid #2a2a4e;
+    display: inline-block; background: var(--border); border: 1px solid #2a2a4e;
     border-radius: 16px; padding: 7px 15px; margin: 4px; font-size: 15px;
     color: #8899a6; cursor: pointer; transition: all 0.2s;
   }
   #dynamic-region .dr-chips .suggestion:hover { background: #2a2a4e; color: #ccc; border-color: #4a4a6e; }
   #dynamic-region .dr-media {
-    background: #12121e; border: 1px solid #1e1e30; border-radius: 10px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
     padding: 12px 16px; text-align: center;
   }
   #dynamic-region .dr-media-title { color: #ccc; font-size: 14px; font-weight: 600; margin-bottom: 8px; }
   #dynamic-region .dr-media-caption { color: #666; font-size: 11px; margin-top: 6px; }
   #dynamic-region .dr-document {
-    background: #12121e; border: 1px solid #1e1e30; border-radius: 10px; padding: 12px 16px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px;
   }
   #dynamic-region .dr-doc-body { color: #ccc; font-size: 15px; line-height: 1.6; white-space: pre-wrap; }
 
@@ -447,10 +482,10 @@ const HTML = /* html */ `<!DOCTYPE html>
   .d-entry.audio { color: #4db6ac; }
   .btn-download {
     display: inline-block; margin-top: 6px; padding: 4px 10px;
-    border-radius: 6px; border: 1px solid #1e1e30; background: #0e0e18;
+    border-radius: 6px; border: 1px solid var(--border); background: var(--surface);
     color: #555; font-size: 11px; cursor: pointer; text-decoration: none;
   }
-  .btn-download:hover { background: #1a1a2e; color: #aaa; }
+  .btn-download:hover { background: var(--border); color: #aaa; }
 
   /* Hidden URL input */
   #wsUrl { display: none; }
@@ -479,7 +514,7 @@ const HTML = /* html */ `<!DOCTYPE html>
     box-shadow: 0 0 16px rgba(251,191,36,0.55);
     animation: avatar-see 1.2s ease-in-out infinite;
   }
-  .hero h2 { color: #fff; font-size: 1.3em; font-weight: 500; margin-bottom: 4px; transition: all 0.6s ease; }
+  .hero h2 { color: var(--text); font-size: 1.3em; font-weight: 500; margin-bottom: 4px; transition: all 0.6s ease; }
   .hero .tagline { color: #555; font-size: 13px; margin-bottom: 24px; transition: all 0.6s ease; }
   @keyframes avatar-glow {
     0% { box-shadow: 0 0 0 rgba(78,204,163,0); transform: scale(0.9); opacity: 0; }
@@ -527,35 +562,15 @@ const HTML = /* html */ `<!DOCTYPE html>
     <img class="avatar" id="stand-avatar" src="http://localhost:7844/avatar">
     <div id="avatar-svg-wrap">
       <svg class="avatar-svg-default" viewBox="-50 -50 100 100" xmlns="http://www.w3.org/2000/svg">
-        <defs>
-          <linearGradient id="visorSweep" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stop-color="#6ee7b7"/>
-            <stop offset="50%" stop-color="#a7f3d0"/>
-            <stop offset="100%" stop-color="#6ee7b7"/>
-            <animate attributeName="x1" values="-100%;100%" dur="1.2s" repeatCount="indefinite"/>
-            <animate attributeName="x2" values="0%;200%" dur="1.2s" repeatCount="indefinite"/>
-          </linearGradient>
-        </defs>
-        <circle class="constellation-node" cx="-34" cy="-28" r="1.2"/>
-        <circle class="constellation-node" cx="32" cy="-30" r="1"/>
-        <circle class="constellation-node" cx="-28" cy="32" r="1.2"/>
-        <circle class="constellation-node" cx="36" cy="26" r="1"/>
-        <line class="constellation" x1="-34" y1="-28" x2="32" y2="-30"/>
-        <line class="constellation" x1="32" y1="-30" x2="36" y2="26"/>
-        <line class="constellation" x1="-28" y1="32" x2="36" y2="26"/>
-        <path class="stand-arm" d="M -14 0 Q -26 4 -30 14"/>
-        <path class="stand-arm" d="M 14 0 Q 26 4 30 14"/>
-        <path class="stand-arm" d="M -14 -2 Q -22 -14 -18 -24"/>
-        <path class="stand-arm" d="M 14 -2 Q 22 -14 18 -24"/>
         <circle class="halo" cx="0" cy="0" r="32"/>
         <circle class="halo" cx="0" cy="0" r="32"/>
         <circle class="halo" cx="0" cy="0" r="32"/>
-        <ellipse class="stand-body" cx="0" cy="10" rx="14" ry="22"/>
-        <circle class="stand-head" cx="0" cy="-18" r="10"/>
-        <rect class="stand-visor" x="-8" y="-20" width="16" height="4" rx="1"/>
-        <rect class="scan-beam" x="-3" y="-22" width="6" height="8" rx="1"/>
+        <text class="stand-glyph" x="0" y="20" text-anchor="middle"
+              font-family="-apple-system, system-ui, sans-serif"
+              font-size="58" font-weight="500">S</text>
         <circle class="orbit-dot" cx="0" cy="0" r="2.2"/>
         <circle class="orbit-dot" cx="0" cy="0" r="1.6"/>
+        <rect class="scan-beam" x="-3" y="-30" width="6" height="8" rx="1"/>
       </svg>
     </div>
   </div>
@@ -615,27 +630,15 @@ fetch('http://localhost:7844/stand-identity').then(r=>r.json()).then(s=>{
   <img class="avatar-hero" id="hero-avatar" src="http://localhost:7844/avatar">
   <div class="hero-svg-wrap" id="hero-svg-wrap">
     <svg class="avatar-svg-default" viewBox="-50 -50 100 100" xmlns="http://www.w3.org/2000/svg">
-      <!-- Hero reuses header's #visorSweep gradient (single definition). -->
-      <circle class="constellation-node" cx="-34" cy="-28" r="1.2"/>
-      <circle class="constellation-node" cx="32" cy="-30" r="1"/>
-      <circle class="constellation-node" cx="-28" cy="32" r="1.2"/>
-      <circle class="constellation-node" cx="36" cy="26" r="1"/>
-      <line class="constellation" x1="-34" y1="-28" x2="32" y2="-30"/>
-      <line class="constellation" x1="32" y1="-30" x2="36" y2="26"/>
-      <line class="constellation" x1="-28" y1="32" x2="36" y2="26"/>
-      <path class="stand-arm" d="M -14 0 Q -26 4 -30 14"/>
-      <path class="stand-arm" d="M 14 0 Q 26 4 30 14"/>
-      <path class="stand-arm" d="M -14 -2 Q -22 -14 -18 -24"/>
-      <path class="stand-arm" d="M 14 -2 Q 22 -14 18 -24"/>
       <circle class="halo" cx="0" cy="0" r="32"/>
       <circle class="halo" cx="0" cy="0" r="32"/>
       <circle class="halo" cx="0" cy="0" r="32"/>
-      <ellipse class="stand-body" cx="0" cy="10" rx="14" ry="22"/>
-      <circle class="stand-head" cx="0" cy="-18" r="10"/>
-      <rect class="stand-visor" x="-8" y="-20" width="16" height="4" rx="1"/>
-      <rect class="scan-beam" x="-3" y="-22" width="6" height="8" rx="1"/>
+      <text class="stand-glyph" x="0" y="20" text-anchor="middle"
+            font-family="-apple-system, system-ui, sans-serif"
+            font-size="58" font-weight="500">S</text>
       <circle class="orbit-dot" cx="0" cy="0" r="2.2"/>
       <circle class="orbit-dot" cx="0" cy="0" r="1.6"/>
+      <rect class="scan-beam" x="-3" y="-30" width="6" height="8" rx="1"/>
     </svg>
   </div>
   <h2 id="hero-name">Sutando</h2>
@@ -644,13 +647,13 @@ fetch('http://localhost:7844/stand-identity').then(r=>r.json()).then(s=>{
 </div>
 
 <div id="status-bar" style="text-align:center;font-size:16px;color:#888;letter-spacing:0.3px;padding:12px 16px">
-  <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃C</kbd> drop context
+  <kbd style="background:var(--border);padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃C</kbd> drop context
   <span style="margin:0 8px;color:#444">|</span>
-  <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃S</kbd> drop screenshot
+  <kbd style="background:var(--border);padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃S</kbd> drop screenshot
   <span style="margin:0 8px;color:#444">|</span>
-  <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃V</kbd> voice
+  <kbd style="background:var(--border);padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃V</kbd> voice
   <span style="margin:0 8px;color:#444">|</span>
-  <kbd style="background:#1a1a2e;padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃M</kbd> mute
+  <kbd style="background:var(--border);padding:3px 8px;border-radius:4px;border:1px solid #333;font-family:monospace;color:#8af;font-size:14px">⌃M</kbd> mute
   <span style="margin:0 8px;color:#444">|</span>
   <span id="core-status-bar" style="display:inline"></span>
   <span id="presenter-badge">🎤 PRESENTER MODE</span>
@@ -2217,7 +2220,7 @@ function updateTabHighlights() {
     var isActive = t.id === active;
     var bg = isActive ? '#2a2a4e' : 'transparent';
     var fg = isActive ? '#ccc' : '#666';
-    var border = isActive ? '#4a4a6e' : '#2a2a3e';
+    var border = isActive ? '#4a4a6e' : 'var(--border)';
     if (t.id === 'questions' && questions.length > 0 && !isActive) fg = '#f0ad4e';
     if (t.id === 'tasks' && hasNewTasks && !isActive) fg = '#4ecca3';
     return '<span onclick="switchDRTab(&quot;' + t.id + '&quot;)" style="cursor:pointer;padding:6px 0;border-radius:12px;font-size:14px;border:1px solid ' + border + ';background:' + bg + ';color:' + fg + ';flex:1;text-align:center">' + t.label + '</span>';
@@ -2287,11 +2290,11 @@ function renderTabContent() {
   } else if (tab === 'notes') {
     var DASH = 'http://' + window.location.hostname + ':7844';
     fetch(DASH + '/notes').then(function(r){return r.json()}).then(function(notes) {
-      var searchHtml = '<div style="margin-bottom:8px"><input id="note-search" type="text" placeholder="Search notes..." style="width:100%;padding:6px 10px;border-radius:8px;border:1px solid #1e1e30;background:#0e0e18;color:#ccc;font-size:12px;outline:none" oninput="filterNotes(this.value)"></div>';
+      var searchHtml = '<div style="margin-bottom:8px"><input id="note-search" type="text" placeholder="Search notes..." style="width:100%;padding:6px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:#ccc;font-size:12px;outline:none" oninput="filterNotes(this.value)"></div>';
       var html = '';
       window._allNotes = notes;
       notes.forEach(function(n) {
-        html += '<div class="note-item" data-title="' + esc(n.title).toLowerCase() + '" data-slug="' + n.slug + '" style="padding:12px 10px;margin:0 -10px;border-bottom:1px solid #2a2a3e;display:flex;align-items:center;font-size:16px;line-height:1.6;border-radius:6px">' +
+        html += '<div class="note-item" data-title="' + esc(n.title).toLowerCase() + '" data-slug="' + n.slug + '" style="padding:12px 10px;margin:0 -10px;border-bottom:1px solid var(--border);display:flex;align-items:center;font-size:16px;line-height:1.6;border-radius:6px">' +
           '<span style="margin-right:10px;flex-shrink:0">&#128221;</span>' +
           '<span style="color:#7c83ff;cursor:pointer;flex:1" onclick="showNoteContent(&quot;' + n.slug + '&quot;)">' + n.title + '</span>' +
           '<span style="color:#666;font-size:13px;margin-right:8px">' + new Date(n.modified*1000).toLocaleDateString() + '</span>' +
@@ -2368,9 +2371,9 @@ function showNoteContent(slug) {
     text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
     text = text.replace(/^# (.+)$/gm, '<h1 style="font-size:16px">$1</h1>');
     var codeBlockRe = new RegExp(String.fromCharCode(96,96,96) + '([\\s\\S]*?)' + String.fromCharCode(96,96,96), 'g');
-    text = text.replace(codeBlockRe, '<pre style="background:#1a1a2e;padding:8px;border-radius:4px;font-size:12px;overflow-x:auto"><code>$1</code></pre>');
+    text = text.replace(codeBlockRe, '<pre style="background:var(--border);padding:8px;border-radius:4px;font-size:12px;overflow-x:auto"><code>$1</code></pre>');
     var inlineCodeRe = new RegExp(String.fromCharCode(96) + '([^' + String.fromCharCode(96) + ']+)' + String.fromCharCode(96), 'g');
-    text = text.replace(inlineCodeRe, '<code style="background:#1a1a2e;padding:1px 4px;border-radius:2px">$1</code>');
+    text = text.replace(inlineCodeRe, '<code style="background:var(--border);padding:1px 4px;border-radius:2px">$1</code>');
     // Images before links: ![alt](url) — else the link regex below eats the alt-text form.
     // Two layers of backslash-eating: the outer TS template literal halves
     // them once, then the inner JS string literal halves again. Need FOUR
@@ -2383,11 +2386,11 @@ function showNoteContent(slug) {
     text = text.replace(new RegExp('[*][*](.+?)[*][*]', 'g'), '<strong>$1</strong>');
     text = text.replace(new RegExp('(^|[^*])\\\\*([^*\\\\n]+)\\\\*', 'g'), '$1<em>$2</em>');
     text = text.replace(new RegExp('^> ?(.+)$', 'gm'), '<blockquote style="border-left:3px solid #7c83ff;padding-left:10px;color:#a0a0b0;margin:8px 0;font-style:italic">$1</blockquote>');
-    text = text.replace(new RegExp('^---+$', 'gm'), '<hr style="border:none;border-top:1px solid #2a2a3e;margin:12px 0">');
+    text = text.replace(new RegExp('^---+$', 'gm'), '<hr style="border:none;border-top:1px solid var(--border);margin:12px 0">');
     text = text.replace(/^- (.+)$/gm, '<li>$1</li>');
     text = text.replace(new RegExp('\\n\\n', 'g'), '<br><br>');
     container.innerHTML = '<span class="suggestion" onclick="renderTabContent()" style="font-size:11px;cursor:pointer;margin-bottom:8px;display:inline-block">&larr; Back</span>' +
-      '<h2 style="font-size:15px;color:#7c83ff;margin:8px 0 10px 0;border-bottom:1px solid #2a2a3e;padding-bottom:6px">' + esc(noteTitle) + '</h2>' +
+      '<h2 style="font-size:15px;color:#7c83ff;margin:8px 0 10px 0;border-bottom:1px solid var(--border);padding-bottom:6px">' + esc(noteTitle) + '</h2>' +
       '<div style="font-size:13px;line-height:1.5">' + text + '</div>';
   });
 }

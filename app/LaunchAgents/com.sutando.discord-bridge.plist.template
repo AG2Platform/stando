@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.sutando.discord-bridge</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{PYTHON_BIN}}</string>
+        <string>{{REPO_DIR}}/src/discord-bridge.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{REPO_DIR}}</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SUTANDO_HOME</key>
+        <string>{{SUTANDO_HOME}}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/discord-bridge.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/discord-bridge.log</string>
+
+    <!-- Only run while the token file exists. The bridge reads the token
+         from ~/.claude/channels/discord/.env and exits(1) when it's
+         missing; gating on PathState avoids a crash-loop on a clean
+         install where the user hasn't configured a token yet. Settings →
+         Channels writes that file on save. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>PathState</key>
+        <dict>
+            <key>{{HOME}}/.claude/channels/discord/.env</key>
+            <true/>
+        </dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

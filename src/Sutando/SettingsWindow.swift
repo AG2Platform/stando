@@ -121,14 +121,69 @@ enum SettingsField: String, CaseIterable {
     }
 }
 
+/// Channel-bot configuration. Each row pairs a desktop launchd service
+/// (com.sutando.<id>-bridge) with a per-channel env file at
+/// ~/.claude/channels/<id>/.env. The launchd plist is PathState-gated
+/// on that file, so the lifecycle is "save token → file appears →
+/// bridge starts" without any extra wiring.
+struct ChannelConfig {
+    let id: String              // "discord" | "telegram"
+    let displayName: String
+    let envKey: String          // "DISCORD_BOT_TOKEN" | "TELEGRAM_BOT_TOKEN"
+    let helpURL: URL?
+    let helpText: String
+    let launchdLabel: String
+
+    var envPath: String {
+        NSHomeDirectory() + "/.claude/channels/\(id)/.env"
+    }
+
+    static let discord = ChannelConfig(
+        id: "discord",
+        displayName: "Discord",
+        envKey: "DISCORD_BOT_TOKEN",
+        helpURL: URL(string: "https://discord.com/developers/applications"),
+        helpText: "Create an app in Discord's developer portal, add a bot, copy the token here.",
+        launchdLabel: "com.sutando.discord-bridge"
+    )
+
+    static let telegram = ChannelConfig(
+        id: "telegram",
+        displayName: "Telegram",
+        envKey: "TELEGRAM_BOT_TOKEN",
+        helpURL: URL(string: "https://t.me/BotFather"),
+        helpText: "Message @BotFather on Telegram → /newbot → copy the HTTP API token here.",
+        launchdLabel: "com.sutando.telegram-bridge"
+    )
+
+    static let all: [ChannelConfig] = [.discord, .telegram]
+}
+
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var fieldEditors: [SettingsField: NSTextField] = [:]
+    private var channelEditors: [String: NSSecureTextField] = [:]
+    private var channelStatusLabels: [String: NSTextField] = [:]
     private var permissionStatusLabels: [SystemPermission: NSTextField] = [:]
     private var cloudStatusLabel: NSTextField?
     private var cloudActionButton: NSButton?
     private var advancedDisclosure: NSButton?
     private var advancedContainer: NSView?
     private var statusBanner: NSTextField?
+    /// Top-level NSScrollView built by buildUI(). Owned by the controller —
+    /// either remains in `window.contentView` (legacy standalone-window
+    /// mode) or is re-parented into the unified main window's content
+    /// pane (see `adoptedContentView()`). Either way, state and observers
+    /// live on the controller; the view tree is just rendered surface.
+    private var paneScrollView: NSScrollView?
+    /// True once `adoptedContentView()` has moved paneScrollView out of
+    /// the controller's standalone window. After adoption we hide the
+    /// in-pane Close button + duplicate hero title (the unified window
+    /// has its own dismiss affordance + wordmark — duplicating them
+    /// inside the Settings pane looks cluttered).
+    private var hasBeenAdopted = false
+    private weak var closeButton: NSButton?
+    private weak var heroTitleLabel: NSTextField?
+    private weak var heroSubtitleLabel: NSTextField?
     // Plan + usage panel — populated from GET /api/me. Rebuilt on every
     // refresh tick (cheap: 5–7 small subviews) so the user sees fresh
     // wallet balance + caps without restarting Settings.
@@ -191,6 +246,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         scrollView.autoresizingMask = [.width, .height]
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
+        // Match the unified window's cloud palette. Without this the
+        // scrollView falls back to NSColor.controlBackgroundColor (system
+        // mid-gray) which clashes against the sidebar's neutral-950.
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = Theme.pageBackground
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -199,10 +259,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         stack.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 24, right: 28)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        // Header
-        let title = NSTextField(labelWithString: "Sutando")
+        // Header — hidden when adopted into the unified main window
+        // (which already shows a "Sutando" wordmark in the sidebar).
+        let title = NSTextField(labelWithString: "Settings")
         title.font = .systemFont(ofSize: 22, weight: .semibold)
         stack.addArrangedSubview(title)
+        heroTitleLabel = title
 
         let subtitle = NSTextField(labelWithString: "Add your API key and Sutando is ready to use. Everything below is optional.")
         subtitle.font = .systemFont(ofSize: 13)
@@ -210,6 +272,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         subtitle.maximumNumberOfLines = 2
         subtitle.lineBreakMode = .byWordWrapping
         stack.addArrangedSubview(subtitle)
+        heroSubtitleLabel = subtitle
 
         // Status banner (hidden until there's something to say)
         let banner = NSTextField(labelWithString: "")
@@ -264,6 +327,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         advancedContainer = advancedStack
         stack.addArrangedSubview(advancedStack)
 
+        // Channels — Discord + Telegram bot tokens. Bridges live in
+        // src/{discord,telegram}-bridge.py and pick the token up from
+        // ~/.claude/channels/<name>/.env. The launchd plists for both
+        // bridges are PathState-gated on those files, so writing a
+        // token here causes launchd to start the bridge automatically;
+        // clearing the token (we delete the file) stops it.
+        stack.addArrangedSubview(sectionHeader("Channels"))
+        for channel in ChannelConfig.all {
+            stack.addArrangedSubview(channelRow(channel))
+        }
+
         // Claude Code (prereq for the core-agent service)
         stack.addArrangedSubview(sectionHeader("Claude Code"))
         stack.addArrangedSubview(claudeCodeRow())
@@ -305,6 +379,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         footer.addArrangedSubview(spacer)
         let cancel = NSButton(title: "Close", target: self, action: #selector(closeWindow))
         cancel.bezelStyle = .rounded
+        closeButton = cancel
         let save = NSButton(title: "Save", target: self, action: #selector(saveSettings))
         save.bezelStyle = .rounded
         save.keyEquivalent = "\r"
@@ -324,16 +399,41 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         ])
         scrollView.documentView = documentView
         window.contentView!.addSubview(scrollView)
+        paneScrollView = scrollView
+    }
+
+    /// Re-parent the Settings content out of the standalone window into
+    /// a caller-supplied container (the unified main window's content
+    /// pane). One-way move — the controller's own window stays empty
+    /// afterwards. Idempotent; calling twice returns the same view.
+    func adoptedContentView() -> NSView {
+        guard let sv = paneScrollView else { return NSView() }
+        sv.removeFromSuperview()
+        sv.autoresizingMask = []
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        if !hasBeenAdopted {
+            hasBeenAdopted = true
+            // Hide the bottom "Close" button + the redundant hero text.
+            // The unified window provides both dismiss + wordmark; an
+            // adopted pane keeping them in-flow looks cluttered.
+            closeButton?.isHidden = true
+            heroTitleLabel?.isHidden = true
+            heroSubtitleLabel?.isHidden = true
+        }
+        return sv
     }
 
     private func sectionHeader(_ title: String) -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 4
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .secondaryLabelColor
+        // Cloud-style header: uppercase, tracked, tertiary-label color.
+        // Matches the dashboard's `text-xs uppercase tracking-wider
+        // text-neutral-500` headers.
+        let label = NSTextField(labelWithString: title.uppercased())
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.tertiaryLabelColor,
+            .kern: 1.2,
+        ]
+        label.attributedStringValue = NSAttributedString(string: title.uppercased(), attributes: attrs)
         let wrap = NSStackView()
         wrap.orientation = .vertical
         wrap.spacing = 6
@@ -642,6 +742,62 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             hint.textColor = .secondaryLabelColor
             row.addArrangedSubview(hint)
         }
+        return row
+    }
+
+    /// Channel-bot token row. Visually parallels `fieldRow` but persists
+    /// to ~/.claude/channels/<id>/.env (not $SUTANDO_HOME/.env), and
+    /// shows a live "running" / "not configured" indicator pulled from
+    /// the corresponding launchd label.
+    private func channelRow(_ channel: ChannelConfig) -> NSView {
+        let row = NSStackView()
+        row.orientation = .vertical
+        row.alignment = .leading
+        row.spacing = 4
+
+        let labelRow = NSStackView()
+        labelRow.orientation = .horizontal
+        labelRow.spacing = 8
+        labelRow.alignment = .firstBaseline
+
+        let label = NSTextField(labelWithString: "\(channel.displayName) bot token")
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        labelRow.addArrangedSubview(label)
+
+        let status = NSTextField(labelWithString: "")
+        status.font = .systemFont(ofSize: 11)
+        status.textColor = .secondaryLabelColor
+        channelStatusLabels[channel.id] = status
+        labelRow.addArrangedSubview(status)
+
+        if let url = channel.helpURL {
+            let spacer = NSView()
+            spacer.translatesAutoresizingMaskIntoConstraints = false
+            labelRow.addArrangedSubview(spacer)
+            let link = NSButton()
+            link.title = "Get token →"
+            link.bezelStyle = .recessed
+            link.font = .systemFont(ofSize: 11)
+            link.target = self
+            link.action = #selector(openHelpLink(_:))
+            link.identifier = NSUserInterfaceItemIdentifier(url.absoluteString)
+            labelRow.addArrangedSubview(link)
+        }
+        row.addArrangedSubview(labelRow)
+
+        let editor = NSSecureTextField()
+        editor.placeholderString = "stored at ~/.claude/channels/\(channel.id)/.env (mode 0600)"
+        editor.translatesAutoresizingMaskIntoConstraints = false
+        editor.widthAnchor.constraint(equalToConstant: 504).isActive = true
+        row.addArrangedSubview(editor)
+        channelEditors[channel.id] = editor
+
+        let hint = NSTextField(labelWithString: channel.helpText)
+        hint.font = .systemFont(ofSize: 11)
+        hint.textColor = .secondaryLabelColor
+        hint.maximumNumberOfLines = 2
+        hint.lineBreakMode = .byWordWrapping
+        row.addArrangedSubview(hint)
         return row
     }
 
@@ -1081,9 +1237,66 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 emitOnboardingOnce("gemini_key_set")
             }
             emitOnboardingOnce("firstrun_complete")
-            showBanner("Saved. Background services will pick up the new settings on next restart.", color: .systemGreen)
+
+            // Channel tokens — separate per-channel env files.
+            let channelChanges = saveChannelTokens()
+            if !channelChanges.isEmpty {
+                kickstartChannelBridges(channelChanges)
+                showBanner("Saved. Channel bridges (\(channelChanges.joined(separator: ", "))) restarting.", color: .systemGreen)
+            } else {
+                showBanner("Saved. Background services will pick up the new settings on next restart.", color: .systemGreen)
+            }
         } catch {
             showBanner("Failed to save: \(error.localizedDescription)", color: .systemRed)
+        }
+    }
+
+    /// Persist Discord/Telegram tokens to ~/.claude/channels/<id>/.env.
+    /// Empty editor → file is removed entirely (so the launchd PathState
+    /// gate stops the bridge). Returns the channel IDs that actually
+    /// changed so the caller can kickstart only those bridges.
+    private func saveChannelTokens() -> [String] {
+        var changed: [String] = []
+        for channel in ChannelConfig.all {
+            guard let editor = channelEditors[channel.id] else { continue }
+            let newValue = editor.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            var env = EnvFile.at(channel.envPath)
+            let oldValue = env.value(for: channel.envKey) ?? ""
+            if newValue == oldValue { continue }
+
+            if newValue.isEmpty {
+                // Drop the whole file so launchd's PathState gate stops
+                // the bridge. Leaving an empty KEY= behind would keep the
+                // file present, which would crash-loop the bridge.
+                try? FileManager.default.removeItem(atPath: channel.envPath)
+            } else {
+                env.set(channel.envKey, newValue)
+                do {
+                    try env.write(to: channel.envPath, mode: 0o600)
+                } catch {
+                    NSLog("saveChannelTokens: failed to write \(channel.envPath): \(error)")
+                    continue
+                }
+            }
+            changed.append(channel.displayName)
+        }
+        return changed
+    }
+
+    /// Re-bootstrap the affected channel-bridge launchd jobs so they
+    /// pick up the new token without a full app restart. `kickstart -k`
+    /// kills any running instance first; combined with the PathState
+    /// gate this also handles "token cleared → bridge stops".
+    private func kickstartChannelBridges(_ changedDisplayNames: [String]) {
+        let uid = String(getuid())
+        for channel in ChannelConfig.all where changedDisplayNames.contains(channel.displayName) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            proc.arguments = ["kickstart", "-k", "gui/\(uid)/\(channel.launchdLabel)"]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            try? proc.run()
+            proc.waitUntilExit()
         }
     }
 
@@ -1296,6 +1509,39 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         for field in SettingsField.allCases {
             fieldEditors[field]?.stringValue = env.value(for: field.rawValue) ?? ""
         }
+        loadChannelTokensFromDisk()
+        refreshChannelStatusUI()
+    }
+
+    private func loadChannelTokensFromDisk() {
+        for channel in ChannelConfig.all {
+            let env = EnvFile.at(channel.envPath)
+            channelEditors[channel.id]?.stringValue = env.value(for: channel.envKey) ?? ""
+        }
+    }
+
+    /// Update the "Running" / "Not configured" hint next to each channel
+    /// label. Cheap — just two `launchctl print` invocations plus two
+    /// file-exists checks. Called from `refreshServicesUI` so it ticks
+    /// every 1.5s while Settings is open.
+    private func refreshChannelStatusUI() {
+        let loaded = Set(LaunchAgentInstaller().loadedLabels())
+        for channel in ChannelConfig.all {
+            guard let label = channelStatusLabels[channel.id] else { continue }
+            let tokenFileExists = FileManager.default.fileExists(atPath: channel.envPath)
+            let isRunning = loaded.contains(channel.launchdLabel)
+            switch (tokenFileExists, isRunning) {
+            case (false, _):
+                label.stringValue = "· not configured"
+                label.textColor = .secondaryLabelColor
+            case (true, true):
+                label.stringValue = "· running"
+                label.textColor = .systemGreen
+            case (true, false):
+                label.stringValue = "· not running (check logs)"
+                label.textColor = .systemOrange
+            }
+        }
     }
 
     private func startStatusPolling() {
@@ -1323,6 +1569,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             self.refreshCLIDelegateUI(.gemini)
             self.refreshStepperUI()
             self.refreshServicesUI()
+            self.refreshChannelStatusUI()
             // refreshTierPanel throttles internally to ~15s — safe to
             // call from the 1.5s tick.
             self.refreshTierPanel()

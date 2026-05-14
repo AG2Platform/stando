@@ -97,6 +97,7 @@ class LaunchAgentInstaller {
         let npxBin = bundleOrSystem("npx", systemFallbacks: ["/opt/homebrew/bin/npx", "/usr/local/bin/npx"])
         let tsxBin = bundleOrSystem("tsx", systemFallbacks: ["/opt/homebrew/bin/tsx", "/usr/local/bin/tsx"])
         let pythonBin = bundleOrSystem("python3", systemFallbacks: ["/opt/homebrew/bin/python3", "/usr/local/bin/python3", "/usr/bin/python3"])
+        let tmuxBin = bundleOrSystem("tmux", systemFallbacks: ["/opt/homebrew/bin/tmux", "/usr/local/bin/tmux", "/usr/bin/tmux"])
         let nodeBinDir = (nodeBin as NSString).deletingLastPathComponent
         let logDir = p.sutandoHome + "/logs"
         return [
@@ -106,8 +107,14 @@ class LaunchAgentInstaller {
             "{{TSX_BIN}}": tsxBin,
             "{{NODE_BIN_DIR}}": nodeBinDir,
             "{{PYTHON_BIN}}": pythonBin,
+            "{{TMUX_BIN}}": tmuxBin,
             "{{SUTANDO_HOME}}": p.sutandoHome,
             "{{LOG_DIR}}": logDir,
+            // For PathState-gated KeepAlive (discord/telegram bridges
+            // wait on ~/.claude/channels/<name>/.env before running).
+            // launchd doesn't expand $HOME inside plist values, so we
+            // resolve it at install time.
+            "{{HOME}}": NSHomeDirectory(),
         ]
     }
 

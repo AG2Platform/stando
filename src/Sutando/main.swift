@@ -97,6 +97,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// path that opened these in Chrome — see WebWindow.swift for why.
     var voiceWindow: WebWindowController?
     var dashboardWindow: WebWindowController?
+    /// Unified main window (sidebar + Conversation / Dashboard / Settings).
+    /// Created lazily on first menu invocation; `openWebUI`, `openDashboard`,
+    /// `openSettings` all route here now. The legacy single-purpose windows
+    /// above are kept available but no menu path opens them in 0.2.9+.
+    var unifiedWindow: UnifiedMainWindowController?
 
     /// Fixed tmux socket path for the sutando-core session. The shell
     /// (via startup.sh -S flag) and the app (launched by macOS with a
@@ -155,15 +160,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             registerURLSchemeHandler()
             startCloudHeartbeat()
             observeCloudAuthSignIn()
+            observeCloudAuthRevoked()
             logToFile("App started, workspace=\(workspace)")
-            // Services start *with* the app and stop when it quits.
-            // Bootstrap unconditionally on launch — idempotent via
-            // bootout-before-bootstrap. Web UI opens once services are
-            // up (WebWindowController retries the URL for ~30s, so the
-            // cold-start race is handled there).
-            autoBootstrapServices()
-            maybeRunFirstLaunchFlow()
-            scheduleAutoOpenWebUI()
+            // Services are bound to a signed-in cloud account. Skip
+            // bootstrap when no auth is present and route the user to
+            // the sign-in flow immediately. Without this gate, the
+            // app would happily run all 8 launchd services for a user
+            // we can't bill, observe, or push updates to. After the
+            // sutando://auth callback fires, observeCloudAuthSignIn()
+            // picks up the rest of startup (bootstrap + open WebUI).
+            if CloudAuth.shared.isSignedIn {
+                autoBootstrapServices()
+                // On first launch we open Settings (no Gemini key yet);
+                // otherwise we jump straight to Conversation. Running
+                // both would flash Settings → Conversation in 1.5s.
+                if SettingsWindowController.needsFirstLaunchSetup {
+                    maybeRunFirstLaunchFlow()
+                } else {
+                    scheduleAutoOpenWebUI()
+                }
+            } else {
+                logToFile("Not signed in — services held, opening sign-in flow")
+                cloudSignIn()
+            }
         }
     }
 
@@ -222,16 +241,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Subscribe to the sign-in notification CloudAuth posts after a
-    /// successful sutando:// callback. Used to kick off one-shot setup
-    /// work — currently just a memory hydrate so a fresh Mac restores
-    /// from cloud backup before the agent boots.
+    /// successful sutando:// callback. Used to:
+    ///   - hydrate memory from cloud backup (idempotent — skips when
+    ///     the local memory dir is non-empty)
+    ///   - bootstrap launchd services (gated off at launch when the
+    ///     user wasn't signed in yet)
+    ///   - open the voice WebView so the user lands in the running
+    ///     state without an extra menu click
+    /// Idempotent — observers can be re-entered if the user signs out
+    /// and signs back in within the same app session.
     private func observeCloudAuthSignIn() {
         NotificationCenter.default.addObserver(
             forName: .cloudAuthDidSignIn,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.runMemoryHydrate()
+            guard let self = self else { return }
+            self.runMemoryHydrate()
+            self.autoBootstrapServices()
+            // Mutually exclusive: first-launch users land in Settings;
+            // returning users land in Conversation.
+            if SettingsWindowController.needsFirstLaunchSetup {
+                self.maybeRunFirstLaunchFlow()
+            } else {
+                self.scheduleAutoOpenWebUI()
+            }
+        }
+    }
+
+    /// CloudAuth posts `.cloudAuthRevoked` when a heartbeat returns 401
+    /// (token revoked server-side or session expired). React the same
+    /// way as a manual sign-out: stop + uninstall every launchd service
+    /// and quit. The user has to re-sign-in next launch.
+    private func observeCloudAuthRevoked() {
+        NotificationCenter.default.addObserver(
+            forName: .cloudAuthRevoked,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.notify("Sutando", "Session expired — please sign in again.")
+            self?.performSignOutAndQuit(reason: "auth-revoked")
         }
     }
 
@@ -310,6 +359,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
         editMenuItem.submenu = editMenu
         mainMenu.addItem(editMenuItem)
+
+        // View menu — Cmd+R force-reloads the active pane in the unified
+        // window. Needed after we push new web-client.ts / dashboard.py
+        // styles (or any code that changes the served HTML); WKWebView
+        // otherwise sticks to the previously-cached page even after the
+        // backing service has restarted.
+        let viewMenuItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        let reloadItem = NSMenuItem(title: "Reload Active Pane", action: #selector(reloadActivePane), keyEquivalent: "r")
+        reloadItem.target = self
+        viewMenu.addItem(reloadItem)
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
 
         // Window menu — provides standard window operations.
         let windowMenuItem = NSMenuItem()
@@ -392,16 +454,43 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func cloudSignOut() {
+        let alert = NSAlert()
+        alert.messageText = "Sign out of Sutando?"
+        alert.informativeText = "Signing out stops all background services (voice, phone, dashboard, core agent) and quits Sutando. You'll need to sign in again the next time you launch the app."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Sign out and quit")
+        alert.addButton(withTitle: "Cancel")
+        // Make sure the alert can take focus from the menu-bar app.
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else { return }
+        performSignOutAndQuit(reason: "user")
+    }
+
+    /// Tear down launchd services + clear cloud credentials + quit. Used
+    /// by both the menu Sign Out action (after user confirms) and the
+    /// auth-revoked notification (silent — token's already dead). Safe
+    /// to call multiple times: uninstall() and signOut() are both
+    /// idempotent.
+    func performSignOutAndQuit(reason: String) {
+        logToFile("performSignOutAndQuit: reason=\(reason)")
+        let installer = LaunchAgentInstaller()
+        let removed = installer.uninstall()
+        logToFile("performSignOutAndQuit: uninstalled \(removed.joined(separator: ", "))")
         CloudAuth.shared.signOut()
-        updateCloudMenuItems()
-        notify("Sutando", "Signed out of cloud account.")
+        // Give the notification a moment to surface before we terminate.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NSApp.terminate(nil)
+        }
     }
 
     @objc func openSettings() {
-        if settingsWindow == nil {
-            settingsWindow = SettingsWindowController(appDelegate: self)
-        }
-        settingsWindow?.showAndFocus()
+        // Route Settings into the unified window's Settings pane. The
+        // standalone SettingsWindowController is still constructed
+        // (its content view is adopted into the pane), but its own
+        // window is never shown — see SettingsWindowController.
+        // adoptedContentView().
+        openUnifiedWindow(pane: .settings)
     }
 
     /// Open the native feedback form. Used by the ⌃⇧F global hotkey and
@@ -518,9 +607,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem(title: "\(label) (\(glyph))", action: sel, keyEquivalent: ""))
         }
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Open Web UI", action: #selector(openWebUI), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Open Core CLI", action: #selector(openCore), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Open Dashboard", action: #selector(openDashboard), keyEquivalent: ""))
+        // Single entry point — the unified window has Conversation /
+        // Dashboard / Core CLI / Settings as tabs. Previous per-pane menu
+        // items (Open Web UI / Open Core CLI / Open Dashboard) were
+        // collapsed into this one when the sidebar shipped.
+        menu.addItem(NSMenuItem(title: "Open Sutando", action: #selector(openWebUI), keyEquivalent: ""))
         menu.addItem(NSMenuItem.separator())
         // Three-mode radio: Active / Meeting / Presenter. Exactly one has
         // ● at a time (the current composite mode). Clicking switches.
@@ -1756,49 +1847,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openWebUI() {
         NSLog("Sutando: openWebUI called")
-        if voiceWindow == nil {
-            let url = URL(string: "http://localhost:8080")!
-            voiceWindow = WebWindowController(
-                title: "Sutando — Voice",
-                url: url,
-                allowMedia: true,
-                autosaveName: "SutandoVoiceWindow",
-                contentSize: NSSize(width: 1100, height: 720)
-            )
+        openUnifiedWindow(pane: .conversation)
+    }
+
+    /// Show the unified main window with a specific pane selected.
+    /// All three menu items (Open Web UI / Open Dashboard / Settings…)
+    /// route here so the user only ever sees one main window.
+    func openUnifiedWindow(pane: UnifiedPane) {
+        if unifiedWindow == nil {
+            unifiedWindow = UnifiedMainWindowController(appDelegate: self)
         }
-        voiceWindow?.showAndFocus()
+        unifiedWindow?.showAndFocus(pane: pane)
+    }
+
+    /// Cmd+R from the View menu. Forwards to the unified window which
+    /// reloads whichever WebView is currently active.
+    @objc func reloadActivePane(_ sender: Any?) {
+        unifiedWindow?.reloadActivePane(sender)
     }
 
     @objc func openCore() {
-        // Activate Terminal running Claude Code
-        let script = NSAppleScript(source: """
-        tell application "Terminal"
-            activate
-            -- Find the window running claude
-            repeat with w in windows
-                if name of w contains "claude" or name of w contains "sutando" then
-                    set index of w to 1
-                    exit repeat
-                end if
-            end repeat
-        end tell
-        """)
-        script?.executeAndReturnError(nil)
+        // The core-agent runs detached under launchd. Its Claude Code TUI
+        // lives inside a tmux session on /tmp/sutando-tmux.sock named
+        // "sutando-core". We attach to that session inside the unified
+        // window via the Core CLI pane — a WKWebView pointed at
+        // localhost:7847, served by `src/terminal-server.ts`, which
+        // bridges xterm.js ↔ a PTY running `tmux attach -t sutando-core`.
+        // The previous AppleScript-driven Terminal.app fallback shipped
+        // a fresh shell when tmux wasn't on the user's GUI PATH; that
+        // bug goes away once everything is in-app.
+        openUnifiedWindow(pane: .cli)
     }
 
     @objc func openDashboard() {
         NSLog("Sutando: openDashboard called")
-        if dashboardWindow == nil {
-            let url = URL(string: "http://localhost:7844")!
-            dashboardWindow = WebWindowController(
-                title: "Sutando — Dashboard",
-                url: url,
-                allowMedia: false,
-                autosaveName: "SutandoDashboardWindow",
-                contentSize: NSSize(width: 1100, height: 720)
-            )
-        }
-        dashboardWindow?.showAndFocus()
+        openUnifiedWindow(pane: .dashboard)
     }
 
     // MARK: - Helpers

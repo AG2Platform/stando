@@ -19,7 +19,7 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>0.2.9</string>
     <key>CFBundleVersion</key>
     <string>1</string>
 
@@ -74,6 +74,14 @@
     <integer>3600</integer>
     <key>SUEnableInstallerLauncherService</key>
     <true/>
+
+    <!-- Cloud control plane URL. Baked at build time; CloudAuth reads this
+         first. Override only when building a staging .app — production
+         packaged builds should always point at sutando.ag2.ai. The
+         SUTANDO_CLOUD_URL env var is ignored when running as a packaged
+         .app (see CloudAuth.swift apiBaseURL). -->
+    <key>SutandoCloudURL</key>
+    <string>https://sutando.ag2.ai</string>
 
     <!-- Custom URL scheme for cloud-account login callback. -->
     <key>CFBundleURLTypes</key>

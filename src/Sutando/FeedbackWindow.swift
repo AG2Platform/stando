@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 // Native feedback form. Opened by:
 //   * ⌃⇧F global hotkey (main.swift defaultHotkeys)
@@ -42,9 +43,21 @@ private func _loadFeedbackAuth() -> _FeedbackAuth? {
     return try? JSONDecoder().decode(_FeedbackAuth.self, from: data)
 }
 
+/// Up to 3 image attachments, ~1MB each (the cloud /api/feedback route
+/// caps the base64 dataB64 field at 1.5MB).
+private let _maxAttachments = 3
+private let _maxAttachmentRawBytes = 1_000_000
+private let _supportedAttachmentMimes: Set<String> = ["image/png", "image/jpeg", "image/gif", "image/webp"]
+
+private struct FeedbackAttachment {
+    let name: String
+    let mime: String
+    let data: Data
+}
+
 final class FeedbackWindowController: NSWindowController, NSWindowDelegate {
     private var titleField: NSTextField!
-    private var bodyField: NSTextView!
+    private var bodyField: PasteAwareTextView!
     private var kindPopup: NSPopUpButton!
     private var severityPopup: NSPopUpButton!
     private var includeScreenCheck: NSButton!
@@ -53,10 +66,15 @@ final class FeedbackWindowController: NSWindowController, NSWindowDelegate {
     private var cancelButton: NSButton!
     private var initialBodyValue: String
 
+    private var attachments: [FeedbackAttachment] = []
+    private var attachmentsStack: NSStackView!
+    private var attachmentsRow: NSView!
+    private var attachButton: NSButton!
+
     init(initialBody: String) {
         self.initialBodyValue = initialBody
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 520),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -134,20 +152,53 @@ final class FeedbackWindowController: NSWindowController, NSWindowDelegate {
         bodyScroll.translatesAutoresizingMaskIntoConstraints = false
         bodyScroll.hasVerticalScroller = true
         bodyScroll.borderType = .lineBorder
-        bodyField = NSTextView(frame: NSRect(x: 0, y: 0, width: 472, height: 140))
+        bodyField = PasteAwareTextView(frame: NSRect(x: 0, y: 0, width: 472, height: 140))
         bodyField.font = .systemFont(ofSize: 12)
         bodyField.isEditable = true
         bodyField.isRichText = false
         bodyField.autoresizingMask = [.width]
         bodyField.allowsUndo = true
+        bodyField.feedbackController = self
         if !initialBodyValue.isEmpty { bodyField.string = initialBodyValue }
         bodyScroll.documentView = bodyField
         bodyScroll.widthAnchor.constraint(equalToConstant: 472).isActive = true
         bodyScroll.heightAnchor.constraint(equalToConstant: 140).isActive = true
         stack.addArrangedSubview(bodyScroll)
 
+        // Attachments row: a thumbnail strip + an "Attach images" button.
+        // Paste of an image inside the body field is also captured (see
+        // PasteAwareTextView below). Tip text mirrors the cloud form.
+        let attachHeader = NSStackView()
+        attachHeader.orientation = .horizontal
+        attachHeader.spacing = 8
+
+        let attachLabel = NSTextField(labelWithString: "Screenshots (optional, max \(_maxAttachments))")
+        attachLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        attachLabel.textColor = .secondaryLabelColor
+        attachHeader.addArrangedSubview(attachLabel)
+
+        attachButton = NSButton(title: "Attach images", target: self, action: #selector(pickAttachments))
+        attachButton.bezelStyle = .inline
+        attachButton.controlSize = .small
+        attachButton.font = .systemFont(ofSize: 11)
+        attachHeader.addArrangedSubview(attachButton)
+        stack.addArrangedSubview(attachHeader)
+
+        attachmentsStack = NSStackView()
+        attachmentsStack.orientation = .horizontal
+        attachmentsStack.spacing = 6
+        attachmentsStack.alignment = .top
+        attachmentsRow = attachmentsStack
+        stack.addArrangedSubview(attachmentsStack)
+
+        let attachTip = NSTextField(labelWithString: "Paste a screenshot into Details (⌘V) or click Attach images. PNG / JPEG / GIF / WebP, up to 1MB each.")
+        attachTip.font = .systemFont(ofSize: 10)
+        attachTip.textColor = .tertiaryLabelColor
+        attachTip.maximumNumberOfLines = 2
+        stack.addArrangedSubview(attachTip)
+
         includeScreenCheck = NSButton(
-            checkboxWithTitle: "Attach a screenshot of the current screen",
+            checkboxWithTitle: "Also attach a screenshot of the current screen",
             target: nil,
             action: nil
         )
@@ -224,6 +275,7 @@ final class FeedbackWindowController: NSWindowController, NSWindowDelegate {
         }
 
         // Async helper closure: optionally capture screen, then POST.
+        let attachmentsSnapshot = attachments
         let postWith: ([String: Any]) -> Void = { [weak self] ctxFinal in
             var body: [String: Any] = [
                 "kind": kind,
@@ -234,6 +286,15 @@ final class FeedbackWindowController: NSWindowController, NSWindowDelegate {
             ]
             if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
                 body["appVersion"] = version
+            }
+            if !attachmentsSnapshot.isEmpty {
+                body["attachments"] = attachmentsSnapshot.map { att -> [String: Any] in
+                    [
+                        "name": att.name,
+                        "mime": att.mime,
+                        "dataB64": att.data.base64EncodedString(),
+                    ]
+                }
             }
             guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
                 DispatchQueue.main.async { self?.setStatus("Failed to encode payload.", error: true) }
@@ -287,6 +348,104 @@ final class FeedbackWindowController: NSWindowController, NSWindowDelegate {
         statusLabel.textColor = error ? .systemRed : .secondaryLabelColor
     }
 
+    // MARK: - Attachments
+
+    /// Called by PasteAwareTextView when the user pastes image data into
+    /// the body field. Also invoked by the Attach images button.
+    func addImageData(_ data: Data, suggestedName: String, mime: String) {
+        if attachments.count >= _maxAttachments {
+            setStatus("Max \(_maxAttachments) attachments reached.", error: true)
+            return
+        }
+        if data.count > _maxAttachmentRawBytes {
+            setStatus("\"\(suggestedName)\" is over 1MB — please resize before attaching.", error: true)
+            return
+        }
+        guard _supportedAttachmentMimes.contains(mime) else {
+            setStatus("Unsupported image type: \(mime).", error: true)
+            return
+        }
+        attachments.append(FeedbackAttachment(name: suggestedName, mime: mime, data: data))
+        rebuildAttachmentThumbnails()
+        setStatus("", error: false)
+    }
+
+    @objc private func pickAttachments() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.png, .jpeg, .gif, .webP]
+        panel.prompt = "Attach"
+        if panel.runModal() == .OK {
+            for url in panel.urls {
+                guard let data = try? Data(contentsOf: url) else { continue }
+                let ext = url.pathExtension.lowercased()
+                let mime: String
+                switch ext {
+                case "png": mime = "image/png"
+                case "jpg", "jpeg": mime = "image/jpeg"
+                case "gif": mime = "image/gif"
+                case "webp": mime = "image/webp"
+                default: continue
+                }
+                addImageData(data, suggestedName: url.lastPathComponent, mime: mime)
+            }
+        }
+    }
+
+    @objc fileprivate func removeAttachment(_ sender: NSButton) {
+        let idx = sender.tag
+        guard idx >= 0 && idx < attachments.count else { return }
+        attachments.remove(at: idx)
+        rebuildAttachmentThumbnails()
+    }
+
+    private func rebuildAttachmentThumbnails() {
+        // Clear existing arranged subviews.
+        for v in attachmentsStack.arrangedSubviews { v.removeFromSuperview() }
+
+        for (i, att) in attachments.enumerated() {
+            let container = NSView()
+            container.translatesAutoresizingMaskIntoConstraints = false
+            container.widthAnchor.constraint(equalToConstant: 78).isActive = true
+            container.heightAnchor.constraint(equalToConstant: 64).isActive = true
+
+            let thumb = NSImageView()
+            thumb.translatesAutoresizingMaskIntoConstraints = false
+            thumb.image = NSImage(data: att.data)
+            thumb.imageScaling = .scaleProportionallyUpOrDown
+            thumb.wantsLayer = true
+            thumb.layer?.cornerRadius = 4
+            thumb.layer?.borderWidth = 1
+            thumb.layer?.borderColor = NSColor.separatorColor.cgColor
+            thumb.layer?.masksToBounds = true
+            container.addSubview(thumb)
+
+            let removeBtn = NSButton(title: "×", target: self, action: #selector(removeAttachment(_:)))
+            removeBtn.tag = i
+            removeBtn.bezelStyle = .circular
+            removeBtn.controlSize = .small
+            removeBtn.font = .systemFont(ofSize: 10, weight: .bold)
+            removeBtn.translatesAutoresizingMaskIntoConstraints = false
+            removeBtn.toolTip = "Remove \(att.name)"
+            container.addSubview(removeBtn)
+
+            NSLayoutConstraint.activate([
+                thumb.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                thumb.topAnchor.constraint(equalTo: container.topAnchor),
+                thumb.widthAnchor.constraint(equalToConstant: 64),
+                thumb.heightAnchor.constraint(equalToConstant: 60),
+                removeBtn.topAnchor.constraint(equalTo: container.topAnchor, constant: -4),
+                removeBtn.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: 0),
+                removeBtn.widthAnchor.constraint(equalToConstant: 18),
+                removeBtn.heightAnchor.constraint(equalToConstant: 18),
+            ])
+            attachmentsStack.addArrangedSubview(container)
+        }
+        attachButton.isEnabled = attachments.count < _maxAttachments
+    }
+
     /// Call the local screen-capture server (started by src/startup.sh) to
     /// snapshot the current screen. Returns the file path on success.
     /// Times out at 3s — feedback flow shouldn't block on a downed server.
@@ -304,5 +463,67 @@ final class FeedbackWindowController: NSWindowController, NSWindowDelegate {
             }
             completion(path)
         }.resume()
+    }
+}
+
+// MARK: - PasteAwareTextView
+
+/// NSTextView that intercepts ⌘V when the pasteboard contains image
+/// data, hands the bytes to the owning FeedbackWindowController as an
+/// attachment, and prevents the default behavior of embedding the
+/// image as an NSTextAttachment inside the body (which we'd then have
+/// to extract and serialize — paste-to-attachments is the simpler flow).
+/// Plain-text paste still works via super.paste.
+final class PasteAwareTextView: NSTextView {
+    weak var feedbackController: FeedbackWindowController?
+
+    override func paste(_ sender: Any?) {
+        if handleImagePaste() { return }
+        super.paste(sender)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        // ⌘V — let NSTextView's own paste menu route us through paste(_:).
+        // We override paste(_:) above, so we don't need to intercept here.
+        return super.performKeyEquivalent(with: event)
+    }
+
+    /// Returns true when image data was found + consumed.
+    private func handleImagePaste() -> Bool {
+        let pb = NSPasteboard.general
+        // Files first — file URLs on the pasteboard usually mean an
+        // image dragged in from Finder.
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            var consumed = false
+            for url in urls {
+                let ext = url.pathExtension.lowercased()
+                let mime: String?
+                switch ext {
+                case "png": mime = "image/png"
+                case "jpg", "jpeg": mime = "image/jpeg"
+                case "gif": mime = "image/gif"
+                case "webp": mime = "image/webp"
+                default: mime = nil
+                }
+                guard let mime = mime, let data = try? Data(contentsOf: url) else { continue }
+                feedbackController?.addImageData(data, suggestedName: url.lastPathComponent, mime: mime)
+                consumed = true
+            }
+            if consumed { return true }
+        }
+        // Raw bitmap (e.g. ⌘⇧⌃4 captured to clipboard).
+        if let tiff = pb.data(forType: .tiff),
+           let bitmap = NSBitmapImageRep(data: tiff) {
+            // Prefer PNG — lossless, what cmd+shift+ctrl+4 produces.
+            if let png = bitmap.representation(using: .png, properties: [:]) {
+                feedbackController?.addImageData(png, suggestedName: "screenshot.png", mime: "image/png")
+                return true
+            }
+        }
+        if let png = pb.data(forType: .png) {
+            feedbackController?.addImageData(png, suggestedName: "screenshot.png", mime: "image/png")
+            return true
+        }
+        return false
     }
 }

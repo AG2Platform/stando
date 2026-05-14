@@ -70,12 +70,25 @@ private func cliLoginPendingFile() -> String { sutandoHome() + "/" + kPendingFil
 private func deviceFile() -> String { sutandoHome() + "/" + kDeviceFilename }
 
 private func apiBaseURL() -> String {
-    if let env = ProcessInfo.processInfo.environment["SUTANDO_CLOUD_URL"], !env.isEmpty {
-        return env
-    }
+    // Resolution order:
+    //   1. Info.plist `SutandoCloudURL` — baked at build time, the
+    //      authoritative source for packaged .app distributions.
+    //   2. `SUTANDO_CLOUD_URL` env var — dev-workflow override; ONLY
+    //      honored when running as a raw binary (no bundle identifier).
+    //      Packaged .app ignores it. Reason: a persistent
+    //      `launchctl setenv SUTANDO_CLOUD_URL http://localhost:3000`
+    //      from a previous dev session silently leaked into production
+    //      sign-ins, sending the .app at /Applications/Sutando.app to
+    //      localhost. We never want that to happen again.
+    //   3. Default — https://sutando.ag2.ai.
     if let plistBase = Bundle.main.object(forInfoDictionaryKey: "SutandoCloudURL") as? String,
        !plistBase.isEmpty {
         return plistBase
+    }
+    let isPackaged = Bundle.main.bundleIdentifier != nil
+    if !isPackaged,
+       let env = ProcessInfo.processInfo.environment["SUTANDO_CLOUD_URL"], !env.isEmpty {
+        return env
     }
     return "https://sutando.ag2.ai"
 }
@@ -180,6 +193,11 @@ extension Notification.Name {
     /// a sutando:// auth callback and persists the new record. Observers
     /// (e.g. memory backup hydrate) can trigger one-shot setup work.
     static let cloudAuthDidSignIn = Notification.Name("CloudAuthDidSignIn")
+
+    /// Posted on the main thread when the server invalidates our token
+    /// (heartbeat 401). AppDelegate observes and treats it the same as
+    /// a manual sign-out: stop services + quit.
+    static let cloudAuthRevoked = Notification.Name("CloudAuthRevoked")
 }
 
 final class CloudAuth {
@@ -192,8 +210,20 @@ final class CloudAuth {
     var isSignedIn: Bool { record() != nil }
 
     /// Read the current auth record (token + userId + machineId + base URL).
+    /// If the stored `apiBase` no longer matches what `apiBaseURL()` resolves
+    /// to (e.g. a previous dev sign-in baked `http://localhost:3000` into
+    /// the file and we've since switched to a packaged build), self-heal by
+    /// rewriting the record. Without this, the user has to manually delete
+    /// `cloud-auth.json` and sign in again every time the env drifts.
     func record() -> CloudAuthRecord? {
-        readJSON(CloudAuthRecord.self, from: cloudAuthFile())
+        guard var rec = readJSON(CloudAuthRecord.self, from: cloudAuthFile()) else { return nil }
+        let expected = apiBaseURL()
+        if rec.apiBase != expected {
+            NSLog("CloudAuth: refreshing stale apiBase \(rec.apiBase) → \(expected)")
+            rec.apiBase = expected
+            _ = writeJSON(rec, to: cloudAuthFile(), mode: 0o600)
+        }
+        return rec
     }
 
     /// Begin a sign-in flow. Generates a fresh challenge, persists it,
@@ -274,8 +304,13 @@ final class CloudAuth {
         req.httpBody = payload
         let task = URLSession.shared.dataTask(with: req) { _, response, error in
             if let http = response as? HTTPURLResponse, http.statusCode == 401 {
-                NSLog("CloudAuth: heartbeat got 401 — token invalid, signing out")
-                self.signOut()
+                NSLog("CloudAuth: heartbeat got 401 — token invalid, notifying app to quit")
+                // Don't sign out here — AppDelegate handles the full
+                // teardown (stop services, clear credentials, quit) so
+                // the cleanup stays in one place.
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: .cloudAuthRevoked, object: nil)
+                }
             } else if let error = error {
                 NSLog("CloudAuth: heartbeat error: \(error.localizedDescription)")
             }
