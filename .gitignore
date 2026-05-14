@@ -1,4 +1,8 @@
 .env
+# Sutando.app runtime artifacts — written by CloudAuth.swift / device-init
+# on first sign-in. cloud-auth.json holds a live sutk_live_… API token.
+cloud-auth.json
+device.json
 PERSONAL_CLAUDE.md
 node_modules/
 dist/
