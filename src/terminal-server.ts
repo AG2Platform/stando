@@ -16,6 +16,7 @@
 
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { existsSync } from 'node:fs';
+import * as path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import * as pty from 'node-pty';
 
@@ -38,6 +39,37 @@ function resolveTmuxBinary(): string {
 		if (existsSync(c)) return c;
 	}
 	return 'tmux';
+}
+
+/// Resolve the terminfo directory for the bundled tmux. The bundled tmux
+/// is compiled against Homebrew ncurses, which bakes
+/// `/opt/homebrew/share/terminfo` as its lookup path. On a fresh Mac
+/// without Homebrew that path doesn't exist, so tmux exits with
+/// "can't find terminfo database" the moment a TERM-using session
+/// starts — which the xterm.js client then auto-reconnects on, producing
+/// the [tmux attach exited: code=1] loop. Mirrors run-core-agent.sh's
+/// resolution: look under the bundled runtime first, then fall back to
+/// system paths.
+function resolveTerminfoDirs(tmuxBin: string): string | undefined {
+	// Explicit override always wins.
+	if (process.env.TERMINFO_DIRS) return process.env.TERMINFO_DIRS;
+
+	const candidates: string[] = [];
+	// 1. Bundled runtime: <runtime>/share/terminfo, derived from the
+	//    resolved tmux binary at <runtime>/bin/tmux.
+	if (tmuxBin) {
+		const runtimeShare = path.resolve(path.dirname(tmuxBin), '..', 'share', 'terminfo');
+		candidates.push(runtimeShare);
+	}
+	// 2. Common system locations.
+	candidates.push('/opt/homebrew/share/terminfo');
+	candidates.push('/usr/local/share/terminfo');
+	candidates.push('/usr/share/terminfo');
+
+	for (const c of candidates) {
+		if (existsSync(c)) return c;
+	}
+	return undefined;
 }
 
 const INDEX_HTML = `<!doctype html>
@@ -81,6 +113,12 @@ const INDEX_HTML = `<!doctype html>
   term.open(document.getElementById('term'));
   fit.fit();
 
+  // Exponential backoff so a tmux-can't-attach loop doesn't hot-spin —
+  // each retry waits 1.5s, 3s, 6s, … up to 15s. Successful attach
+  // (open event) resets the delay.
+  let retryDelay = 1500;
+  const MAX_RETRY_DELAY = 15000;
+
   function connect() {
     const url = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.host + '/tty';
     const ws = new WebSocket(url);
@@ -89,6 +127,7 @@ const INDEX_HTML = `<!doctype html>
 
     ws.addEventListener('open', () => {
       setStatus('attached');
+      retryDelay = 1500;
       sendResize();
     });
     ws.addEventListener('message', (ev) => {
@@ -99,8 +138,9 @@ const INDEX_HTML = `<!doctype html>
       term.write(new Uint8Array(ev.data));
     });
     ws.addEventListener('close', () => {
-      setStatus('disconnected · reconnecting…');
-      setTimeout(connect, 1500);
+      setStatus('disconnected · reconnecting in ' + Math.round(retryDelay / 1000) + 's…');
+      setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY);
     });
     ws.addEventListener('error', () => {
       try { ws.close(); } catch (_) {}
@@ -167,6 +207,13 @@ httpServer.on('upgrade', (req, socket, head) => {
 
 wss.on('connection', (ws: WebSocket) => {
 	const tmux = resolveTmuxBinary();
+	const terminfoDirs = resolveTerminfoDirs(tmux);
+	const env: NodeJS.ProcessEnv = {
+		...process.env,
+		TERM: 'xterm-256color',
+		LANG: process.env.LANG ?? 'en_US.UTF-8',
+	};
+	if (terminfoDirs) env.TERMINFO_DIRS = terminfoDirs;
 	const tty = pty.spawn(
 		tmux,
 		['-S', SOCKET, 'attach', '-t', SESSION],
@@ -175,11 +222,7 @@ wss.on('connection', (ws: WebSocket) => {
 			cols: 120,
 			rows: 36,
 			cwd: process.env.SUTANDO_HOME ?? process.env.HOME ?? '/tmp',
-			env: {
-				...process.env,
-				TERM: 'xterm-256color',
-				LANG: process.env.LANG ?? 'en_US.UTF-8',
-			},
+			env,
 		},
 	);
 

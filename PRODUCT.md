@@ -18,6 +18,69 @@ end-to-end from DMG, the cloud control plane runs locally with the
 admin panel landed. We have beta users waiting. The next chapter is
 turning capability into a product.
 
+### Beta-application + landing redesign (2026-05-14)
+
+Cloud-side rework of the beta gate to merge signup + waitlist into one
+flow, plus a redesigned `sutando.ag2.ai` landing page.
+
+- **Signup ↔ waitlist merged.** The anonymous waitlist + invite-code
+  redemption flow is gone. Visitors now click "Apply for beta access"
+  on the landing page → Clerk sign-up → `/apply` form → submit →
+  `/pending` until admin approves. One identity end-to-end.
+- **Rich application data.** `/apply` collects profession (engineer /
+  founder / investor / designer / researcher / product / operator /
+  student / other), use case, coding tools already in use (Claude
+  Code, Codex, Cursor, Copilot, Windsurf), and channel interest
+  (Discord / Telegram / WhatsApp / voice-only). Stored as structured
+  columns on `users` so admin can filter.
+- **Loops touchpoints (3).** Application-submitted → "you're on the
+  waitlist" (`LOOPS_TRANSACTIONAL_WAITLIST_CONFIRMATION`, new).
+  Admin-approved → "you're in, sign in" (reuses
+  `LOOPS_TRANSACTIONAL_BETA_INVITE` with vars repurposed —
+  `firstName / signinUrl / dashboardUrl`, no `code`). One-off
+  re-engagement blast for legacy `waitlist_signups` rows
+  (`LOOPS_TRANSACTIONAL_WAITLIST_MIGRATION`, fired from
+  `lib/scripts/email-waitlist-to-apply.ts`).
+- **Admin overview rewired.** `/admin` Beta-gate cards switched from
+  invite metrics (waitlistWaiting / invitesUnredeemed / redemptionRate)
+  to application metrics (applicationsWaiting / signedUpNoApply /
+  approvalRate30d / approvalMedianHours). `/admin/waitlist` table now
+  shows profession, use case, tools, channels; per-row Approve / Deny
+  / Revoke actions.
+- **Landing redesign.** `react-three-fiber` hero canvas — slow-rotating
+  low-poly icosahedron with edge wireframe, ContactShadows on the
+  floor, particle field, radial vignette. Framer Motion handles
+  scroll-section reveals. Below the fold: features, architecture, tier
+  strip, CTA. New squircle-S logo (PNG + SVG monogram, served from
+  `public/`). Old `WaitlistForm` + `/api/waitlist` removed.
+- **Beta gate redirect targets updated.** Dashboard / feedback / cli-login
+  all redirect non-approved users to `/apply` (no application yet) or
+  `/pending` (one in flight); `/redeem` page + `/api/auth/redeem-beta`
+  route deleted.
+
+Files touched: `lib/db/schema.ts` + `lib/db/migrations/0011_beta_application.sql`,
+`lib/email.ts`, `lib/beta-application.ts` (new shared option lists),
+`lib/admin/queries.ts`, `lib/safe.ts`, `lib/scripts/email-waitlist-to-apply.ts`
+(new), `app/page.tsx`, `app/_landing/HeroCanvas.tsx` + `HeroCanvasLoader.tsx`
++ `Sections.tsx` (new), `app/apply/page.tsx` + `form.tsx` (new),
+`app/api/apply/route.ts` (new), `app/pending/page.tsx` (new),
+`app/admin/waitlist/page.tsx` + `actions.ts`, `app/admin/page.tsx`,
+`app/admin/layout.tsx`, `app/sign-up/[[...sign-up]]/page.tsx`,
+`app/cli-login/client.tsx`, `app/dashboard/page.tsx`, `app/feedback/page.tsx`,
+`app/api/download/[channel]/route.ts`, `app/api/auth/cli-login/exchange/route.ts`,
+`middleware.ts`, `public/logo.png` + `public/mark.svg` + `app/icon.svg`.
+Deleted: `app/redeem/*`, `app/api/auth/redeem-beta/*`, `app/api/waitlist/*`,
+`app/_components/WaitlistForm.tsx`.
+
+New env vars (ops checklist):
+
+- `LOOPS_TRANSACTIONAL_WAITLIST_CONFIRMATION` — confirmation email after `/apply` submit
+- `LOOPS_TRANSACTIONAL_WAITLIST_MIGRATION` — one-off blast template
+
+Existing `LOOPS_TRANSACTIONAL_BETA_INVITE` template body needs an
+in-Loops update to drop the invite-code reference and use the new
+variables (`firstName`, `signinUrl`, `dashboardUrl`).
+
 ## Implementation status (2026-05-13, late session)
 
 All three waves are functionally complete except items explicitly
@@ -164,59 +227,65 @@ Sutando install is through the cloud.
 
 ### Onboarding flow
 
-1. Visitor lands on `sutando.ag2.ai`, submits email + an optional
-   short "why" field on the waitlist form.
-2. Submission writes a `waitlist_signups` row; visitor sees a
-   "you're on the list" confirmation.
-3. Admin reviews `/admin/waitlist`, clicks **Approve** on a row.
-4. Cloud generates a one-time beta invite code and sends an email:
-   "Your Sutando beta access is ready — code XXXX, sign up at
-   <link>".
-5. User clicks the link, completes Clerk sign-up, enters the invite
-   code on an activation step. Code marked redeemed;
-   `users.beta_status = 'approved'`.
+Merged with sign-up as of 2026-05-14 — one identity from the first
+click, no invite codes, richer application data captured upfront.
+
+1. Visitor lands on `sutando.ag2.ai`, sees the r3f hero + waitlist CTA.
+2. Visitor clicks **Apply for beta access** → Clerk sign-up (email or
+   OAuth). Clerk redirects to `/apply`.
+3. `/apply` form captures profession, use case, existing tools (Claude
+   Code / Codex / Cursor / Copilot / Windsurf), and channel interest
+   (Discord / Telegram / WhatsApp / voice-only). Submit writes the
+   structured fields onto the `users` row, sets `applied_at`, and fires
+   a Loops confirmation email (`LOOPS_TRANSACTIONAL_WAITLIST_CONFIRMATION`).
+4. User lands on `/pending`, where they can edit their application
+   until an admin decides. `/dashboard` and `/feedback` redirect here
+   for any signed-in user with `beta_status='waitlist'`.
+5. Admin reviews `/admin/waitlist`, clicks **Approve** → flips
+   `users.beta_status='approved'` + stamps `approved_at` + fires the
+   "you're in" email (`LOOPS_TRANSACTIONAL_BETA_INVITE`, repurposed
+   template — vars now `firstName / signinUrl / dashboardUrl`).
 6. Approved user lands on `/dashboard`, where the download card +
    onboarding steps + billing are now visible.
 7. Desktop sign-in (per existing CLI-login flow in DISTRIBUTION.md
    Phase 4) checks `beta_status === 'approved'` before minting a
-   Sutando API key. Non-approved users bounce to a "still on the
-   waitlist" page.
+   Sutando API key. Non-approved users bounce to `/pending`.
+
+Legacy `waitlist_signups` + `beta_invites` tables stay around (no DROP)
+so the one-off blast in `lib/scripts/email-waitlist-to-apply.ts` can
+re-engage anonymous-waitlist rows by emailing them a `/sign-up?from=waitlist`
+link. Drop the tables in a future migration after the backfill.
 
 ### Schema additions (`agent-universe`)
 
 ```sql
+-- Migration 0004 (initial beta gate):
 ALTER TABLE users
   ADD COLUMN beta_status varchar(16) NOT NULL DEFAULT 'waitlist';
 -- 'waitlist' | 'approved' | 'denied' | 'revoked'
 
-CREATE TABLE waitlist_signups (
-  id uuid PRIMARY KEY,
-  email text UNIQUE NOT NULL,
-  why text,
-  source text,                          -- 'landing' | 'referral' | 'direct'
-  status text NOT NULL DEFAULT 'waiting',
-  ts timestamptz NOT NULL DEFAULT now()
-);
+-- Migration 0011 (merge-with-signup, 2026-05-14):
+ALTER TABLE users ADD COLUMN profession varchar(32);
+ALTER TABLE users ADD COLUMN use_case text;
+ALTER TABLE users ADD COLUMN existing_tools text[];
+ALTER TABLE users ADD COLUMN channel_interest text[];
+ALTER TABLE users ADD COLUMN referral_source varchar(64);
+ALTER TABLE users ADD COLUMN applied_at timestamptz;
+ALTER TABLE users ADD COLUMN approved_at timestamptz;
 
-CREATE TABLE beta_invites (
-  id uuid PRIMARY KEY,
-  code text UNIQUE NOT NULL,            -- random 16-char
-  email text NOT NULL,                  -- pre-bound to a waitlist email
-  granted_by uuid REFERENCES users(id),
-  granted_ts timestamptz NOT NULL DEFAULT now(),
-  redeemed_by uuid REFERENCES users(id),
-  redeemed_ts timestamptz,
-  expires_ts timestamptz NOT NULL,
-  status text NOT NULL DEFAULT 'unredeemed'
-);
+-- waitlist_signups + beta_invites tables retained as legacy. No new
+-- writes from app code; drop in a future migration once the one-off
+-- email blast (lib/scripts/email-waitlist-to-apply.ts) has decayed
+-- the remaining 'waiting' rows.
 ```
 
 ### Routes
 
-- `POST /api/waitlist` — public; visitor submits email + optional why
-- `POST /api/auth/redeem-beta` — sign-up validates code, marks redeemed
-- `GET /admin/waitlist` — admin-only triage view
-- `POST /admin/waitlist/{id}/approve` — generates code + sends email
+- `POST /api/apply` — signed-in user submits beta application
+- `GET  /apply` — application form (Clerk-gated; redirects approved users to dashboard)
+- `GET  /pending` — pending-review page; shows current application + edit link
+- `GET  /admin/waitlist` — admin-only triage view (users.applied_at IS NOT NULL)
+- Server actions on `/admin/waitlist` — approve / deny / revoke (flip beta_status, fire Loops email)
 
 Email delivery via **Loops.so** — minimal template, code + sign-up
 link + onboarding doc link. Loops.so also covers the lifecycle emails
@@ -643,7 +712,7 @@ each bucket; buckets can partially overlap.
 
 | # | Item | Repo | Status |
 |---|---|---|---|
-| 1.1 | Waitlist + invite-code system: schema, public `POST /api/waitlist`, admin `/admin/waitlist` triage, code generation, email via Loops.so | agent-universe | done |
+| 1.1 | Beta application merged with sign-up: rich `/apply` form (profession, use case, existing tools, channel interest), admin `/admin/waitlist` triage, Loops confirmation + approval emails. Drops the invite-code/`/redeem` step (migration 0011). | agent-universe | done |
 | 1.2 | `users.beta_status` check on `/api/auth/cli-login/exchange` + `/api/download/<channel>` | agent-universe | done |
 | 1.3 | Make `AG2Platform/stando` + `agent-universe` repos private; remove any public DMG links | both | ops |
 | 1.4 | Landing page → waitlist-only for unauthenticated; product walkthrough behind sign-in | agent-universe | done |

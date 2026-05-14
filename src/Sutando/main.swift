@@ -568,12 +568,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // stand-avatar.png from the dev repo, then to a bold "S"
             // glyph if neither is on disk (very early dev or partial
             // install). Search order: .app bundle Resources, then the
-            // dev-workflow app/assets/ directory beside the binary.
+            // dev-workflow app/branding/ directory beside the binary.
             let bundled = Bundle.main.resourcePath.flatMap { p -> String? in
                 let candidate = p + "/menubar.png"
                 return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
             }
-            let templatePath = bundled ?? (workspace + "/app/assets/menubar.png")
+            let templatePath = bundled ?? (workspace + "/app/branding/menubar.png")
             let avatarPath = workspace + "/assets/stand-avatar.png"
             if FileManager.default.fileExists(atPath: templatePath),
                let image = NSImage(contentsOfFile: templatePath) {
@@ -1223,7 +1223,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// menu bar continuously signals mode without taking an extra slot.
     func avatarImage(presenterActive: Bool, meetingActive: Bool = false) -> NSImage? {
         // Prefer the bundled monochrome menubar template (Resources/menubar.png
-        // in the .app bundle, or app/assets/menubar.png in the dev tree).
+        // in the .app bundle, or app/branding/menubar.png in the dev tree).
         // Falls back to the legacy assets/stand-avatar.png so installs
         // that predate the template still render. Template images get
         // tinted automatically by macOS — when one is found we keep
@@ -1233,7 +1233,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let candidate = p + "/menubar.png"
             return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
         }
-        let templatePath = bundledTemplate ?? (workspace + "/app/assets/menubar.png")
+        let templatePath = bundledTemplate ?? (workspace + "/app/branding/menubar.png")
         let fallbackPath = workspace + "/assets/stand-avatar.png"
 
         let baseIsTemplate: Bool

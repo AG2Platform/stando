@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- Sutando placeholder icon.
+       Theme: dark-first, minimalist, two-arc S motif consistent with the
+       landing-page wordmark. Reference style: Linear / Vercel / Raycast. -->
+
+  <!-- Background: dark slate with a subtle radial highlight. -->
+  <defs>
+    <radialGradient id="bg" cx="0.4" cy="0.35" r="0.85">
+      <stop offset="0" stop-color="#1d1d1f"/>
+      <stop offset="1" stop-color="#0a0a0c"/>
+    </radialGradient>
+    <linearGradient id="strokeFg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e5e5e7"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded-square base — macOS BigSur-style icon shape. -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <!-- Two arcs forming a stylized S. The upper arc opens left; the
+       lower arc opens right. They share a vertical centre and overlap
+       just enough to read as one mark from a distance. -->
+  <g fill="none" stroke-linecap="round" stroke-width="80">
+    <path d="M 700 320 a 220 220 0 1 0 0 220" stroke="url(#strokeFg)"/>
+    <path d="M 324 704 a 220 220 0 1 0 0 -220" stroke="url(#strokeFg)" stroke-opacity="0.55"/>
+  </g>
+</svg>

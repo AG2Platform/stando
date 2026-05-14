@@ -106,11 +106,11 @@ fi
 
 # 4.1 Menubar template icon — monochrome PNG that macOS tints for dark
 # vs light menubars. main.swift loads from Bundle.main.resourcePath first.
-if [ -f "$REPO/app/assets/menubar.png" ]; then
-    cp "$REPO/app/assets/menubar.png" "$APP/Contents/Resources/menubar.png"
+if [ -f "$REPO/app/branding/menubar.png" ]; then
+    cp "$REPO/app/branding/menubar.png" "$APP/Contents/Resources/menubar.png"
 fi
-if [ -f "$REPO/app/assets/menubar@2x.png" ]; then
-    cp "$REPO/app/assets/menubar@2x.png" "$APP/Contents/Resources/menubar@2x.png"
+if [ -f "$REPO/app/branding/menubar@2x.png" ]; then
+    cp "$REPO/app/branding/menubar@2x.png" "$APP/Contents/Resources/menubar@2x.png"
 fi
 
 # 5. Stage the repo source (src + skills + package.json + node_modules) into
