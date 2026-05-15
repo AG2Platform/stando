@@ -21,12 +21,14 @@ import { existsSync, mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { cloudFetch, isCloudSignedIn, recordEvent as cloudRecordEvent, recordError as cloudRecordError } from './cloud-client.js';
+import { withSkillLock } from './cloud-skill-lock.js';
 
 interface InstalledRow {
 	skillId: string;
 	slug: string;
 	name: string;
 	version: string;
+	kind: string; // 'skill' | 'cloud_tool' (per Phase 1 schema)
 	signingHash: string | null;
 	bundleUrl: string | null;
 	tierRequired: string;
@@ -72,11 +74,13 @@ async function downloadAndExtract(row: InstalledRow): Promise<{ ok: true } | { o
 	const target = join(root, row.slug);
 	const tarPath = join(root, `${row.slug}-${row.version}.tar.gz`);
 	try {
-		rmSync(target, { recursive: true, force: true });
-		writeFileSync(tarPath, buf);
-		mkdirSync(target, { recursive: true });
-		execFileSync('tar', ['-xzf', tarPath, '-C', target, '--strip-components=1'], {
-			stdio: 'pipe',
+		await withSkillLock(row.slug, () => {
+			rmSync(target, { recursive: true, force: true });
+			writeFileSync(tarPath, buf);
+			mkdirSync(target, { recursive: true });
+			execFileSync('tar', ['-xzf', tarPath, '-C', target, '--strip-components=1'], {
+				stdio: 'pipe',
+			});
 		});
 	} catch (err) {
 		return { ok: false, reason: `extract_${err instanceof Error ? err.message.slice(0, 80) : 'unknown'}` };
@@ -105,9 +109,19 @@ export async function syncOnce(): Promise<void> {
 		return;
 	}
 
-	const missing = installed.filter((row) => !localSkillPresent(row.slug));
+	// Cloud tools are MCP-gateway-invoked — they don't need a local
+	// bundle on disk unless they ship an optional client package
+	// (rare). Skip cloud_tool rows that have no bundleUrl entirely
+	// instead of routing them through the missing/download path; the
+	// previous behavior produced a `skill.install_failed` warn event
+	// on every sync pass (every ~10 min) for every cloud-tool the
+	// user activated, which polluted error_events.
+	const downloadable = installed.filter(
+		(row) => row.kind !== 'cloud_tool' || row.bundleUrl,
+	);
+	const missing = downloadable.filter((row) => !localSkillPresent(row.slug));
 	if (missing.length === 0) {
-		console.log(`[skill-sync] all ${installed.length} skill(s) present locally`);
+		console.log(`[skill-sync] all ${downloadable.length} downloadable item(s) present locally`);
 		return;
 	}
 

@@ -21,6 +21,7 @@ import { dirname, join, resolve } from 'node:path';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 import { cloudFetch, isCloudSignedIn, loadCloudAuth } from '../../src/cloud-client.js';
+import { withSkillLock } from '../../src/cloud-skill-lock.js';
 
 // ============================================================
 // Helpers
@@ -124,20 +125,28 @@ function parseSkillFrontmatter(content: string): { name?: string; description?: 
 export const findTool: ToolDefinition = {
 	name: 'station_find',
 	description:
-		'Search the Superpower Station catalog (skills + cloud tools) by name or description. Use when the user says "find a skill for X", "what tools are there for Y", or "search for Z".',
+		'Search the Superpower Station catalog (skills + cloud tools) by intent. Uses Gemini-ranked semantic search so the user can describe what they want in natural language ("something to triage email" / "tool that summarizes papers"), not just keywords. Falls back to keyword match if the LLM is offline.',
 	parameters: z.object({
-		query: z.string().describe('Free-text query, e.g. "calendar", "deep research"'),
+		query: z.string().describe('Free-text intent, e.g. "help with morning routine", "translate text", "summarize a paper".'),
 	}),
 	execution: 'inline',
 	async execute(args) {
 		const { query } = args as { query: string };
 		const signed = ensureSignedIn();
 		if (!signed.ok) return { error: signed.error };
-		const res = await cloudFetch('/api/skills/catalog');
-		if (!res || !res.ok) {
-			return { error: `Catalog fetch failed (${res?.status ?? 'no auth'}).` };
+
+		const [catalogRes, recRes] = await Promise.all([
+			cloudFetch('/api/skills/catalog'),
+			cloudFetch('/api/superpower/recommend', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ intent: query }),
+			}).catch(() => null),
+		]);
+		if (!catalogRes || !catalogRes.ok) {
+			return { error: `Catalog fetch failed (${catalogRes?.status ?? 'no auth'}).` };
 		}
-		const body = (await res.json()) as {
+		const body = (await catalogRes.json()) as {
 			skills: Array<{
 				slug: string;
 				name: string;
@@ -152,33 +161,59 @@ export const findTool: ToolDefinition = {
 				ratingCount: number;
 			}>;
 		};
-		const q = query.toLowerCase();
-		const matches = body.skills
-			.filter(
-				(s) =>
-					s.name.toLowerCase().includes(q) ||
-					(s.description ?? '').toLowerCase().includes(q),
-			)
-			.slice(0, 8);
-		return {
-			query,
-			count: matches.length,
-			items: matches.map((s) => ({
-				slug: s.slug,
-				name: s.name,
-				kind: s.kind ?? 'skill',
-				description: s.description,
-				tier: s.tierRequired,
-				price:
-					(s.kind ?? 'skill') === 'cloud_tool'
-						? `${s.unitPriceCredits ?? 0} cr / ${s.unitLabel ?? 'call'}`
-						: s.priceCredits > 0
-							? `${s.priceCredits} cr install`
-							: 'free',
-				rating: s.ratingAvg != null ? `${s.ratingAvg.toFixed(1)} (${s.ratingCount})` : null,
-				installs: s.installCount,
-			})),
-		};
+		const bySlug = new Map(body.skills.map((s) => [s.slug, s]));
+
+		let ranking: 'gemini' | 'keyword' = 'keyword';
+		let ranked: Array<{ slug: string; reasoning?: string; score?: number }> = [];
+		if (recRes && recRes.ok) {
+			try {
+				const recBody = (await recRes.json()) as {
+					recommendations: Array<{ slug: string; score: number; reasoning: string }>;
+				};
+				const filtered = recBody.recommendations.filter((r) => bySlug.has(r.slug));
+				if (filtered.length > 0) {
+					ranking = 'gemini';
+					ranked = filtered.slice(0, 8);
+				}
+			} catch {
+				// JSON parse failure — fall through to keyword
+			}
+		}
+		if (ranked.length === 0) {
+			const q = query.toLowerCase();
+			ranked = body.skills
+				.filter(
+					(s) =>
+						s.name.toLowerCase().includes(q) ||
+						(s.description ?? '').toLowerCase().includes(q),
+				)
+				.slice(0, 8)
+				.map((s) => ({ slug: s.slug }));
+		}
+
+		const items = ranked
+			.map((r) => {
+				const s = bySlug.get(r.slug);
+				if (!s) return null;
+				return {
+					slug: s.slug,
+					name: s.name,
+					kind: s.kind ?? 'skill',
+					description: s.description,
+					tier: s.tierRequired,
+					price:
+						(s.kind ?? 'skill') === 'cloud_tool'
+							? `${s.unitPriceCredits ?? 0} cr / ${s.unitLabel ?? 'call'}`
+							: s.priceCredits > 0
+								? `${s.priceCredits} cr install`
+								: 'free',
+					rating: s.ratingAvg != null ? `${s.ratingAvg.toFixed(1)} (${s.ratingCount})` : null,
+					installs: s.installCount,
+					reasoning: r.reasoning,
+				};
+			})
+			.filter((x): x is NonNullable<typeof x> => x !== null);
+		return { query, count: items.length, ranking, items };
 	},
 };
 
@@ -269,11 +304,13 @@ export const installTool: ToolDefinition = {
 		const target = join(root, slug);
 		const tarPath = join(root, `${slug}-${installBody.version}.tar.gz`);
 		try {
-			rmSync(target, { recursive: true, force: true });
-			writeFileSync(tarPath, buf);
-			mkdirSync(target, { recursive: true });
-			execFileSync('tar', ['-xzf', tarPath, '-C', target, '--strip-components=1'], {
-				stdio: 'pipe',
+			await withSkillLock(slug, () => {
+				rmSync(target, { recursive: true, force: true });
+				writeFileSync(tarPath, buf);
+				mkdirSync(target, { recursive: true });
+				execFileSync('tar', ['-xzf', tarPath, '-C', target, '--strip-components=1'], {
+					stdio: 'pipe',
+				});
 			});
 		} catch (err) {
 			return { error: `Extract failed: ${err instanceof Error ? err.message : String(err)}` };

@@ -8,6 +8,7 @@
 import { execSync, execFileSync } from 'node:child_process';
 import { writeFileSync, unlinkSync, readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
+import { homedir } from 'node:os';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 
@@ -782,23 +783,31 @@ function assertUniqueToolNames(tools: ToolDefinition[]): ToolDefinition[] {
 // commit). Restored 2026-04-25 after the iclr-highlight skill went silent on
 // the autonav cue — voice-agent had no way to call highlight_slide because the
 // skill's tools were never being merged into inlineTools.
+// Cloud-skills install dir — Station-installed skills land here (see
+// `src/cloud-skill-sync.ts:skillsInstallDir()` and
+// `skills/superpower-station/tools.ts:skillsInstallDir()`). Voice-agent must
+// scan it so Phase 6 catalog items actually load on next restart.
+function cloudSkillsScanDir(): string {
+	const home = process.env.SUTANDO_HOME;
+	if (home) return join(home.replace(/^~/, homedir()), 'cloud-skills');
+	return join(homedir(), 'Library', 'Application Support', 'Sutando', 'cloud-skills');
+}
+
 async function loadSkillManifestTools(): Promise<ToolDefinition[]> {
-	// Scan the public-repo `skills/` dir AND the optional private skills dir
-	// pointed to by `$SUTANDO_PRIVATE_DIR/skills/` (e.g.
-	// `~/.sutando-memory-sync/skills/`). The private dir lets users keep
-	// personal tooling with real per-file git history outside the public repo.
-	// Order: public first, then private — same-name skills loaded from
-	// private take precedence (last-wins via `bySkill` map below). Required
-	// for users whose `$SUTANDO_PRIVATE_DIR` aliases the public repo (e.g.
-	// dev workflow where private points at the same checkout): without
-	// last-wins, both passes load `report-feedback` and the per-tool dup
-	// guard at the bottom of this module throws.
+	// Scan the public-repo `skills/` dir, the optional private skills dir
+	// pointed to by `$SUTANDO_PRIVATE_DIR/skills/`, AND the cloud-skills
+	// install dir where Superpower Station drops freshly-installed bundles.
+	// Order: public → private → cloud-installed — last-wins via `bySkill`
+	// map below means a user's private override beats a public skill, and a
+	// cloud-installed update beats either (so an updated Station bundle
+	// takes effect on next voice-agent restart without manual cleanup).
 	const dirsToScan: string[] = [join(process.cwd(), 'skills')];
 	const privateRoot = process.env.SUTANDO_PRIVATE_DIR;
 	if (privateRoot) {
 		const expanded = privateRoot.replace(/^~/, process.env.HOME || '');
 		dirsToScan.push(join(expanded, 'skills'));
 	}
+	dirsToScan.push(cloudSkillsScanDir());
 	const bySkill = new Map<string, ToolDefinition[]>();
 	for (const skillsDir of dirsToScan) {
 		if (!existsSync(skillsDir)) continue;
@@ -866,6 +875,7 @@ function loadCoreDocumentedSkills(): { name: string; description: string }[] {
 		const expanded = privateRoot.replace(/^~/, process.env.HOME || '');
 		dirsToScan.push(join(expanded, 'skills'));
 	}
+	dirsToScan.push(cloudSkillsScanDir());
 	// Last-write-wins map so private (later in dirsToScan) overrides public —
 	// same precedence convention as loadSkillManifestTools above.
 	const byName = new Map<string, { name: string; description: string }>();

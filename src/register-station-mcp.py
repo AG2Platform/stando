@@ -12,17 +12,19 @@ Both surfaces converge on this script so a single script update is the
 only place we have to edit when Claude Code's MCP config schema shifts.
 
 Usage:
-    python3 src/register-station-mcp.py
+    python3 src/register-station-mcp.py          # add/update entry
+    python3 src/register-station-mcp.py --remove # delete entry (sign-out)
 
 Exit codes:
-    0  registered (or no-op if already up-to-date)
+    0  registered/removed (or no-op if already in desired state)
     1  no cloud-auth.json on disk — user is signed out; we leave the
-       existing entry intact so Claude Code keeps working
+       existing entry intact so Claude Code keeps working (register only)
     2  parse error in ~/.claude.json or cloud-auth.json
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -88,7 +90,17 @@ def atomic_write(path: Path, text: str) -> None:
         raise
 
 
-def main() -> int:
+def load_claude_config(config_path: Path) -> dict | None:
+    if not config_path.exists():
+        return {}
+    try:
+        return json.loads(config_path.read_text())
+    except json.JSONDecodeError as e:
+        print(f"register-station-mcp: cannot parse {config_path}: {e}", file=sys.stderr)
+        return None
+
+
+def do_register() -> int:
     auth = load_cloud_auth()
     if auth is None:
         print("register-station-mcp: not signed in to cloud — nothing to do.", file=sys.stderr)
@@ -100,14 +112,9 @@ def main() -> int:
         return 2
 
     config_path = claude_config_path()
-    if config_path.exists():
-        try:
-            cfg = json.loads(config_path.read_text())
-        except json.JSONDecodeError as e:
-            print(f"register-station-mcp: cannot parse {config_path}: {e}", file=sys.stderr)
-            return 2
-    else:
-        cfg = {}
+    cfg = load_claude_config(config_path)
+    if cfg is None:
+        return 2
 
     cfg.setdefault("mcpServers", {})
     existing = cfg["mcpServers"].get(SERVER_KEY)
@@ -126,6 +133,38 @@ def main() -> int:
         "for the new MCP server to load."
     )
     return 0
+
+
+def do_remove() -> int:
+    config_path = claude_config_path()
+    cfg = load_claude_config(config_path)
+    if cfg is None:
+        return 2
+    servers = cfg.get("mcpServers") or {}
+    if SERVER_KEY not in servers:
+        print(f"✓ {SERVER_KEY} not present in {config_path}")
+        return 0
+    del servers[SERVER_KEY]
+    # Drop the key entirely if empty — keeps the config minimal so users
+    # who inspect ~/.claude.json don't see a confusing empty section.
+    if not servers and "mcpServers" in cfg:
+        del cfg["mcpServers"]
+    else:
+        cfg["mcpServers"] = servers
+    atomic_write(config_path, json.dumps(cfg, indent=2) + "\n")
+    print(f"✓ {SERVER_KEY} removed from {config_path}")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--remove",
+        action="store_true",
+        help="Delete the sutando-station entry from ~/.claude.json (used on sign-out).",
+    )
+    args = parser.parse_args()
+    return do_remove() if args.remove else do_register()
 
 
 if __name__ == "__main__":
