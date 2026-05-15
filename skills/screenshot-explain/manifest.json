@@ -1,0 +1,7 @@
+{
+	"name": "screenshot-explain",
+	"description": "Capture the screen + answer a question about what's on it via Gemini Vision. Voice-callable: 'what does this mean', 'explain this error', 'what is this showing'.",
+	"enabled": true,
+	"access_tier": "owner",
+	"tools": "./tools.ts"
+}
