@@ -219,8 +219,31 @@ class LaunchAgentInstaller {
         let phs = placeholders(paths)
         let files = try FileManager.default.contentsOfDirectory(atPath: templatesDir)
         var summary = LaunchAgentInstallSummary()
+        // Labels we explicitly skip even if their template is present in
+        // the bundle. Used by services that have moved off launchd
+        // because TCC's responsible-process attribution made the
+        // launchd path unworkable. See ScreenCaptureSupervisor.swift.
+        let skipLabels: Set<String> = ["com.sutando.screen-capture"]
         for file in files where file.hasSuffix(".plist.template") {
             let label = String(file.dropLast(".plist.template".count))
+            if skipLabels.contains(label) {
+                // Best-effort: bootout any leftover launchd job from a
+                // previous install of this label so we don't fight over
+                // its port. Same logic the supervisor runs at startup;
+                // duplicating here covers the user who upgrades but
+                // doesn't quit-and-relaunch immediately.
+                let uid = getuid()
+                let proc = Process()
+                proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+                proc.arguments = ["bootout", "gui/\(uid)/\(label)"]
+                proc.standardOutput = FileHandle.nullDevice
+                proc.standardError = FileHandle.nullDevice
+                _ = try? proc.run()
+                proc.waitUntilExit()
+                let stalePlist = paths.sutandoHome + "/LaunchAgents/\(label).plist"
+                try? FileManager.default.removeItem(atPath: stalePlist)
+                continue
+            }
             let templatePath = templatesDir + "/" + file
             guard let template = try? String(contentsOfFile: templatePath, encoding: .utf8) else {
                 summary.failed.append((label, "could not read template at \(templatePath)"))
