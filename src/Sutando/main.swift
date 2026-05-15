@@ -103,6 +103,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// above are kept available but no menu path opens them in 0.2.9+.
     var unifiedWindow: UnifiedMainWindowController?
 
+    /// First-launch onboarding wizard. Shown instead of the unified main
+    /// window until `OnboardingWindowController.needsOnboarding` flips
+    /// false (which happens when the user clicks Done on the last step,
+    /// writing $SUTANDO_HOME/.onboarding-complete).
+    var onboardingWindow: OnboardingWindowController?
+
+    /// Supervises the screen-capture HTTP server (port 7845) as a
+    /// direct child process so the screencapture call inherits
+    /// Sutando.app's Screen Recording grant via TCC's responsible-
+    /// process attribution. Replaces the legacy launchd-managed
+    /// service which ran into the "launchd-spawned python isn't
+    /// granted Screen Recording" wall on every fresh install.
+    /// See ScreenCaptureSupervisor.swift for the full rationale.
+    lazy var screenCaptureSupervisor: ScreenCaptureSupervisor =
+        ScreenCaptureSupervisor(workspace: workspace, sutandoHome: stateRoot)
+
     /// Fixed tmux socket path for the sutando-core session. The shell
     /// (via startup.sh -S flag) and the app (launched by macOS with a
     /// different TMPDIR due to sandboxing) must target the same socket
@@ -162,27 +178,56 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             observeCloudAuthSignIn()
             observeCloudAuthRevoked()
             logToFile("App started, workspace=\(workspace)")
-            // Services are bound to a signed-in cloud account. Skip
-            // bootstrap when no auth is present and route the user to
-            // the sign-in flow immediately. Without this gate, the
-            // app would happily run all 8 launchd services for a user
-            // we can't bill, observe, or push updates to. After the
-            // sutando://auth callback fires, observeCloudAuthSignIn()
-            // picks up the rest of startup (bootstrap + open WebUI).
-            if CloudAuth.shared.isSignedIn {
-                autoBootstrapServices()
-                // On first launch we open Settings (no Gemini key yet);
-                // otherwise we jump straight to Conversation. Running
-                // both would flash Settings → Conversation in 1.5s.
-                if SettingsWindowController.needsFirstLaunchSetup {
-                    maybeRunFirstLaunchFlow()
-                } else {
-                    scheduleAutoOpenWebUI()
-                }
+            // Onboarding gate. Until $SUTANDO_HOME/.onboarding-complete
+            // exists, the wizard owns the screen — no main window, no
+            // bootstrap, no auto-sign-in flow. The wizard handles the
+            // Gemini key, Claude CLI, permissions, and the first
+            // launchd-service install itself; on Done it calls back into
+            // proceedAfterOnboardingOrLaunch() which resumes the normal
+            // post-launch path below.
+            if OnboardingWindowController.needsOnboarding {
+                logToFile("Onboarding incomplete — showing welcome wizard")
+                showOnboardingWindow()
             } else {
-                logToFile("Not signed in — services held, opening sign-in flow")
-                cloudSignIn()
+                proceedAfterOnboardingOrLaunch()
             }
+        }
+    }
+
+    /// Show the first-launch wizard (idempotent — re-uses the existing
+    /// controller if one is already alive). Wires `onComplete` so finishing
+    /// the wizard kicks off the same bootstrap+open path a returning
+    /// user would hit.
+    func showOnboardingWindow() {
+        if onboardingWindow == nil {
+            let controller = OnboardingWindowController(appDelegate: self)
+            controller.onComplete = { [weak self] in
+                guard let self = self else { return }
+                self.logToFile("Onboarding complete — proceeding to bootstrap + main window")
+                self.onboardingWindow = nil
+                self.proceedAfterOnboardingOrLaunch()
+            }
+            onboardingWindow = controller
+        }
+        onboardingWindow?.showAndFocus()
+    }
+
+    /// Post-onboarding (or returning-user) startup path. Mirrors the
+    /// pre-onboarding-gate behavior: services depend on a signed-in
+    /// cloud account, so we route to the sign-in flow first and let
+    /// observeCloudAuthSignIn() resume bootstrap once the sutando://
+    /// callback fires.
+    private func proceedAfterOnboardingOrLaunch() {
+        if CloudAuth.shared.isSignedIn {
+            autoBootstrapServices()
+            if SettingsWindowController.needsFirstLaunchSetup {
+                maybeRunFirstLaunchFlow()
+            } else {
+                scheduleAutoOpenWebUI()
+            }
+        } else {
+            logToFile("Not signed in — services held, opening sign-in flow")
+            cloudSignIn()
         }
     }
 
@@ -193,6 +238,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// the menu-bar icon.
     func applicationWillTerminate(_ notification: Notification) {
         logToFile("applicationWillTerminate: shutting down services")
+        // Stop the in-process screen-capture supervisor BEFORE bootout
+        // so its child has time to release port 7845 cleanly.
+        screenCaptureSupervisor.stop()
         let stopped = LaunchAgentInstaller().stopAll()
         logToFile("applicationWillTerminate: stopped \(stopped.joined(separator: ", "))")
     }
@@ -205,6 +253,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// otherwise auto-load on user login — conflicting with the new
     /// "services bound to app lifecycle" model).
     private func autoBootstrapServices() {
+        // Screen-capture has its own supervisor — start it here so it
+        // races alongside launchd bootstrap rather than waiting for it.
+        // The supervisor handles eviction of any stale launchd-managed
+        // copy from older installs before binding to port 7845.
+        screenCaptureSupervisor.start()
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             let installer = LaunchAgentInstaller()
             let migrated = installer.migrateLegacyPlists()
@@ -258,6 +311,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             guard let self = self else { return }
             self.runMemoryHydrate()
+            // Don't punch through the onboarding gate from a sign-in
+            // callback. If the wizard is still up, let the user finish
+            // it; the wizard's onComplete handler will re-enter the
+            // bootstrap path itself.
+            if OnboardingWindowController.needsOnboarding {
+                self.logToFile("Cloud sign-in completed during onboarding — deferring bootstrap until wizard finishes")
+                return
+            }
             self.autoBootstrapServices()
             // Mutually exclusive: first-launch users land in Settings;
             // returning users land in Conversation.
@@ -1858,6 +1919,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// All three menu items (Open Web UI / Open Dashboard / Settings…)
     /// route here so the user only ever sees one main window.
     func openUnifiedWindow(pane: UnifiedPane) {
+        // Onboarding gate. Every menu-bar entry point (Open Sutando,
+        // Settings, Open Dashboard, Core CLI, voice-toggle fallback,
+        // …) lands here, so this single check keeps the main window
+        // out of reach until the wizard has finished.
+        if OnboardingWindowController.needsOnboarding {
+            showOnboardingWindow()
+            return
+        }
         if unifiedWindow == nil {
             unifiedWindow = UnifiedMainWindowController(appDelegate: self)
         }
@@ -2236,20 +2305,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Restart the Sutando.app menu bar app — useful after editing
-    /// ~/.config/sutando/hotkeys.json so the new bindings take effect.
-    /// Spawns a detached helper that waits for this process to exit, then
-    /// re-launches the same binary, then exits the current process.
+    /// ~/.config/sutando/hotkeys.json so the new bindings take effect,
+    /// and required for Screen Recording TCC grants to materialize
+    /// (CGPreflightScreenCaptureAccess() is cached per-process at launch).
+    ///
+    /// CRITICAL: when running as an .app bundle, we relaunch via `open`
+    /// rather than exec'ing the inner binary. Re-execing the binary
+    /// directly produces a process with a different Launch Services
+    /// identity from TCC's perspective — even with an identical cdhash —
+    /// so any TCC grant attributed to "Sutando.app" (Screen Recording,
+    /// Accessibility, …) won't apply to the relaunched process and the
+    /// user has to re-grant. Going through `open` routes the launch
+    /// through Launch Services so the new process inherits the bundle's
+    /// TCC identity. Raw-binary dev builds (no Bundle.main.bundleIdentifier)
+    /// fall back to the original re-exec path.
     @objc func restartSelf() {
-        let myPath = ProcessInfo.processInfo.arguments[0]
-        let myPid = ProcessInfo.processInfo.processIdentifier
-        // Detached shell: wait for current pid to die, then exec the same binary.
-        let script = "while kill -0 \(myPid) 2>/dev/null; do sleep 0.1; done; exec \"\(myPath)\""
+        let pid = ProcessInfo.processInfo.processIdentifier
+        let script: String
+        if Bundle.main.bundleIdentifier != nil {
+            let bundlePath = Bundle.main.bundlePath
+            // -n forces a fresh instance even if Launch Services thinks
+            // there's still one running (defensive — our pid-wait loop
+            // means the original is gone by the time `open` fires, but
+            // -n removes the race entirely).
+            script = "while kill -0 \(pid) 2>/dev/null; do sleep 0.1; done; /usr/bin/open -n \"\(bundlePath)\""
+        } else {
+            // Dev workflow — running the raw `src/Sutando/Sutando` binary.
+            // No .app bundle to open, just re-exec.
+            let myPath = ProcessInfo.processInfo.arguments[0]
+            script = "while kill -0 \(pid) 2>/dev/null; do sleep 0.1; done; exec \"\(myPath)\""
+        }
         let task = Process()
         task.launchPath = "/bin/sh"
         task.arguments = ["-c", script]
         do {
             try task.run()
-            logToFile("restartSelf: spawned relaunch helper (pid will be \(myPid)), terminating")
+            logToFile("restartSelf: spawned relaunch helper (waiting on pid \(pid)), terminating")
             NSApplication.shared.terminate(nil)
         } catch {
             notify("Sutando", "Restart failed: \(error.localizedDescription)")
