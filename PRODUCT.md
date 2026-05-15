@@ -919,8 +919,17 @@ User actions required before paid beta users can complete an install:
    desktop falls back to BYOK.
    - **`TAVILY_API_KEY`** (added Phase 6 Wave A) — backs the
      `deep-research` cloud tool's web-search step. Without it, the
-     tool returns a "not configured" error and the gateway still
-     debits 0 credits (handler short-circuits before billing).
+     tool returns a "not configured" error and the gateway refunds
+     the call.
+   - **`DEEPL_API_KEY`** (added Phase 6 Wave D) — backs the
+     `text-translate-quality` cloud tool. Use a `:fx`-suffixed key
+     for the free tier (500k chars/mo) — the route auto-detects
+     and hits api-free.deepl.com vs api.deepl.com.
+   - **`REPLICATE_API_TOKEN`** (added Phase 6 Wave D) — backs the
+     `image-bg-remove` cloud tool. ~$0.0023 per call wholesale.
+   - **No key needed** for `scrape-and-extract` (Jina Reader free
+     tier) or `youtube-transcript` (scrapes the player response
+     directly — no auth, no rate-limit on our side).
 6. **Tigris bucket** (for memory snapshots) — provision a bucket, set
    `AWS_ENDPOINT_URL_S3` + `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`
    + `AWS_REGION` + `OBJECT_STORE_BUCKET`. Without them, the snapshot
