@@ -111,7 +111,7 @@ echo "--- Test 1c: startup.sh calls it before services start ---"
 if [ -f "src/archive-stale-results.py" ]; then
     ARCHIVE_LINE=$(grep -n "archive-stale-results" src/startup.sh | head -1 | cut -d: -f1)
     # First service launch: credential proxy on port 7846
-    SERVICE_LINE=$(grep -n "credential-proxy\|voice-agent\|web-client" src/startup.sh | head -1 | cut -d: -f1)
+    SERVICE_LINE=$(grep -n "credential-proxy\|voice-agent" src/startup.sh | head -1 | cut -d: -f1)
     if [ -n "$ARCHIVE_LINE" ] && [ -n "$SERVICE_LINE" ] && [ "$ARCHIVE_LINE" -lt "$SERVICE_LINE" ]; then
         pass "archive-stale-results.py (line $ARCHIVE_LINE) called before first service (line $SERVICE_LINE)"
     elif [ -n "$ARCHIVE_LINE" ]; then

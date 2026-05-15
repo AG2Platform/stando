@@ -124,7 +124,6 @@ def fix_launchd(label: str) -> str:
     """Try to reload a launchd job."""
     plist_map = {
         "com.sutando.voice-agent": Path.home() / "Library/LaunchAgents/com.sutando.voice-agent.plist",
-        "com.sutando.web-client": Path.home() / "Library/LaunchAgents/com.sutando.web-client.plist",
     }
     plist = plist_map.get(label)
     if not plist or not plist.exists():
@@ -157,7 +156,7 @@ def mark_stale_if_outdated(check: dict, src_file: Path, pgrep_pattern: str, thre
     started more than `threshold_sec` before `src_file`'s mtime.
 
     Extracted so the same logic covers all tsx-managed services
-    (voice-agent, web-client, conversation-server) without duplication.
+    (voice-agent, conversation-server) without duplication.
     30 min default threshold tolerates `git checkout` mtime bumps; real
     stale deploys are hours/days old. Silent on any failure — stale
     detection is advisory, not authoritative.
@@ -616,10 +615,15 @@ def run_all_checks() -> list[dict]:
     checks.append(check_voice_transport(voice_check))
     checks.append(check_bodhi_dist())
 
-    web_check = check_port(8080, "web-client")
-    if web_check["status"] == "ok":
-        mark_stale_if_outdated(web_check, REPO_DIR / "src" / "web-client.ts", "web-client.ts")
-    checks.append(web_check)
+    # HTTP server for the conversation page lives in the same process as the
+    # voice agent (PR-A: src/web-server.ts started by src/voice-agent.ts).
+    # A separate port check still catches the "voice agent up, HTTP server
+    # crashed at startup" case — same code, same process, but distinct
+    # listening sockets, so failures here are independent of WS health.
+    http_check = check_port(8080, "voice-agent-http")
+    if http_check["status"] == "ok":
+        mark_stale_if_outdated(http_check, REPO_DIR / "src" / "web-server.ts", "voice-agent.ts")
+    checks.append(http_check)
 
     # Optional services (downgrade missing to warning, not failure)
     for port, name in [(7843, "agent-api"), (7844, "dashboard"), (7845, "screen-capture")]:
@@ -786,8 +790,8 @@ def run_all_checks() -> list[dict]:
                     # branch switching.
                     if src_mtime - proc_start > 1800:  # source >30 min newer
                         # Cross-check with git before flagging — #253 added this
-                        # for voice-agent + web-client via mark_stale_if_outdated,
-                        # this path does the same check inline to reach bridges.
+                        # for voice-agent via mark_stale_if_outdated, this path
+                        # does the same check inline to reach bridges.
                         if not _file_unchanged_since(src_file, proc_start):
                             status = "stale"
                             detail = f"running but code is {int((src_mtime - proc_start) / 60)} min newer than process — restart needed"

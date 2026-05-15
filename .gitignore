@@ -59,7 +59,6 @@ src/Sutando/NativeMic.swift
 voice-context.txt
 tab-aliases.json
 session-state.md
-src/web-client.js
 context-drop-image.png
 generated-*.png
 contextual-chips.json

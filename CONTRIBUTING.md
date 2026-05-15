@@ -42,7 +42,7 @@ See existing skills for examples. Install with `bash skills/install.sh`.
 - **Python**: standard library preferred, no frameworks. Python 3.9+ compatible (avoid `str | None` union syntax — use `Optional[str]`).
 - **TypeScript**: ESM modules, strict mode. Run `npx tsc --noEmit` before submitting.
 - **Shell**: bash, `set -e`, use `$REPO` for paths
-- **web-client.ts**: The entire web UI is an inline HTML template literal. Do NOT use TypeScript-only syntax (like `as Type` casts) inside the embedded `<script>` block — the browser runs it as plain JS.
+- **web-client-html.ts**: The legacy conversation UI is still an inline HTML template literal (PR-A interim state, to be replaced by the Vite + React scaffold in `client/` per PR-B). Do NOT use TypeScript-only syntax (like `as Type` casts) inside the embedded `<script>` block — the browser runs it as plain JS. HTTP serving and the control endpoints live in `web-server.ts` (hosted in the `voice-agent.ts` process).
 - All scripts should work from a fresh clone with minimal setup
 
 ## Pull requests

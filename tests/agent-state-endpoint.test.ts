@@ -1,21 +1,26 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, ChildProcess } from 'node:child_process';
-import { setTimeout as delay } from 'node:timers/promises';
+import type { Server } from 'node:http';
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { startWebServer } from '../src/web-server.js';
 
 // Integration test for PR #418 / #419 agent-state plumbing.
-// Spawns web-client.ts on a random port, exercises /sse-status + /mute-state,
-// asserts the `state` field flows through the 4-value enum + rejects invalid
-// values. Prevents regression of the avatar-animation chain that shipped
-// 2026-04-17 (web-client step 1 of 3, no test coverage at merge time).
+// Boots src/web-server.ts in-process (PR-A consolidation), exercises /sse-status
+// + /mute-state, asserts the `state` field flows through the 5-value enum +
+// rejects invalid values. Prevents regression of the avatar-animation chain
+// that shipped 2026-04-17 (web-server step 1 of 3, no test coverage at merge time).
+//
+// Pre-PR-A this spawned `tsx src/web-client.ts` as a subprocess. PR-A folded
+// the HTTP server into voice-agent.ts via a `startWebServer()` export, so the
+// test now runs the same code path in-process — faster boot + no subprocess
+// lifecycle / pipe-buffer pitfalls.
 
 const PORT = 18081; // well above the 8080 dev server + 9900 voice-agent
 
-// Test spawns the same web-client.ts the prod server uses. web-client reads
-// `../core-status.json` via the #443 coreIsRunning fallback, so a mid-pass
+// Test boots the same server src/voice-agent.ts uses at runtime. The server
+// reads `../core-status.json` via the #443 coreIsRunning fallback, so a mid-pass
 // `{"status":"running"}` write by the proactive loop leaks into the isolated
 // test server and turns "idle" assertions into "working". Neutralize by
 // writing an idle sentinel before the test + restoring the original bytes on
@@ -24,14 +29,14 @@ const PORT = 18081; // well above the 8080 dev server + 9900 voice-agent
 const CORE_STATUS_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'core-status.json');
 let savedCoreStatus: string | null = null;
 
-// voice-state.json is read by web-client's readVoiceState() as the authoritative
+// voice-state.json is read by web-server's readVoiceState() as the authoritative
 // voiceConnected source (browser POST cache is the fallback). Tests in the
 // voice-state describe block below write/remove this file to exercise both
 // branches. Stash + restore any real prod value on setup/teardown.
 const VOICE_STATE_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'voice-state.json');
 let savedVoiceState: string | null = null;
 
-let child: ChildProcess;
+let server: Server;
 
 async function fetchJson(path: string): Promise<any> {
 	const res = await fetch(`http://localhost:${PORT}${path}`);
@@ -55,43 +60,21 @@ describe('/sse-status + /mute-state — agent state plumbing (PR #418)', () => {
 		}
 		try { unlinkSync(VOICE_STATE_PATH); } catch { /* already gone */ }
 
-		child = spawn(
-			'npx',
-			['tsx', 'src/web-client.ts'],
-			{
-				env: { ...process.env, CLIENT_PORT: String(PORT), PORT: '19900', CLIENT_HOST: '127.0.0.1' },
-				// 'ignore' prevents the pipe buffer from filling in CI (stdout isn't drained),
-				// which would block the child and cause the /sse-status poll to time out.
-				stdio: 'ignore',
-			}
-		);
-		// Wait up to 20s for server to start listening. CI cold-start on `npx tsx`
-		// with fresh node_modules can take significantly longer than a dev machine.
-		const deadline = Date.now() + 20_000;
-		while (Date.now() < deadline) {
-			try {
-				const res = await fetch(`http://localhost:${PORT}/sse-status`);
-				if (res.ok) return;
-			} catch { /* not ready */ }
-			await delay(200);
-		}
-		throw new Error('web-client did not start within 20s');
+		server = startWebServer({ port: PORT, host: '127.0.0.1', wsPort: 19900 });
+		// startWebServer returns synchronously but server.listen is async —
+		// wait for the listening event before any test issues a fetch.
+		await new Promise<void>((resolve, reject) => {
+			if (server.listening) return resolve();
+			server.once('listening', () => resolve());
+			server.once('error', reject);
+		});
 	});
 
 	after(async () => {
-		// Hang-safe teardown: SIGTERM, wait up to 2s, SIGKILL fallback. Without
-		// awaiting exit, the live child-process handle keeps node --test alive
-		// past the CI job timeout (observed: 9m43s hangs after #423 merged).
-		if (child && !child.killed) {
-			await new Promise<void>((resolve) => {
-				const hardKill = setTimeout(() => {
-					try { child.kill('SIGKILL'); } catch { /* already dead */ }
-					resolve();
-				}, 2_000);
-				child.once('exit', () => { clearTimeout(hardKill); resolve(); });
-				child.kill('SIGTERM');
-			});
-		}
+		await new Promise<void>((resolve) => {
+			if (!server || !server.listening) return resolve();
+			server.close(() => resolve());
+		});
 		// Restore original core-status.json bytes (or delete the sentinel we
 		// wrote if no original existed). Keeps the live proactive loop's
 		// post-test reads consistent with what it wrote last.

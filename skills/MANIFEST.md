@@ -15,7 +15,7 @@ At voice-agent startup, `loadSkillManifestTools()` in `src/inline-tools.ts` scan
 
 The same `inlineTools` list is also pushed into the phone agent's tool table (see `skills/phone-conversation/scripts/conversation-server.ts:587`), so any tool a manifest-loaded skill contributes is automatically available to:
 
-- The web voice agent (Gemini Live ↔ bodhi ↔ web-client)
+- The web voice agent (Gemini Live ↔ bodhi ↔ web-server)
 - The phone agent (Twilio ↔ bodhi ↔ Gemini Live), for owner callers
 
 Tools that need an instant response (sub-second round-trip) live in `src/inline-tools.ts` directly; everything else should live in a manifest-loaded skill.

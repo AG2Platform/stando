@@ -36,6 +36,7 @@ function assertMacOS() { if (process.platform !== 'darwin') { console.error('Sut
 import { workTool, startResultWatcher, startContextDropWatcher, startNoteViewingWatcher, resetNoteViewingDebounce, logConversation, logSessionBoundary, getRecentConversation, getSecondsSinceLastTurn, setTaskStatusCallback } from './task-bridge.js';
 import { buildSutandoSystemPrompt, buildVoiceAgentContext } from './voice-context.js';
 import { classifyTransportClose, type ClassifiedClose } from './voice-error-classifier.js';
+import { startWebServer } from './web-server.js';
 
 import { personalPath, sharedPersonalPath, statePath, statePathEnsured, stateDir } from './util_paths.js';
 import {
@@ -101,6 +102,13 @@ if (process.env.GEMINI_VOICE_API_KEY) {
 
 const PORT = Number(process.env.PORT) || 9900;
 const HOST = process.env.HOST || '0.0.0.0';
+// HTTP server hosting the conversation page (HTML + SSE + control endpoints).
+// Moved into voice-agent.ts via PR-A — one Node process owns both the WebSocket
+// (PORT) and the HTTP server (CLIENT_PORT), replacing the standalone
+// com.sutando.web-client launchd service. 0.0.0.0 keeps remote-browser access
+// (e.g. iPhone over Tailscale, EC2 from a desktop) working unchanged.
+const CLIENT_PORT = Number(process.env.CLIENT_PORT) || 8080;
+const CLIENT_HOST = process.env.CLIENT_HOST || '0.0.0.0';
 // Default to sutando/ so Claude Code subprocess picks up CLAUDE.md automatically
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || new URL('..', import.meta.url).pathname;
 const DEFAULT_THREAD_KEY = 'sutando_main';
@@ -765,6 +773,13 @@ function bootstrapMemoryDir(): void {
 async function main() {
 	assertMacOS();
 	bootstrapMemoryDir();
+
+	// Start the HTTP server (port 8080) that serves the conversation page,
+	// SSE event stream, and the /sse-status, /mute-state, /toggle, /mute,
+	// /voice-mode, /note-viewing control endpoints. Started first so a port
+	// conflict (stale launchd web-client, second voice-agent instance) fails
+	// fast before we sink time into VoiceSession setup.
+	startWebServer({ port: CLIENT_PORT, host: CLIENT_HOST, wsPort: PORT });
 
 	// --- Voice agent observability ---
 	// Same format as phone agent's call-metrics.jsonl so diagnose.py can analyze both.

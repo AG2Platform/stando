@@ -81,7 +81,7 @@ First-launch checklist:
 ```bash
 # From the menu bar: Sutando → Uninstall Background Services
 # Or manually:
-for label in com.sutando.voice-agent com.sutando.web-client com.sutando.dashboard \
+for label in com.sutando.voice-agent com.sutando.dashboard \
              com.sutando.agent-api com.sutando.screen-capture com.sutando.credential-proxy \
              com.sutando.phone-conversation; do
     launchctl bootout "gui/$(id -u)/$label" 2>/dev/null
