@@ -31,6 +31,17 @@ export const APP_COPY = {
 	transcriptHint:
 		'Live user + assistant transcript. Server-final entries can be copied; in-progress lines fade in as the model speaks.',
 	transcriptEmpty: 'No transcript yet — connect and speak to populate.',
+	taskListTitle: 'Tasks',
+	taskListEmpty: 'No tasks yet — drop something via Discord, Telegram, or the voice agent.',
+	taskListAllDoneHidden: 'All tasks complete (hidden). Toggle "show done" to reveal.',
+	taskShowDetails: 'Show details ▸',
+	taskHideDetails: 'Hide ▾',
+	taskShowDone: 'show done',
+	taskHideDone: 'hide done',
+	taskCollapseAll: 'collapse all',
+	taskExpandAll: 'expand all',
+	taskSystemBrainOffline: 'brain offline',
+	taskSystemWatcherOffline: 'watcher offline',
 } as const;
 
 export type VoiceStatusKey =

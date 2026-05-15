@@ -21,11 +21,16 @@ export interface SutandoConfig {
 	wsUrl: string;
 	/** HTTP origin for the conversation HTTP API (default: <current origin>). */
 	apiOrigin: string;
+	/** HTTP origin for the Python agent API serving /tasks/active, /task,
+	 *  /questions (default: http://<current host>:7843). Override via
+	 *  `?agent-api=http://host:port` for remote-browser shells. */
+	agentApiOrigin: string;
 	/** Active route id from `?page=`, falling back to the default. */
 	initialRouteId: string;
 }
 
 const DEFAULT_WS_PORT = 9900;
+const DEFAULT_AGENT_API_PORT = 7843;
 
 /**
  * Browser-side config resolution. Re-runs on every call — cheap (no
@@ -38,13 +43,23 @@ export function resolveConfig(): SutandoConfig {
 
 	const wsUrl = params.get('ws') ?? injected.wsUrl ?? defaultWsUrlForCurrentHost();
 	const apiOrigin = params.get('api') ?? injected.apiOrigin ?? window.location.origin;
+	const agentApiOrigin =
+		params.get('agent-api') ?? injected.agentApiOrigin ?? defaultAgentApiOriginForCurrentHost();
 	const initialRouteId = params.get('page') ?? injected.initialRouteId ?? 'conversation';
 
-	return { wsUrl, apiOrigin, initialRouteId };
+	return { wsUrl, apiOrigin, agentApiOrigin, initialRouteId };
 }
 
 const defaultWsUrlForCurrentHost = (): string => {
 	const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 	const host = window.location.hostname || 'localhost';
 	return `${protocol}//${host}:${DEFAULT_WS_PORT}`;
+};
+
+const defaultAgentApiOriginForCurrentHost = (): string => {
+	// Agent API speaks plain HTTP; mirror the page protocol for HTTPS
+	// deployments so mixed-content doesn't block the fetch.
+	const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
+	const host = window.location.hostname || 'localhost';
+	return `${protocol}//${host}:${DEFAULT_AGENT_API_PORT}`;
 };

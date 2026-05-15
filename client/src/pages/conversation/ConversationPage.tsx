@@ -1,5 +1,6 @@
 import PageHeader from '@/components/atoms/page-header';
 import VoiceSessionCard from '@/components/molecules/voice-session-card';
+import TaskList from '@/components/organisms/task-list';
 import Transcript from '@/components/organisms/transcript';
 import { APP_COPY } from '@/const-values/app-copy';
 import { APP_ROUTES } from '@/const-values/app-routes';
@@ -34,6 +35,8 @@ export default function ConversationPage() {
 					</header>
 					<Transcript />
 				</section>
+
+				<TaskList />
 
 				<section className="rounded-lg border border-neutral-800/80 bg-[color:var(--color-surface)]/40 p-5">
 					<header>
