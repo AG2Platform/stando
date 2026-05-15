@@ -76,9 +76,17 @@ if channels_env.exists():
         if line.startswith("DISCORD_BOT_TOKEN="):
             TOKEN = line.split("=", 1)[1].strip()
 
-if not TOKEN:
-    print("DISCORD_BOT_TOKEN not set in ~/.claude/channels/discord/.env")
-    exit(1)
+if not TOKEN or len(TOKEN) < 50:
+    # Discord bot tokens are ~70+ chars. Empty / placeholder (e.g. "test-stub-...")
+    # would otherwise propagate to discord.LoginFailure on every respawn, and the
+    # launchd plist's KeepAlive=SuccessfulExit:false would loop forever (~10s/cycle,
+    # log-growth in MB/day). Exit 0 so launchd treats it as "intentionally not
+    # configured" and stops respawning until Settings rewrites the .env.
+    if not TOKEN:
+        print("DISCORD_BOT_TOKEN not set in ~/.claude/channels/discord/.env — exiting cleanly")
+    else:
+        print(f"DISCORD_BOT_TOKEN looks like a placeholder (len={len(TOKEN)}); exiting cleanly")
+    exit(0)
 
 TASKS_DIR = REPO / "tasks"
 RESULTS_DIR = REPO / "results"

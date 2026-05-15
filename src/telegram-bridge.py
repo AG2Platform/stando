@@ -123,9 +123,17 @@ if channels_env.exists():
             os.environ[k.strip()] = v.strip()
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-if not TOKEN:
-    print("TELEGRAM_BOT_TOKEN not set")
-    exit(1)
+if not TOKEN or len(TOKEN) < 30:
+    # Telegram bot tokens are 35-50 chars (`<id>:<35-char-base64>`). Empty /
+    # placeholder values would otherwise crash the python-telegram-bot client and
+    # the launchd plist (KeepAlive=SuccessfulExit:false) would respawn forever
+    # (~10s/cycle). Exit 0 so launchd treats it as "intentionally not configured"
+    # and stops respawning until Settings rewrites the .env.
+    if not TOKEN:
+        print("TELEGRAM_BOT_TOKEN not set — exiting cleanly")
+    else:
+        print(f"TELEGRAM_BOT_TOKEN looks like a placeholder (len={len(TOKEN)}); exiting cleanly")
+    exit(0)
 
 TASKS_DIR = REPO / "tasks"
 RESULTS_DIR = REPO / "results"
