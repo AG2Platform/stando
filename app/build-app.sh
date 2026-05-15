@@ -127,6 +127,10 @@ cp -R "$REPO/skills" "$APP/Contents/Resources/repo/skills"
 cp "$REPO/package.json" "$APP/Contents/Resources/repo/package.json"
 cp "$REPO/package-lock.json" "$APP/Contents/Resources/repo/package-lock.json"
 cp "$REPO/tsconfig.json" "$APP/Contents/Resources/repo/tsconfig.json"
+# Stage patches/ so the bundle's npm ci postinstall can re-apply our
+# bodhi v1alpha patch (required for managed-Gemini ephemeral tokens
+# to authenticate against Gemini Live's v1alpha-only auth_tokens API).
+[ -d "$REPO/patches" ] && cp -R "$REPO/patches" "$APP/Contents/Resources/repo/patches"
 cp "$REPO/CLAUDE.md" "$APP/Contents/Resources/repo/CLAUDE.md"
 [ -f "$REPO/PERSONAL_CLAUDE.md.example" ] && \
     cp "$REPO/PERSONAL_CLAUDE.md.example" "$APP/Contents/Resources/repo/PERSONAL_CLAUDE.md.example"

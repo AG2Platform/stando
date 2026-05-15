@@ -1,0 +1,31 @@
+diff --git a/node_modules/bodhi-realtime-agent/dist/index.js b/node_modules/bodhi-realtime-agent/dist/index.js
+index 8f38fc0..cce2f5d 100644
+--- a/node_modules/bodhi-realtime-agent/dist/index.js
++++ b/node_modules/bodhi-realtime-agent/dist/index.js
+@@ -2251,7 +2251,7 @@ var GeminiLiveTransport = class {
+   onResumptionUpdate;
+   onGroundingMetadata;
+   constructor(config, callbacks) {
+-    this.ai = new GoogleGenAI({ apiKey: config.apiKey });
++    this.ai = new GoogleGenAI({ apiKey: config.apiKey, httpOptions: { apiVersion: 'v1alpha' } });
+     this.config = config;
+     this.callbacks = callbacks;
+   }
+@@ -2524,7 +2524,7 @@ var GeminiLiveTransport = class {
+    */
+   applyTransportConfig(config) {
+     if (config.auth.type === "api_key") {
+-      this.ai = new GoogleGenAI({ apiKey: config.auth.apiKey });
++      this.ai = new GoogleGenAI({ apiKey: config.auth.apiKey, httpOptions: { apiVersion: 'v1alpha' } });
+     }
+     if (config.model !== void 0) {
+       this.config.model = config.model;
+@@ -3728,7 +3728,7 @@ var GeminiBatchSTTProvider = class {
+   onTranscript;
+   onPartialTranscript;
+   constructor(config) {
+-    this.ai = new GoogleGenAI2({ apiKey: config.apiKey });
++    this.ai = new GoogleGenAI2({ apiKey: config.apiKey, httpOptions: { apiVersion: 'v1alpha' } });
+     this.model = config.model;
+   }
+   configure(audio) {
