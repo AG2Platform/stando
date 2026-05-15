@@ -42,6 +42,12 @@ export const APP_COPY = {
 	taskExpandAll: 'expand all',
 	taskSystemBrainOffline: 'brain offline',
 	taskSystemWatcherOffline: 'watcher offline',
+	taskReplyPlaceholder: 'Type a reply…',
+	taskReplyPlaceholderOrType: 'or type a reply…',
+	taskReplySend: 'Send',
+	taskReplySending: 'Sending…',
+	taskReplySent: 'Replied:',
+	taskReplyFailed: 'Reply failed —',
 } as const;
 
 export type VoiceStatusKey =

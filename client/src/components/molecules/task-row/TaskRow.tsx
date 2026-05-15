@@ -1,6 +1,8 @@
 import RelativeTime from '@/components/atoms/relative-time';
 import TaskStatusIcon from '@/components/atoms/task-status-icon';
+import TaskReplyForm from '@/components/molecules/task-reply-form';
 import { APP_COPY } from '@/const-values/app-copy';
+import { parseDecisionOptions } from '@/lib/parse-decision-options';
 import { summarizeTaskText, tagVoiceFallback } from '@/lib/task-summary';
 import type { Task } from '@/types/task';
 
@@ -55,12 +57,15 @@ export default function TaskRow({ task, isExpanded, onToggle }: TaskRowProps) {
 				) : null}
 			</header>
 			{hasResult && isExpanded ? (
-				<pre
-					id={`result-${task.id}`}
-					className="m-0 max-h-64 overflow-auto whitespace-pre-wrap break-words border-t border-neutral-800/60 bg-neutral-950/60 px-3 py-2 text-xs leading-relaxed text-[color:var(--color-text-dim)]"
-				>
-					{task.result}
-				</pre>
+				<div className="border-t border-neutral-800/60 bg-neutral-950/60 px-3 py-2">
+					<pre
+						id={`result-${task.id}`}
+						className="m-0 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-[color:var(--color-text-dim)]"
+					>
+						{task.result}
+					</pre>
+					<TaskReplyForm taskId={task.id} options={parseDecisionOptions(task.result)} />
+				</div>
 			) : null}
 		</article>
 	);
