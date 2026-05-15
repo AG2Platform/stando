@@ -199,6 +199,94 @@ enum CloudClient {
         URLSession.shared.dataTask(with: req).resume()
     }
 
+    // MARK: - Skills inventory (Wave 4.10)
+
+    /// One installed skill row from /api/me/inventory.
+    struct CloudInstalledSkill: Decodable {
+        let skillId: String
+        let slug: String
+        let name: String
+        let description: String?
+        let version: String
+        let tierRequired: String
+        let priceCredits: Int
+        let installedAt: String
+        let userRating: Int?
+    }
+
+    /// One activated cloud tool row from /api/me/inventory.
+    struct CloudActivatedTool: Decodable {
+        let skillId: String
+        let slug: String
+        let name: String
+        let description: String?
+        let version: String
+        let tierRequired: String
+        let unitPriceCredits: Double?
+        let unitLabel: String?
+        let callsThisPeriod: Int
+        let creditsDebitedThisPeriod: Double
+        let lastCallAt: String?
+        let userRating: Int?
+    }
+
+    /// Combined response shape from GET /api/me/inventory.
+    struct CloudInventory: Decodable {
+        let installed: [CloudInstalledSkill]
+        let cloudTools: [CloudActivatedTool]
+    }
+
+    /// Fetch the user's installed skills + activated cloud tools.
+    /// Returns nil when signed out or on network errors. Caller MUST
+    /// hop to the main thread before touching UI.
+    static func fetchInventory(completion: @escaping (CloudInventory?) -> Void) {
+        guard let auth = _loadCloudAuth() else { completion(nil); return }
+        guard let url = URL(string: auth.apiBase + "/api/me/inventory") else { completion(nil); return }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "GET"
+        req.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.dataTask(with: req) { data, response, error in
+            if error != nil { completion(nil); return }
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let data = data else { completion(nil); return }
+            do {
+                let inv = try JSONDecoder().decode(CloudInventory.self, from: data)
+                completion(inv)
+            } catch {
+                NSLog("CloudClient: /api/me/inventory decode failed: \(error)")
+                completion(nil)
+            }
+        }.resume()
+    }
+
+    enum UninstallResult {
+        case ok
+        case notFound
+        case failure(String)
+    }
+
+    /// Uninstall a skill or deactivate a cloud tool. `slugOrId` accepts
+    /// either the skill slug (recommended) or its UUID. For paid
+    /// skills, reinstall via the Station re-charges price_credits —
+    /// surface that in the caller's confirmation copy.
+    static func uninstallSkill(_ slugOrId: String, completion: @escaping (UninstallResult) -> Void) {
+        guard let auth = _loadCloudAuth(),
+              let encoded = slugOrId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: auth.apiBase + "/api/skills/\(encoded)/uninstall") else {
+            completion(.failure("not signed in")); return
+        }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.dataTask(with: req) { _, response, error in
+            if let error = error { completion(.failure(error.localizedDescription)); return }
+            guard let http = response as? HTTPURLResponse else { completion(.failure("no response")); return }
+            if http.statusCode == 404 { completion(.notFound); return }
+            if (200..<300).contains(http.statusCode) { completion(.ok); return }
+            completion(.failure("HTTP \(http.statusCode)"))
+        }.resume()
+    }
+
     /// Set the user's Gemini mode (Wave 4.8). Server rejects 'managed'
     /// for free effectivePlan with HTTP 402; completion fires with
     /// `.requiresPaid` so the UI can surface "upgrade to use managed
