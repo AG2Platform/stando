@@ -2839,6 +2839,298 @@ setInterval(() => {
 	}
 }, 30_000);
 
+// /paidsubscriptions page — full HTML, server-side rendered from
+// skills/subscription-scanner/state/subscriptions.json. Sortable table,
+// diff highlights from last scan, "Scan now" button.
+function renderSubscriptionsHtml(rawJson: string): string {
+	let data: any;
+	try { data = JSON.parse(rawJson); } catch (e: any) { data = { last_scan: null, subscriptions: [], scan_history: [], _parse_error: e?.message }; }
+	const lastScan = data.last_scan ? new Date(data.last_scan).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' }) : '— never scanned —';
+	const lastDiff = (data.scan_history && data.scan_history.length) ? data.scan_history[data.scan_history.length - 1] : { added: [], removed: [], amount_changed: [] };
+	const dataJson = JSON.stringify(data).replace(/</g, '\\u003c');
+
+	return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paid Subscriptions — Sutando</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; background: #0e0e14; color: #e8e8ee; padding: 24px; min-height: 100vh; }
+  .wrap { max-width: 1200px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; flex-wrap: wrap; }
+  h1 { font-size: 22px; font-weight: 700; }
+  .subtitle { color: #707080; font-size: 13px; }
+  .meta { display: flex; gap: 20px; font-size: 13px; color: #888; margin: 12px 0 20px; flex-wrap: wrap; align-items: center; }
+  .meta strong { color: #c0c0d0; font-weight: 600; }
+  .scan-btn { background: #1e4028; color: #4ecca3; border: 1px solid #2a4a36; padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; }
+  .scan-btn:hover:not(:disabled) { background: #2a503a; }
+  .scan-btn:disabled { background: #1a1a2a; color: #444; border-color: #2a2a3e; cursor: wait; }
+  .scan-status { font-size: 12px; color: #4ecca3; margin-left: 8px; }
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 24px; }
+  .stat { background: #14141e; border: 1px solid #1e1e2a; border-radius: 10px; padding: 14px 16px; }
+  .stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: #707080; margin-bottom: 6px; }
+  .stat .value { font-size: 24px; font-weight: 700; color: #e8e8ee; }
+  .stat .sub { font-size: 11px; color: #888; margin-top: 4px; }
+  .stat.added .value { color: #4ecca3; }
+  .stat.removed .value { color: #e94560; }
+  .stat.uncertain .value { color: #f0ad4e; }
+
+  table { width: 100%; border-collapse: collapse; background: #14141e; border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid #1e1e2a; font-size: 13px; }
+  th { background: #1a1a26; color: #a0a0b0; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; cursor: pointer; user-select: none; position: relative; }
+  th:hover { color: #e8e8ee; }
+  th.sort-asc::after { content: ' ▲'; color: #4ecca3; }
+  th.sort-desc::after { content: ' ▼'; color: #4ecca3; }
+  tbody tr:hover { background: #181826; }
+  td.amount { text-align: right; font-variant-numeric: tabular-nums; }
+  td.amount .currency { color: #707080; font-size: 11px; margin-left: 2px; }
+
+  .status { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+  .status.active { background: #1e4028; color: #4ecca3; }
+  .status.cancelled { background: #2a1a20; color: #e94560; }
+  .status.uncertain { background: #2a2418; color: #f0ad4e; }
+
+  .vendor { color: #e8e8ee; font-weight: 600; }
+  .account { color: #888; font-size: 12px; }
+  .notes { color: #707080; font-size: 11px; font-style: italic; max-width: 320px; }
+  .freq { color: #a0a0b0; font-size: 12px; }
+
+  .row-added { background: rgba(78, 204, 163, 0.08); }
+  .row-cancelled { opacity: 0.55; }
+  .row-cancelled td { text-decoration: line-through; text-decoration-color: #e94560; }
+  .row-cancelled .vendor { color: #e94560; text-decoration-color: #e94560; }
+
+  .empty { text-align: center; padding: 40px; color: #555; }
+  footer { margin-top: 32px; color: #555; font-size: 11px; text-align: center; }
+  footer a { color: #888; text-decoration: none; }
+  footer a:hover { color: #4ecca3; }
+
+  details { margin-top: 24px; }
+  details summary { cursor: pointer; color: #707080; font-size: 12px; padding: 8px 0; }
+  details summary:hover { color: #a0a0b0; }
+  pre { background: #0a0a12; padding: 14px; border-radius: 8px; overflow-x: auto; font-size: 11px; color: #a0a0b0; margin-top: 8px; max-height: 300px; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>💳 Paid Subscriptions</h1>
+      <div class="subtitle">Scanned from Gmail receipts</div>
+      <div style="margin-left:auto"><a href="/" style="color:#707080;font-size:12px;text-decoration:none;border:1px solid #2a2a3e;padding:5px 12px;border-radius:6px;">← Dashboard</a></div>
+    </header>
+
+    <div class="meta">
+      <span><strong>Last scan:</strong> ${escapeHtml(lastScan)}</span>
+      <button class="scan-btn" id="scanBtn" onclick="triggerScan()">⟳ Scan now</button>
+      <span class="scan-status" id="scanStatus"></span>
+    </div>
+
+    <div id="summary" class="summary"></div>
+
+    <div id="diff-banner"></div>
+
+    <table id="subs-table">
+      <thead>
+        <tr>
+          <th data-key="vendor">Vendor</th>
+          <th data-key="amount" class="amount">Amount</th>
+          <th data-key="frequency">Frequency</th>
+          <th data-key="account">Account</th>
+          <th data-key="last_charged">Last charged</th>
+          <th data-key="next_charge">Next charge</th>
+          <th data-key="status">Status</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody id="subs-tbody"></tbody>
+    </table>
+
+    <details>
+      <summary>Raw JSON</summary>
+      <pre id="raw-json"></pre>
+    </details>
+
+    <footer>
+      Subscription data lives at <code>skills/subscription-scanner/state/subscriptions.json</code> (gitignored).<br>
+      Auto-scan runs monthly via the <code>subscription-scan</code> cron. Source: Gmail receipts via Claude MCP.
+    </footer>
+  </div>
+
+<script>
+  const data = ${dataJson};
+  const tbody = document.getElementById('subs-tbody');
+  const summary = document.getElementById('summary');
+  const diffBanner = document.getElementById('diff-banner');
+  const rawJson = document.getElementById('raw-json');
+  const lastDiff = (data.scan_history && data.scan_history.length) ? data.scan_history[data.scan_history.length - 1] : { added: [], removed: [], amount_changed: [] };
+
+  let sortKey = 'amount';
+  let sortDir = 'desc';
+
+  function fmtMoney(amount, currency) {
+    if (amount === null || amount === undefined) return '<span style="color:#555">—</span>';
+    const sym = currency === 'EUR' ? '€' : currency === 'GBP' ? '£' : '$';
+    return sym + amount.toFixed(2) + (currency && currency !== 'USD' ? ' <span class="currency">' + currency + '</span>' : '');
+  }
+
+  function fmtDate(d) {
+    if (!d) return '<span style="color:#555">—</span>';
+    return d;
+  }
+
+  function escapeHtmlClient(s) {
+    if (s === null || s === undefined) return '';
+    return String(s).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function monthlyEquivalent(sub) {
+    if (sub.amount === null || sub.amount === undefined) return null;
+    if (sub.frequency === 'monthly') return sub.amount;
+    if (sub.frequency === 'annual') return sub.amount / 12;
+    return sub.amount;
+  }
+
+  function renderSummary() {
+    const subs = data.subscriptions || [];
+    const active = subs.filter(s => s.status === 'active');
+    const uncertain = subs.filter(s => s.status === 'uncertain');
+    const cancelled = subs.filter(s => s.status === 'cancelled');
+
+    let monthlyTotal = 0, monthlyKnown = 0, monthlyUnknown = 0;
+    for (const s of active) {
+      const me = monthlyEquivalent(s);
+      if (me !== null) {
+        const usdRate = s.currency === 'EUR' ? 1.08 : (s.currency === 'GBP' ? 1.27 : 1.0);
+        monthlyTotal += me * usdRate;
+        monthlyKnown++;
+      } else {
+        monthlyUnknown++;
+      }
+    }
+
+    summary.innerHTML = \`
+      <div class="stat"><div class="label">Active</div><div class="value">\${active.length}</div><div class="sub">\${monthlyUnknown ? monthlyUnknown + ' missing price' : 'all priced'}</div></div>
+      <div class="stat"><div class="label">Monthly burn (~)</div><div class="value">$\${monthlyTotal.toFixed(0)}</div><div class="sub">\${monthlyKnown}/\${active.length} priced • \$\${(monthlyTotal*12).toFixed(0)}/yr</div></div>
+      <div class="stat uncertain"><div class="label">Uncertain</div><div class="value">\${uncertain.length}</div><div class="sub">verify these</div></div>
+      <div class="stat removed"><div class="label">Cancelled</div><div class="value">\${cancelled.length}</div><div class="sub">recent cancellations</div></div>
+    \`;
+  }
+
+  function renderDiffBanner() {
+    const a = lastDiff.added || [];
+    const r = lastDiff.removed || [];
+    const c = lastDiff.amount_changed || [];
+    if (a.length === 0 && r.length === 0 && c.length === 0) {
+      diffBanner.innerHTML = '<div style="font-size:12px;color:#555;margin-bottom:14px;">No changes since previous scan.</div>';
+      return;
+    }
+    const parts = [];
+    if (a.length) parts.push('<span style="color:#4ecca3">+' + a.length + ' added: ' + a.map(escapeHtmlClient).join(', ') + '</span>');
+    if (r.length) parts.push('<span style="color:#e94560">−' + r.length + ' removed: ' + r.map(escapeHtmlClient).join(', ') + '</span>');
+    if (c.length) parts.push('<span style="color:#f0ad4e">' + c.length + ' price changed</span>');
+    diffBanner.innerHTML = '<div style="font-size:13px;margin-bottom:14px;padding:10px 14px;background:#181826;border-radius:8px;border-left:3px solid #4ecca3;">Since last scan: ' + parts.join(' • ') + '</div>';
+  }
+
+  function renderTable() {
+    const subs = (data.subscriptions || []).slice();
+    const addedSet = new Set(lastDiff.added || []);
+
+    subs.sort((a, b) => {
+      let av = a[sortKey], bv = b[sortKey];
+      if (sortKey === 'amount') { av = monthlyEquivalent(a) ?? -1; bv = monthlyEquivalent(b) ?? -1; }
+      if (av === null || av === undefined) av = '';
+      if (bv === null || bv === undefined) bv = '';
+      if (typeof av === 'string') av = av.toLowerCase();
+      if (typeof bv === 'string') bv = bv.toLowerCase();
+      if (av < bv) return sortDir === 'asc' ? -1 : 1;
+      if (av > bv) return sortDir === 'asc' ? 1 : -1;
+      return 0;
+    });
+
+    tbody.innerHTML = '';
+    if (subs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">No subscriptions found yet. Click "Scan now" to populate.</td></tr>';
+      return;
+    }
+    for (const s of subs) {
+      const tr = document.createElement('tr');
+      const isAdded = addedSet.has(s.vendor);
+      if (s.status === 'cancelled') tr.className = 'row-cancelled';
+      else if (isAdded) tr.className = 'row-added';
+      tr.innerHTML = \`
+        <td><div class="vendor">\${escapeHtmlClient(s.vendor)}</div><div class="account">\${escapeHtmlClient(s.category || '')}</div></td>
+        <td class="amount">\${fmtMoney(s.amount, s.currency)}</td>
+        <td><span class="freq">\${escapeHtmlClient(s.frequency || '')}</span></td>
+        <td><span class="account">\${escapeHtmlClient(s.account || '')}</span></td>
+        <td>\${fmtDate(s.last_charged)}</td>
+        <td>\${fmtDate(s.next_charge)}</td>
+        <td><span class="status \${escapeHtmlClient(s.status || '')}">\${escapeHtmlClient(s.status || '')}</span></td>
+        <td><span class="notes">\${escapeHtmlClient(s.notes || '')}</span></td>
+      \`;
+      tbody.appendChild(tr);
+    }
+    document.querySelectorAll('th[data-key]').forEach(th => {
+      th.classList.remove('sort-asc', 'sort-desc');
+      if (th.dataset.key === sortKey) th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+    });
+  }
+
+  document.querySelectorAll('th[data-key]').forEach(th => {
+    th.addEventListener('click', () => {
+      const k = th.dataset.key;
+      if (k === sortKey) sortDir = (sortDir === 'asc' ? 'desc' : 'asc');
+      else { sortKey = k; sortDir = (k === 'vendor' || k === 'frequency' || k === 'status' || k === 'account') ? 'asc' : 'desc'; }
+      renderTable();
+    });
+  });
+
+  async function triggerScan() {
+    const btn = document.getElementById('scanBtn');
+    const status = document.getElementById('scanStatus');
+    btn.disabled = true;
+    status.textContent = '⏳ queueing...';
+    try {
+      const r = await fetch('/paidsubscriptions/scan', { method: 'POST' });
+      const j = await r.json();
+      if (j.ok) {
+        status.textContent = '✓ ' + j.message;
+        // poll for fresh data every 5s for 3 minutes
+        let elapsed = 0;
+        const poll = setInterval(async () => {
+          elapsed += 5;
+          if (elapsed > 180) { clearInterval(poll); btn.disabled = false; status.textContent = '⚠ scan still running — refresh in a moment'; return; }
+          const fresh = await fetch('/paidsubscriptions/data').then(r => r.json()).catch(() => null);
+          if (fresh && fresh.last_scan && fresh.last_scan !== data.last_scan) {
+            clearInterval(poll);
+            status.textContent = '✓ scan complete — refreshing...';
+            setTimeout(() => location.reload(), 800);
+          }
+        }, 5000);
+      } else {
+        status.textContent = '✗ ' + (j.error || 'failed');
+        btn.disabled = false;
+      }
+    } catch (e) {
+      status.textContent = '✗ ' + (e.message || 'network error');
+      btn.disabled = false;
+    }
+  }
+
+  rawJson.textContent = JSON.stringify(data, null, 2);
+  renderSummary();
+  renderDiffBanner();
+  renderTable();
+</script>
+</body>
+</html>`;
+}
+
+function escapeHtml(s: string): string {
+	return String(s).replace(/[<>&"']/g, c => (({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'} as Record<string, string>)[c] || c));
+}
+
 const server = createServer((req, res) => {
 	const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
@@ -3048,6 +3340,73 @@ const server = createServer((req, res) => {
 			'Cache-Control': 'no-cache, no-store, must-revalidate',
 		});
 		res.end(CHAT_HTML);
+		return;
+	}
+
+	// Paid subscriptions dashboard. Reads skills/subscription-scanner/state/subscriptions.json
+	// and renders a sortable table with diff highlights from the previous scan.
+	// Trigger an out-of-cycle scan via POST to /paidsubscriptions/scan.
+	if (url.pathname === '/paidsubscriptions') {
+		try {
+			const dataPath = 'skills/subscription-scanner/state/subscriptions.json';
+			const raw = existsSync(dataPath) ? readFileSync(dataPath, 'utf-8') : '{"last_scan":null,"subscriptions":[],"scan_history":[]}';
+			res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+			res.end(renderSubscriptionsHtml(raw));
+		} catch (e: any) {
+			res.writeHead(500, { 'Content-Type': 'text/plain' });
+			res.end('Error reading subscriptions: ' + (e?.message || String(e)));
+		}
+		return;
+	}
+	if (url.pathname === '/paidsubscriptions/data') {
+		try {
+			const dataPath = 'skills/subscription-scanner/state/subscriptions.json';
+			const raw = existsSync(dataPath) ? readFileSync(dataPath, 'utf-8') : '{"last_scan":null,"subscriptions":[],"scan_history":[]}';
+			res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' });
+			res.end(raw);
+		} catch (e: any) {
+			res.writeHead(500, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ error: e?.message || String(e) }));
+		}
+		return;
+	}
+	if (url.pathname === '/paidsubscriptions/scan' && req.method === 'POST') {
+		// Localhost-only: this endpoint writes an owner-tier task file that
+		// the watcher processes with full agent privileges. Without this
+		// guard, anyone on the same LAN or a tailscale-funnel'd public URL
+		// could `curl -X POST http://<host>:8080/paidsubscriptions/scan`
+		// and silently enqueue arbitrary work. Per PR #651 Blocker 1.
+		// Reads req.socket.remoteAddress directly rather than a header
+		// (X-Forwarded-For et al. are spoofable). IPv4-mapped IPv6
+		// (::ffff:127.0.0.1) and IPv6 loopback (::1) are both localhost.
+		const remote = req.socket?.remoteAddress || '';
+		const isLocalhost = (
+			remote === '127.0.0.1' ||
+			remote === '::1' ||
+			remote === '::ffff:127.0.0.1'
+		);
+		if (!isLocalhost) {
+			res.writeHead(403, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ ok: false, error: 'forbidden: /paidsubscriptions/scan accepts localhost connections only' }));
+			return;
+		}
+		try {
+			const taskId = `task-${Date.now()}`;
+			// Pointer (not inline) — prevents prompt-injection via
+			// header-shaped lines in scan-prompt.md (`source:`,
+			// `access_tier:`, etc.) being parsed as real task headers.
+			// Per PR #651 Blocker 2. The agent reads the file when it
+			// processes the task. `access_tier: owner` is explicit per
+			// Chi's review — relying on the absence-of-field default
+			// is fragile.
+			const taskContent = `id: ${taskId}\ntimestamp: ${new Date().toISOString()}\ntask: Run subscription scan (out-of-cycle, triggered from /paidsubscriptions UI). Read the full instructions in skills/subscription-scanner/scan-prompt.md and follow them verbatim.\nsource: web\nfrom: paidsubscriptions-ui\naccess_tier: owner\n`;
+			writeFileSync(`tasks/${taskId}.txt`, taskContent);
+			res.writeHead(200, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ ok: true, task_id: taskId, message: 'Scan queued; the next proactive-loop pass will pick it up (~1 min). Refresh to see results.' }));
+		} catch (e: any) {
+			res.writeHead(500, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ ok: false, error: e?.message || String(e) }));
+		}
 		return;
 	}
 
