@@ -6,9 +6,10 @@ import { fileURLToPath, URL } from 'node:url';
 /**
  * Vite config for the Sutando frontend.
  *
- * Build output → `client/dist/`, served by src/web-server.ts at `/v2` while
- * PR-B lands. PR-C+ migrate the legacy `/` route to this bundle and delete
- * src/web-client-html.ts.
+ * Build output → `client/dist/`, served by src/web-server.ts at `/` (the
+ * primary route after PR-C step 5) with a `/v2` alias for older bookmarks
+ * and a `/legacy` fallback that still ships the inline HTML for one
+ * release.
  *
  * `base: './'` keeps asset URLs relative so the same bundle works from any
  * server route (`/v2/`, `/`, or eventually a CDN) without rebuilding. Critical

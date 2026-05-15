@@ -2,7 +2,7 @@
   "name": "@sutando/client",
   "version": "0.1.0",
   "private": true,
-  "description": "Sutando desktop + remote-browser frontend. Hosts the conversation, core-cli, dashboard, and settings pages, served by src/web-server.ts at /v2.",
+  "description": "Sutando desktop + remote-browser frontend. Hosts the conversation, core-cli, dashboard, and settings pages, served by src/web-server.ts at / (with /v2 alias).",
   "type": "module",
   "scripts": {
     "dev": "vite",

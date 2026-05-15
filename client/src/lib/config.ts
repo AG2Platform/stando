@@ -3,7 +3,7 @@
  *
  * Sutando's frontend ships in four very different shells:
  *   1. Local desktop — WKWebView in src/Sutando/UnifiedMainWindow.swift
- *      points at `http://localhost:8080/v2/`.
+ *      points at `http://localhost:8080/`.
  *   2. Remote browser — same URL but resolved over LAN / Tailscale /
  *      EC2 DNS. WebSocket host needs to match whatever the browser is
  *      currently rendering from, not a hardcoded localhost.

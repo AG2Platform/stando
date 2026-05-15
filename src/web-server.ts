@@ -2,8 +2,15 @@
  * HTTP server for the Sutando desktop + remote browser conversation page.
  *
  * Endpoints:
- *   GET  /                  — legacy HTML (renderWebClientHtml). PR-B will swap
- *                             this for the Vite-built React bundle (client/dist).
+ *   GET  /, /v2[/*]         — Vite-built React bundle (client/dist). The two
+ *                             roots serve the same SPA so existing bookmarks
+ *                             pointing at /v2 keep working. Falls back to the
+ *                             legacy HTML when the bundle hasn't been built
+ *                             (fresh checkout safety net).
+ *   GET  /legacy[/*]        — Legacy inline HTML (renderWebClientHtml). One-
+ *                             release escape hatch in case a /v2 regression
+ *                             takes out the React build; will be retired in
+ *                             PR-C step 6 along with web-client-html.ts.
  *   GET  /sse               — Server-Sent Events: `agent-state`, `toggle-voice`,
  *                             `toggle-mute` — consumed by the page.
  *   GET  /sse-status        — JSON snapshot { muted, voiceConnected, state, label, clients }.
@@ -32,8 +39,9 @@ import { renderWebClientHtml } from './web-client-html.js';
 
 // Dist directory for the React bundle (`client/`). Resolved once at module
 // load — web-server.ts lives in `src/`, so `../client/dist` lands at the
-// workspace root. PR-B serves this bundle at `/v2`; PR-C+ migrate features
-// off the legacy `/` HTML and eventually flip the routes.
+// workspace root. After PR-C step 5 the bundle serves both `/` and `/v2`;
+// the legacy HTML survives at `/legacy` for one release and is the fresh-
+// checkout fallback when client/dist isn't built yet.
 const CLIENT_DIST_DIR = fileURLToPath(new URL('../client/dist/', import.meta.url));
 
 const STATIC_MIME_TYPES: Record<string, string> = {
@@ -55,10 +63,10 @@ const STATIC_MIME_TYPES: Record<string, string> = {
 };
 
 /**
- * Resolve a request path under `/v2/` to a file inside `client/dist/`.
+ * Resolve a request path under `/` or `/v2/` to a file inside `client/dist/`.
  * Returns null when the path escapes the dist root (defense against
- * `/v2/../etc/passwd` style traversal) or when the file is missing —
- * either case falls through to a 404 in the caller.
+ * `/../etc/passwd` style traversal) or when the file is missing — either
+ * case falls through to a 404 in the caller.
  */
 function resolveDistFile(relPathRaw: string): string | null {
 	const relPath = relPathRaw.replace(/^\/+/, '') || 'index.html';
@@ -71,6 +79,36 @@ function resolveDistFile(relPathRaw: string): string | null {
 		return abs;
 	} catch {
 		return null;
+	}
+}
+
+/**
+ * Serve a file from `client/dist/`. Returns true when the response was
+ * written, false when the file wasn't found (caller decides the fallback).
+ */
+function serveDistFile(
+	rel: string,
+	res: import('node:http').ServerResponse
+): boolean {
+	const file = resolveDistFile(rel) ?? resolveDistFile('index.html');
+	if (!file) return false;
+	const mime = STATIC_MIME_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
+	try {
+		const body = readFileSync(file);
+		res.writeHead(200, {
+			'Content-Type': mime,
+			// Hashed asset filenames from Vite are safe to cache long-term;
+			// index.html must always be fresh so SPA route changes ship.
+			'Cache-Control': file.endsWith('index.html')
+				? 'no-cache, no-store, must-revalidate'
+				: 'public, max-age=31536000, immutable',
+		});
+		res.end(body);
+		return true;
+	} catch {
+		res.writeHead(500);
+		res.end('Failed to read static asset');
+		return true;
 	}
 }
 
@@ -434,49 +472,61 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 			return;
 		}
 
-		// /v2[/*] — Vite-built React bundle from client/dist/. Lives alongside
-		// the legacy / route until PR-C migrates real features off the inline
-		// HTML and we flip /v2 ↔ /. Falls through to the legacy HTML when the
-		// bundle hasn't been built yet (e.g. fresh checkout without
-		// `pnpm --filter @sutando/client build`), so the desktop app still
-		// works during incremental adoption.
-		if (url.pathname === '/v2' || url.pathname.startsWith('/v2/')) {
-			const rel = url.pathname === '/v2' ? 'index.html' : url.pathname.slice('/v2/'.length);
-			const file = resolveDistFile(rel) ?? resolveDistFile('index.html');
-			if (file) {
-				const mime = STATIC_MIME_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
-				try {
-					const body = readFileSync(file);
-					res.writeHead(200, {
-						'Content-Type': mime,
-						// Hashed asset filenames from Vite are safe to cache long-term;
-						// index.html must always be fresh so SPA route changes ship.
-						'Cache-Control': file.endsWith('index.html')
-							? 'no-cache, no-store, must-revalidate'
-							: 'public, max-age=31536000, immutable',
-					});
-					res.end(body);
-					return;
-				} catch {
-					res.writeHead(500);
-					res.end('Failed to read static asset');
-					return;
-				}
-			}
-			res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
-			res.end(
-				`/v2 bundle not built yet. Run \`pnpm --filter @sutando/client build\` from the repo root.`
-			);
+		// /legacy[/*] — escape hatch serving the original inline HTML
+		// (renderWebClientHtml). Survives PR-C step 5 for one release in case
+		// a regression takes out the React build; retired in step 6 when
+		// web-client-html.ts is deleted.
+		if (url.pathname === '/legacy' || url.pathname.startsWith('/legacy/')) {
+			res.writeHead(200, {
+				'Content-Type': 'text/html; charset=utf-8',
+				'Cache-Control': 'no-cache, no-store, must-revalidate',
+				'Pragma': 'no-cache',
+				'Expires': '0',
+			});
+			res.end(HTML);
 			return;
 		}
 
-		res.writeHead(200, {
-			'Content-Type': 'text/html; charset=utf-8',
-			'Cache-Control': 'no-cache, no-store, must-revalidate',
-			'Pragma': 'no-cache',
-			'Expires': '0',
-		});
-		res.end(HTML);
+		// / and /v2[/*] — Vite-built React bundle from client/dist/. The two
+		// roots serve the same SPA so existing bookmarks/launchers pointing
+		// at /v2 keep working. Falls back to the legacy HTML when the bundle
+		// isn't built (fresh checkout / dev without `pnpm build:client`).
+		const isV2Path = url.pathname === '/v2' || url.pathname.startsWith('/v2/');
+		const isRootSpaPath = url.pathname === '/';
+		if (isV2Path || isRootSpaPath) {
+			const rel = isV2Path
+				? url.pathname === '/v2'
+					? 'index.html'
+					: url.pathname.slice('/v2/'.length)
+				: 'index.html';
+			if (serveDistFile(rel, res)) return;
+			// Bundle missing — serve legacy HTML so a fresh checkout still
+			// boots. Bundle-missing for /v2 specifically still returns the
+			// HTML because the legacy app is functionally identical and the
+			// fallback is the friendlier UX than a 404.
+			res.writeHead(200, {
+				'Content-Type': 'text/html; charset=utf-8',
+				'Cache-Control': 'no-cache, no-store, must-revalidate',
+				'Pragma': 'no-cache',
+				'Expires': '0',
+			});
+			res.end(HTML);
+			return;
+		}
+
+		// Unknown path — serve the SPA's index.html so client-side routing
+		// can resolve. (Path-based deep links like /settings would otherwise
+		// 404 here; the SPA reads `?page=` so /settings as a path is unused
+		// today, but keep this in place for forward compatibility.)
+		if (!serveDistFile('index.html', res)) {
+			res.writeHead(200, {
+				'Content-Type': 'text/html; charset=utf-8',
+				'Cache-Control': 'no-cache, no-store, must-revalidate',
+				'Pragma': 'no-cache',
+				'Expires': '0',
+			});
+			res.end(HTML);
+		}
 	});
 
 	server.listen(HTTP_PORT, HTTP_HOST, () => {

@@ -8,7 +8,7 @@ export const APP_COPY = {
 	appName: 'Sutando',
 	appTagline: 'Your personal agent.',
 	scaffoldNotice:
-		'PR-C in progress — voice now connects from /v2. Transcript, task list, and dynamic region migrate in follow-up PRs; the legacy / route still ships those.',
+		'/ now serves the React build. The original inline HTML is one release away from removal; available at /legacy as an escape hatch.',
 	pageMissing: 'No page matched. Use the nav above to pick one.',
 	loading: 'Loading…',
 	voiceConnect: 'Connect',

@@ -2,7 +2,7 @@
 
 Sutando's React frontend. Hosts four pages — **conversation**, **core-cli**, **dashboard**, **settings** — that map 1:1 to the panes in `src/Sutando/UnifiedMainWindow.swift`.
 
-The legacy HTML at `GET /` (served via `src/web-server.ts` + `src/web-client-html.ts`) still ships the full conversation UI. This bundle is mounted at **`/v2`** until PR-C migrates each pane's logic into the React tree, at which point `/` flips and `web-client-html.ts` is deleted.
+`GET /` serves this React bundle. The original inline HTML survives at `GET /legacy` as a one-release escape hatch (still served via `src/web-server.ts` + `src/web-client-html.ts`); both will be removed in PR-C step 6 once the new tree has burned in. Bookmarks pointing at `/v2` continue to work — it's an alias for `/`.
 
 ## Architecture
 
@@ -45,7 +45,7 @@ pnpm install            # only on the first run; runs at repo root, not in clien
 pnpm --filter @sutando/client build  # writes client/dist/
 ```
 
-`src/web-server.ts` serves `client/dist/index.html` + assets at `/v2`. When the bundle isn't built yet, the route 404s gracefully (no console spam in `voice-agent.ts`).
+`src/web-server.ts` serves `client/dist/index.html` + assets at `/` and `/v2`. When the bundle isn't built yet, both routes fall back to the legacy inline HTML so a fresh checkout still boots.
 
 ## Dev workflow
 

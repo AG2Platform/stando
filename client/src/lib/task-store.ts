@@ -3,7 +3,7 @@
  *
  * Persists across reloads via localStorage under the legacy schema keys
  * (sutando-taskmap-v1 / expanded / show-done) so existing users carry their
- * state seamlessly from / to /v2.
+ * state seamlessly from the legacy HTML to the React build at /.
  *
  * Auto-expand rules ported from web-client-html.ts updateTask + polling:
  *   - New task arriving with status `working` → expand (unless userCollapsed).

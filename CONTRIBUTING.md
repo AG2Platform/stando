@@ -42,7 +42,7 @@ See existing skills for examples. Install with `bash skills/install.sh`.
 - **Python**: standard library preferred, no frameworks. Python 3.9+ compatible (avoid `str | None` union syntax — use `Optional[str]`).
 - **TypeScript**: ESM modules, strict mode. Run `npx tsc --noEmit` before submitting.
 - **Shell**: bash, `set -e`, use `$REPO` for paths
-- **web-client-html.ts**: The legacy conversation UI is still an inline HTML template literal (PR-A interim state, to be replaced by the Vite + React scaffold in `client/` per PR-B). Do NOT use TypeScript-only syntax (like `as Type` casts) inside the embedded `<script>` block — the browser runs it as plain JS. HTTP serving and the control endpoints live in `web-server.ts` (hosted in the `voice-agent.ts` process).
+- **Web client**: `GET /` serves the Vite + React bundle from `client/` (see `client/README.md`). The original inline HTML (`src/web-client-html.ts`) survives at `GET /legacy` as a one-release escape hatch and as the fallback when `client/dist/` hasn't been built — both go away in PR-C step 6. New conversation features land under `client/src/` per the frontend-conventions skill; HTTP endpoints (`/sse`, `/sse-status`, `/voice-mode`, `/mute-state`, …) live in `web-server.ts` (hosted in the `voice-agent.ts` process).
 - All scripts should work from a fresh clone with minimal setup
 
 ## Pull requests

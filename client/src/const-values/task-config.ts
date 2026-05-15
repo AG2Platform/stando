@@ -1,7 +1,8 @@
 /**
  * Task list tuning constants and localStorage keys. Persistence key versions
  * match the legacy web-client-html.ts schema so the migration is transparent
- * — users carry their existing taskMap + expanded set from / over to /v2.
+ * — users carry their existing taskMap + expanded set from the legacy HTML
+ * to the React build.
  */
 
 export const TASK_POLL_INTERVAL_MS = 3000;
