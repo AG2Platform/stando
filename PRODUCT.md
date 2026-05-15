@@ -11,7 +11,7 @@ asks "how do we deliver Sutando to a user's Mac," this doc asks "once
 they have it, what do they pay for and how does the cloud earn its
 keep."
 
-## Status (2026-05-15)
+## Status (2026-05-15, late session)
 
 DISTRIBUTION.md Phases 0–4.13 are done in code. The app installs
 end-to-end from DMG, opens a dedicated 5-step onboarding wizard on
@@ -20,12 +20,32 @@ needs only one Screen Recording grant. The cloud control plane runs
 locally with the admin panel landed. Waves 1–3 are functionally
 complete; the deferred Wave 2.3 / 2.4 managed-voice piece has been
 unblocked by Gemini's ephemeral-token API and folded into Wave 4
-below. We have beta users waiting. The next chapter — Wave 4 — turns
-admitted-beta into monetization-beta: 2 months of free Max for every
-approved user, managed Gemini via ephemeral tokens, the first
-in-app Skills surface on the desktop, and the analytics-gap closure
-needed to make business decisions from real data instead of retail
-credit equivalents.
+below.
+
+**Wave 4 is shipped end-to-end through Slice 4** (rows 4.1–4.10 in
+the wave table). Migrations 0016 + 0017 applied to dev + prod Neon.
+The full managed-Gemini flow validated live in prod: admin Approve
+on `/admin/waitlist` grants a 2-month Max comp + 10000 credits
+atomically, `/api/me` returns `effectivePlan='max'` + `comp.active=true`
++ `geminiMode`, the desktop Settings → Gemini API toggle PATCHes
+the user to managed mode, `voice-agent.ts` mints a fresh ephemeral
+token per session via `POST /api/gateway/voice-key`, Bodhi connects
+to Gemini Live on v1alpha (`Startup] session.start() succeeded` in
+the logs), and the audio session is up. The desktop **Skills** pane
+is its own sidebar entry alongside Conversation / Core CLI / Dashboard
+/ Settings (refactored mid-slice from a Settings section based on
+user feedback). `/admin/comps` + `/admin/rates` are live read-only
+admin surfaces; revoke + editable rate-sheet land in Slice 5. Every
+`usage_events` insert now backfills `provider_cost_cents` from the
+seeded `rate_sheet` so `/admin/margins` reflects real cost-to-serve.
+
+The remaining work — Slice 5 — is author revenue (80/20 split on
+skill installs, `author_balances`, payout stubs), the monthly grant
+cron (re-grant comp credits at month boundary + free-tier $5/mo
+bootstrap), comp expiry UX (T-7d email + T+0 demotion + 30%-off-Pro
+CTA), learned skills (opt-in proactive-loop detection rule), and
+the `/admin` overview cards that fold all of the above into the
+business-analytics surface.
 
 ### Beta launch chapter — managed Gemini, 2-month Max comp, Skills UI, analytics (2026-05-15)
 
@@ -313,23 +333,63 @@ account names, email addresses) from `SKILL.md` before upload.
 
 | # | Item | Repo | Status |
 |---|---|---|---|
-| 4.1 | Migration 0016 + `lib/billing/effective-plan.ts` + admin approval grants 2mo Max comp atomically | agent-universe | pending |
-| 4.2 | `/api/me` extension — paidPlan / effectivePlan / comp / geminiMode | agent-universe | pending |
-| 4.3 | `/admin/comps` page + revoke action | agent-universe | pending |
-| 4.4 | Migration 0017 + `rate_sheet` seed + `lib/billing/rate-sheet.ts` middleware wrapping all 5 INSERT sites | agent-universe | pending |
-| 4.5 | `/admin/rates` page + retroactive recompute action | agent-universe | pending |
-| 4.6 | `POST /api/gateway/voice-key` ephemeral-token minter | agent-universe | pending |
-| 4.7 | `voice-agent.ts` calls voice-key when `geminiMode='managed'`, refresh 5 min before expiry | sutando | pending |
-| 4.8 | Settings → Gemini mode toggle + comp-activation banner for BYOK users | sutando | pending |
-| 4.9 | OnboardingWindow step 2 — two-radio (managed / BYOK) | sutando | pending |
-| 4.10 | Settings → Skills section (view + filter + uninstall + deactivate) | sutando | pending |
-| 4.11 | Settings → Skills → Publish sheet (paid only) | sutando | pending |
-| 4.12 | Migration 0018 + 80/20 split on skill install + author_balances materializer | agent-universe | pending |
-| 4.13 | Author balance card on dashboard + Settings (lifetime earned, payout stub) | both | pending |
-| 4.14 | Migration 0019 + monthly_grants idempotency + monthly comp + free-$5 grant cron | agent-universe | pending |
-| 4.15 | `/admin` overview — comp burn, TTFP, per-provider burn, author leaderboard | agent-universe | pending |
-| 4.16 | Learned skills directory + opt-in toggle + one proactive-loop detection rule | sutando | pending |
-| 4.17 | Comp expiry T-7d Loops email + T+0 demotion + 30%-off-Pro CTA | both | pending |
+| 4.1 | Migration 0016 + `lib/billing/effective-plan.ts` + admin approval grants 2mo Max comp atomically | agent-universe | **done** — `59ef4a2`; partial-index hot path for active-comp lookup; idempotent `grantComp` with dedup key per month bucket |
+| 4.2 | `/api/me` extension — paidPlan / effectivePlan / comp / geminiMode | agent-universe | **done** — `59ef4a2`; PATCH `/api/me geminiMode='managed'` 402s for free effectivePlan (server-side gate) |
+| 4.3 | `/admin/comps` page + revoke action | agent-universe | **partial** — `fe3b5db` ships read-only table (active comps, monthly grant, lifetime credits, days remaining, granted-by). Revoke action **deferred to Slice 5** |
+| 4.4 | Migration 0017 + `rate_sheet` seed + `lib/billing/rate-sheet.ts` middleware wrapping all 5 INSERT sites | agent-universe | **done** — `fe3b5db`; 16 kinds seeded across 8 providers; 5-min in-process cache; soft-fail on unknown kind |
+| 4.5 | `/admin/rates` page + retroactive recompute action | agent-universe | **partial** — `fe3b5db` ships read-only table with missing-rate callout. Editable form + recompute-since-date **deferred to Slice 5** |
+| 4.6 | `POST /api/gateway/voice-key` ephemeral-token minter | agent-universe | **done** — `2dccb0c`; uses `@google/genai authTokens.create` on v1alpha; per-session 30-min TTL. Iterated through `86048cc` to drop `liveConnectConstraints.model` (model-lock caused Google code 1011 on the Live WS handshake) |
+| 4.7 | `voice-agent.ts` calls voice-key when `geminiMode='managed'`, refresh 5 min before expiry | sutando | **done** — `cf0b376`; `resolveVoiceApiKey()` mints at session start and falls back to BYOK on mint failure. Long-session refresh **deferred to follow-up** (typical sessions fit in 30 min) |
+| 4.8 | Settings → Gemini mode toggle + comp-activation banner for BYOK users | sutando | **partial** — `8fb1842` ships the BYOK/Managed radio toggle + active-comp card in the Settings → Gemini API section. One-shot activation banner for already-onboarded BYOK users **deferred** |
+| 4.9 | OnboardingWindow step 2 — two-radio (managed / BYOK) | sutando | **deferred** — only affects new-user onboarding; existing BYOK users get the same option via Settings |
+| 4.10 | Settings → Skills section (view + filter + uninstall + deactivate) | sutando | **done** — `7ec12a4` shipped as a Settings section, then `4dd75e1` refactored Skills into its own sidebar pane alongside Conversation / Core CLI / Dashboard / Settings per user feedback. 4 groups (Installed / Cloud tools / Local / Built-in collapsible). 30s cloud-fetch throttle while pane is visible. Uninstall route (`/api/skills/[id]/uninstall` in `c4ad8e5`) hard-deletes + clears `cloud_tool_sessions` for cloud tools |
+| 4.11 | Settings → Skills → Publish sheet (paid only) | sutando | **partial** — desktop "Publish a skill →" button deep-links to `/superpower/publish` web form (existing flow covers it). Native sheet **deferred** |
+| 4.12 | Migration 0018 + 80/20 split on skill install + author_balances materializer | agent-universe | pending (Slice 5) |
+| 4.13 | Author balance card on dashboard + Settings (lifetime earned, payout stub) | both | pending (Slice 5) |
+| 4.14 | Migration 0019 + monthly_grants idempotency + monthly comp + free-$5 grant cron | agent-universe | pending (Slice 5) |
+| 4.15 | `/admin` overview — comp burn, TTFP, per-provider burn, author leaderboard | agent-universe | pending (Slice 5) |
+| 4.16 | Learned skills directory + opt-in toggle + one proactive-loop detection rule | sutando | pending (Slice 5) |
+| 4.17 | Comp expiry T-7d Loops email + T+0 demotion + 30%-off-Pro CTA | both | pending (Slice 5) |
+
+**Mid-flight fixes that emerged during end-to-end validation:**
+
+- **Clerk middleware was 404'ing `/api/me` + `/api/gateway/*`** for
+  Bearer-only desktop calls. Both routes authenticate inside the
+  handler (via `authedKeyFromRequest`) — they were missing from
+  `middleware.ts`'s `isPublicRoute` matcher and getting
+  protect-rewritten to `/404`. Same long-standing bug had been
+  silently breaking `/api/gateway/llm` (vision/image) for managed-mode
+  prod calls since Wave 2; surfaced when Settings tried to fetch
+  the new `/api/me` shape. Fixed in agent-universe `4686efa`.
+- **Bodhi-realtime-agent calls `new GoogleGenAI({ apiKey })` without
+  `httpOptions: { apiVersion: 'v1alpha' }`**. Ephemeral auth tokens
+  are v1alpha-only — Bodhi's WebSocket connect got HTTP 404 from
+  Google. Patched all 3 GoogleGenAI constructor sites in
+  `node_modules/bodhi-realtime-agent/dist/index.js` and wired
+  `patch-package` (as a production dep, not devDep, because the
+  bundle's `npm ci --omit=dev` strips devDeps). `app/build-app.sh`
+  now stages `patches/` into the bundle so the bundled `npm ci`
+  postinstall re-applies the diff on every install. Fixed in
+  sutando `a0cdef0`.
+- **Unconstrained ephemeral tokens.** Initial mint used
+  `liveConnectConstraints: { model }` — locking the token to one
+  model — and Bodhi's actual connect model didn't match exactly,
+  returning code 1011 "Internal error" on the WS handshake. For
+  beta we drop the constraint; the 30-min TTL is the primary
+  blast-radius bound. Fixed in agent-universe `86048cc`.
+- **Skills extracted from Settings to its own sidebar pane.** User
+  feedback during testing: Settings was the wrong home for skill
+  management — too buried in one long scrolling pane. New
+  `SkillsViewController` lives as a first-class pane in
+  `UnifiedMainWindow`'s left sidebar (`square.grid.2x2` icon,
+  between Dashboard and Settings). Fixed in sutando `4dd75e1`.
+
+**Authoring docs:** `agent-universe/STATION_AUTHORING.md` (commit
+`701c9ed`) covers both authoring paths — skill bundles (manifest +
+`SKILL.md` + optional inline tools) and cloud-tool MCP registration
+(Streamable HTTP shape, pricing config, `internal:` vs `https:`
+upstreams, rate-sheet wholesale row for accurate margin reporting,
+admin review semantics).
 
 ### Beta-application + landing redesign (2026-05-14)
 
