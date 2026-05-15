@@ -93,11 +93,29 @@ struct CloudUsagePanelRow: Decodable {
     let managedInCurrentRelease: Bool
 }
 
+/// Active plan comp (Wave 4.2) returned inside CloudMeSnapshot.
+struct CloudCompInfo: Decodable {
+    let active: Bool
+    let plan: String                 // 'plus' | 'pro' | 'max'
+    let reason: String               // 'beta_admission' | 'influencer' | ...
+    let startsAt: String             // ISO date
+    let endsAt: String               // ISO date
+    let monthlyCreditGrant: Int
+    let daysRemaining: Int
+}
+
 /// Current-user snapshot returned by GET /api/me.
 struct CloudMeSnapshot: Decodable {
     let id: String
     let email: String
     let plan: String
+    // paidPlan + effectivePlan land in Wave 4.2; older builds will see them
+    // absent and fall back to the legacy `plan` field. Decodable handles
+    // missing-field by leaving the optional nil.
+    let paidPlan: String?
+    let effectivePlan: String?
+    let geminiMode: String?          // 'byok' | 'managed'
+    let comp: CloudCompInfo?
     let walletCredits: Int
     let autoTopupEnabled: Bool
     let autoTopupThresholdCredits: Int
@@ -179,5 +197,41 @@ enum CloudClient {
         req.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
         req.httpBody = payload
         URLSession.shared.dataTask(with: req).resume()
+    }
+
+    /// Set the user's Gemini mode (Wave 4.8). Server rejects 'managed'
+    /// for free effectivePlan with HTTP 402; completion fires with
+    /// `.requiresPaid` so the UI can surface "upgrade to use managed
+    /// Gemini". Network errors complete `.failure` — caller may retry.
+    enum GeminiModeResult {
+        case ok
+        case requiresPaid
+        case failure(String)
+    }
+
+    static func setGeminiMode(_ mode: String, completion: @escaping (GeminiModeResult) -> Void) {
+        guard let auth = _loadCloudAuth(),
+              let url = URL(string: auth.apiBase + "/api/me"),
+              let payload = try? JSONSerialization.data(withJSONObject: ["geminiMode": mode]) else {
+            completion(.failure("not signed in")); return
+        }
+        var req = URLRequest(url: url, timeoutInterval: 5)
+        req.httpMethod = "PATCH"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
+        req.httpBody = payload
+        URLSession.shared.dataTask(with: req) { _, response, error in
+            if let error = error {
+                completion(.failure(error.localizedDescription))
+                return
+            }
+            guard let http = response as? HTTPURLResponse else {
+                completion(.failure("no response"))
+                return
+            }
+            if http.statusCode == 402 { completion(.requiresPaid); return }
+            if (200..<300).contains(http.statusCode) { completion(.ok); return }
+            completion(.failure("HTTP \(http.statusCode)"))
+        }.resume()
     }
 }
