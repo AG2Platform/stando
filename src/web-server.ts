@@ -85,12 +85,21 @@ function resolveDistFile(relPathRaw: string): string | null {
 /**
  * Serve a file from `client/dist/`. Returns true when the response was
  * written, false when the file wasn't found (caller decides the fallback).
+ *
+ * `spaFallback` (default true) controls the "file missing → index.html"
+ * behavior. Disable it for asset-shaped requests (e.g. /assets/*.js) where
+ * silently substituting index.html would hand the browser HTML for what it
+ * thinks is JS — the bug behind the PR-C-step-5 blank page.
  */
 function serveDistFile(
 	rel: string,
-	res: import('node:http').ServerResponse
+	res: import('node:http').ServerResponse,
+	opts: { spaFallback?: boolean } = {}
 ): boolean {
-	const file = resolveDistFile(rel) ?? resolveDistFile('index.html');
+	const { spaFallback = true } = opts;
+	const file = spaFallback
+		? (resolveDistFile(rel) ?? resolveDistFile('index.html'))
+		: resolveDistFile(rel);
 	if (!file) return false;
 	const mime = STATIC_MIME_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
 	try {
@@ -487,46 +496,53 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 			return;
 		}
 
-		// / and /v2[/*] — Vite-built React bundle from client/dist/. The two
-		// roots serve the same SPA so existing bookmarks/launchers pointing
-		// at /v2 keep working. Falls back to the legacy HTML when the bundle
-		// isn't built (fresh checkout / dev without `pnpm build:client`).
+		// Static asset + SPA fallback. Vite's index.html references hashed
+		// assets via relative paths (./assets/index-XXXX.js). When the
+		// browser resolves those against /, the request comes in as
+		// /assets/index-XXXX.js — which is neither / nor /v2 nor any of
+		// the API endpoints above. We need to:
+		//   1. Serve the exact file from client/dist/ when it exists
+		//      (e.g. /assets/*.js, /favicon.ico).
+		//   2. Fall back to index.html only for extension-less paths —
+		//      that's the SPA-routing case (deep links like /settings).
+		//   3. 404 asset misses (paths with an extension). Returning
+		//      index.html for a missing .js file produces "Unexpected
+		//      token '<'" in the console and a blank page — the exact
+		//      symptom we hit after PR-C step 5.
+		//   4. Fall back to the legacy HTML only when client/dist/index.html
+		//      itself is missing (fresh checkout without `pnpm build:client`).
 		const isV2Path = url.pathname === '/v2' || url.pathname.startsWith('/v2/');
-		const isRootSpaPath = url.pathname === '/';
-		if (isV2Path || isRootSpaPath) {
-			const rel = isV2Path
-				? url.pathname === '/v2'
-					? 'index.html'
-					: url.pathname.slice('/v2/'.length)
-				: 'index.html';
-			if (serveDistFile(rel, res)) return;
-			// Bundle missing — serve legacy HTML so a fresh checkout still
-			// boots. Bundle-missing for /v2 specifically still returns the
-			// HTML because the legacy app is functionally identical and the
-			// fallback is the friendlier UX than a 404.
-			res.writeHead(200, {
-				'Content-Type': 'text/html; charset=utf-8',
-				'Cache-Control': 'no-cache, no-store, must-revalidate',
-				'Pragma': 'no-cache',
-				'Expires': '0',
-			});
-			res.end(HTML);
+		let rel: string;
+		if (isV2Path) {
+			rel = url.pathname === '/v2' ? 'index.html' : url.pathname.slice('/v2/'.length);
+		} else if (url.pathname === '/') {
+			rel = 'index.html';
+		} else {
+			rel = url.pathname.replace(/^\/+/, '');
+		}
+
+		if (serveDistFile(rel, res, { spaFallback: false })) return;
+
+		// Path missed. Asset-shaped requests (have an extension) → 404 so
+		// the browser surfaces a real network error instead of trying to
+		// parse HTML as JS. Route-shaped requests (extension-less) → fall
+		// back to index.html for SPA routing, or legacy HTML if the React
+		// bundle isn't built.
+		const looksLikeAsset = !!extname(rel) && rel !== 'index.html';
+		if (looksLikeAsset) {
+			res.writeHead(404, { 'Content-Type': 'text/plain' });
+			res.end('Not found');
 			return;
 		}
 
-		// Unknown path — serve the SPA's index.html so client-side routing
-		// can resolve. (Path-based deep links like /settings would otherwise
-		// 404 here; the SPA reads `?page=` so /settings as a path is unused
-		// today, but keep this in place for forward compatibility.)
-		if (!serveDistFile('index.html', res)) {
-			res.writeHead(200, {
-				'Content-Type': 'text/html; charset=utf-8',
-				'Cache-Control': 'no-cache, no-store, must-revalidate',
-				'Pragma': 'no-cache',
-				'Expires': '0',
-			});
-			res.end(HTML);
-		}
+		if (serveDistFile('index.html', res, { spaFallback: false })) return;
+		res.writeHead(200, {
+			'Content-Type': 'text/html; charset=utf-8',
+			'Cache-Control': 'no-cache, no-store, must-revalidate',
+			'Pragma': 'no-cache',
+			'Expires': '0',
+		});
+		res.end(HTML);
 	});
 
 	server.listen(HTTP_PORT, HTTP_HOST, () => {
