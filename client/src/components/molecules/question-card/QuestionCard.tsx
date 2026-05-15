@@ -19,28 +19,27 @@ export default function QuestionCard({ question }: QuestionCardProps) {
 
 	if (state === 'sent' && sentAnswer) {
 		return (
-			<article className="rounded-md border border-emerald-500/40 bg-emerald-500/[0.06] p-3 text-xs text-emerald-200">
-				{APP_COPY.questionAnswered} <span className="font-medium">{sentAnswer}</span>
-			</article>
+			<div style={{ color: '#4ecca3', fontSize: 14 }}>
+				{APP_COPY.questionAnswered} <strong>{sentAnswer}</strong>
+			</div>
 		);
 	}
 
 	return (
-		<article className="space-y-2 rounded-md border border-neutral-800/80 bg-[color:var(--color-surface)]/60 p-3 text-sm">
-			<header>
-				<p className="font-medium text-[color:var(--color-text)]">{question.text}</p>
-				{question.detail ? (
-					<p className="mt-1 whitespace-pre-wrap text-xs text-[color:var(--color-text-mute)]">{question.detail}</p>
-				) : null}
-			</header>
-			<div className="flex flex-wrap gap-1.5">
+		<>
+			<div>{question.text}</div>
+			{question.detail ? (
+				<div style={{ marginTop: 4, fontSize: 13, color: '#999', whiteSpace: 'pre-wrap' }}>
+					{question.detail}
+				</div>
+			) : null}
+			<div className="q-actions">
 				{options.map((opt) => (
 					<DecisionOptionButton key={opt} option={opt} disabled={isSending} onSelect={(o) => void send(o)} />
 				))}
-			</div>
-			<div className="flex gap-2">
 				<input
 					type="text"
+					className="q-input"
 					value={draft}
 					onChange={(e) => setDraft(e.target.value)}
 					placeholder={APP_COPY.questionPlaceholder}
@@ -51,22 +50,21 @@ export default function QuestionCard({ question }: QuestionCardProps) {
 							void send(draft);
 						}
 					}}
-					className="flex-1 rounded-md border border-neutral-800/80 bg-neutral-950/60 px-2.5 py-1.5 text-xs text-[color:var(--color-text)] placeholder:text-[color:var(--color-text-mute)] focus:border-[color:var(--color-accent)] focus:outline-none"
 				/>
 				<button
 					type="button"
+					className="q-btn"
 					disabled={isSending || !draft.trim()}
 					onClick={() => void send(draft)}
-					className="rounded-md bg-[color:var(--color-accent)] px-3 py-1.5 text-xs font-medium text-neutral-950 disabled:opacity-50"
 				>
 					{isSending ? APP_COPY.questionSending : APP_COPY.questionSend}
 				</button>
 			</div>
 			{state === 'error' && error ? (
-				<p className="text-xs text-[color:var(--color-danger)]">
+				<div style={{ marginTop: 6, color: '#e94560', fontSize: 13 }}>
 					{APP_COPY.questionFailed} {error}
-				</p>
+				</div>
 			) : null}
-		</article>
+		</>
 	);
 }

@@ -5,28 +5,30 @@ export interface ToastItemProps {
 	onDismiss: (id: string) => void;
 }
 
-const TONE: Record<Toast['kind'], string> = {
-	info: 'border-neutral-700/60 bg-neutral-900/95 text-[color:var(--color-text)]',
-	success: 'border-emerald-500/40 bg-emerald-500/15 text-emerald-100',
-	warning: 'border-amber-500/40 bg-amber-500/15 text-amber-100',
-	error: 'border-rose-500/40 bg-rose-500/15 text-rose-100',
+/**
+ * Single toast pill. Uses the legacy `.toast` class so legacy.css drives
+ * the entry/exit animation (toastIn / toastOut). Per-kind border colors
+ * are layered on top of the default green palette.
+ */
+const BORDER_BY_KIND: Record<Toast['kind'], string> = {
+	info: '#2a4a36',
+	success: '#2a4a36',
+	warning: '#f0ad4e88',
+	error: '#e9456088',
 };
 
 export default function ToastItem({ toast, onDismiss }: ToastItemProps) {
 	return (
-		<div
-			role="status"
-			className={`flex max-w-sm items-start gap-2 rounded-md border px-3 py-2 text-xs shadow-lg backdrop-blur ${TONE[toast.kind]}`}
-		>
-			<div className="flex-1">
-				{toast.label ? <span className="mr-1 font-semibold uppercase tracking-wide opacity-80">{toast.label}</span> : null}
-				<span>{toast.message}</span>
-			</div>
+		<div role="status" className="toast" style={{ borderColor: BORDER_BY_KIND[toast.kind] }}>
+			{toast.label ? <span className="toast-label">{toast.label}</span> : null}
+			{toast.label ? ' ' : null}
+			{toast.message}
 			<button
 				type="button"
 				onClick={() => onDismiss(toast.id)}
 				aria-label="Dismiss"
-				className="text-[color:var(--color-text-mute)] hover:text-[color:var(--color-text)]"
+				className="btn-subtle"
+				style={{ marginLeft: 8 }}
 			>
 				×
 			</button>

@@ -11,8 +11,8 @@ export interface RelativeTimeProps {
 export default function RelativeTime({ ts, now }: RelativeTimeProps) {
 	const label = formatRelativeAgo(ts, now ?? Date.now());
 	return (
-		<time className="font-mono text-[11px] text-[color:var(--color-text-mute)]" dateTime={new Date(ts).toISOString()}>
+		<span className="task-time" title={new Date(ts).toISOString()}>
 			{label}
-		</time>
+		</span>
 	);
 }

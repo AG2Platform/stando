@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import DecisionOptionButton from '@/components/atoms/decision-option-button';
 import { APP_COPY } from '@/const-values/app-copy';
 import { useTaskReply } from '@/hooks/useTaskReply';
 
@@ -22,8 +21,8 @@ export default function TaskReplyForm({ taskId, options }: TaskReplyFormProps) {
 
 	if (state === 'sent' && sentAnswer) {
 		return (
-			<div className="mt-2 rounded-md bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
-				{APP_COPY.taskReplySent} <span className="font-medium">{sentAnswer}</span>
+			<div className="task-action-sent">
+				{APP_COPY.taskReplySent} <strong>{sentAnswer}</strong>
 			</div>
 		);
 	}
@@ -37,35 +36,33 @@ export default function TaskReplyForm({ taskId, options }: TaskReplyFormProps) {
 	};
 
 	return (
-		<form onSubmit={handleSubmit} className="mt-2 space-y-2">
-			{options ? (
-				<div className="flex flex-wrap gap-1.5">
-					{options.map((opt) => (
-						<DecisionOptionButton key={opt} option={opt} disabled={isSending} onSelect={(o) => void send(o)} />
-					))}
-				</div>
-			) : null}
-			<div className="flex gap-2">
-				<input
-					type="text"
-					value={draft}
-					onChange={(e) => setDraft(e.target.value)}
-					placeholder={placeholder}
-					disabled={isSending}
-					className="flex-1 rounded-md border border-neutral-800/80 bg-neutral-950/60 px-2.5 py-1.5 text-xs text-[color:var(--color-text)] placeholder:text-[color:var(--color-text-mute)] focus:border-[color:var(--color-accent)] focus:outline-none"
-				/>
-				<button
-					type="submit"
-					disabled={isSending || !draft.trim()}
-					className="rounded-md bg-[color:var(--color-accent)] px-3 py-1.5 text-xs font-medium text-neutral-950 disabled:opacity-50"
-				>
-					{isSending ? APP_COPY.taskReplySending : APP_COPY.taskReplySend}
-				</button>
-			</div>
+		<form onSubmit={handleSubmit} className="task-actions">
+			{options
+				? options.map((opt) => (
+						<button
+							key={opt}
+							type="button"
+							className="task-action-btn"
+							disabled={isSending}
+							onClick={() => void send(opt)}
+						>
+							{opt}
+						</button>
+					))
+				: null}
+			<input
+				type="text"
+				className="task-action-input"
+				value={draft}
+				onChange={(e) => setDraft(e.target.value)}
+				placeholder={placeholder}
+				disabled={isSending}
+			/>
+			<button type="submit" className="task-action-btn" disabled={isSending || !draft.trim()}>
+				{isSending ? APP_COPY.taskReplySending : APP_COPY.taskReplySend}
+			</button>
 			{state === 'error' && error ? (
-				<p className="text-xs text-[color:var(--color-danger)]">
-					{APP_COPY.taskReplyFailed} {error}
-				</p>
+				<span style={{ color: '#e94560', fontSize: 12 }}>{APP_COPY.taskReplyFailed} {error}</span>
 			) : null}
 		</form>
 	);

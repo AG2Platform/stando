@@ -24,6 +24,13 @@ const renderPage = (id: AppRouteId) => {
 
 export default function App() {
 	const { routeId, setRoute } = useCurrentRoute();
+	// The conversation page renders its own legacy chrome (header + hero +
+	// bottom panel) — wrapping it in AppShell would double-stack headers
+	// and break the fixed bottom input bar. Other routes still get AppShell
+	// until they get their own legacy treatment.
+	if (routeId === 'conversation') {
+		return renderPage(routeId);
+	}
 	return (
 		<AppShell activeId={routeId} onSelect={setRoute}>
 			{renderPage(routeId)}

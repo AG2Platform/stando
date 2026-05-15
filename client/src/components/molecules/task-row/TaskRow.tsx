@@ -34,8 +34,9 @@ export default function TaskRow({ task, isExpanded, onToggle }: TaskRowProps) {
 	};
 
 	return (
-		<article className="overflow-hidden rounded-md border border-neutral-800/60 bg-[color:var(--color-surface)]/60 text-sm">
-			<header
+		<>
+			<div
+				className="task-item"
 				role={hasResult ? 'button' : undefined}
 				tabIndex={hasResult ? 0 : undefined}
 				onClick={handleHeaderClick}
@@ -45,28 +46,36 @@ export default function TaskRow({ task, isExpanded, onToggle }: TaskRowProps) {
 						onToggle(task.id);
 					}
 				}}
-				className={`flex items-center gap-2 px-3 py-2 ${hasResult ? 'cursor-pointer hover:bg-neutral-900/60' : ''}`}
 			>
 				<TaskStatusIcon status={task.status} />
-				<span className={`flex-1 truncate ${isExpanded ? 'whitespace-pre-wrap' : ''}`}>{displayText}</span>
+				<span className={`task-text${isExpanded ? ' expanded' : ''}`}>{displayText}</span>
 				<RelativeTime ts={task.time} />
-				{expandChipLabel ? (
-					<span className="rounded-full bg-neutral-800/60 px-2 py-0.5 text-[11px] text-[color:var(--color-text-mute)]">
-						{expandChipLabel}
-					</span>
-				) : null}
-			</header>
+				{expandChipLabel ? <span className="task-expand">{expandChipLabel}</span> : null}
+			</div>
 			{hasResult && isExpanded ? (
-				<div className="border-t border-neutral-800/60 bg-neutral-950/60 px-3 py-2">
+				<>
 					<pre
 						id={`result-${task.id}`}
-						className="m-0 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-[color:var(--color-text-dim)]"
+						style={{
+							display: 'block',
+							padding: '8px 12px',
+							color: '#b8c8d8',
+							fontSize: 12,
+							lineHeight: 1.5,
+							whiteSpace: 'pre-wrap',
+							wordBreak: 'break-word',
+							background: '#0d1520',
+							borderRadius: 8,
+							margin: '4px 0 6px 30px',
+							maxHeight: 256,
+							overflow: 'auto',
+						}}
 					>
 						{task.result}
 					</pre>
 					<TaskReplyForm taskId={task.id} options={parseDecisionOptions(task.result)} />
-				</div>
+				</>
 			) : null}
-		</article>
+		</>
 	);
 }

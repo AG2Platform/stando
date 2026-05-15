@@ -11,21 +11,14 @@ const GLYPH: Record<TaskStatus, string> = {
 	error: '✗',
 };
 
-const TONE: Record<TaskStatus, string> = {
-	pending: 'text-[color:var(--color-text-mute)]',
-	working: 'text-[color:var(--color-warning)] animate-spin-slow',
-	done: 'text-[color:var(--color-success)]',
-	error: 'text-[color:var(--color-danger)]',
-};
-
+/**
+ * Status dot for a task row. Uses the legacy `.task-status.{status}` class
+ * so legacy.css handles the per-state background colors + pulse animation.
+ */
 export default function TaskStatusIcon({ status }: TaskStatusIconProps) {
 	return (
-		<span
-			className={`inline-flex size-5 shrink-0 items-center justify-center text-[13px] leading-none ${TONE[status]}`}
-			aria-label={status}
-			title={status}
-		>
+		<div className={`task-status ${status}`} aria-label={status} title={status}>
 			{GLYPH[status]}
-		</span>
+		</div>
 	);
 }

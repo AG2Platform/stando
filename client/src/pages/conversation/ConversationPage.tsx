@@ -1,75 +1,120 @@
-import PageHeader from '@/components/atoms/page-header';
-import VoiceSessionCard from '@/components/molecules/voice-session-card';
-import QuestionsPanel from '@/components/organisms/questions-panel';
-import TaskList from '@/components/organisms/task-list';
-import Transcript from '@/components/organisms/transcript';
-import { APP_COPY } from '@/const-values/app-copy';
-import { APP_ROUTES } from '@/const-values/app-routes';
+import { useCallback, useState } from 'react';
+import KeyboardShortcutsBar from '@/components/atoms/keyboard-shortcuts-bar';
+import LegacyHeader from '@/components/molecules/legacy-header';
+import LegacyHero from '@/components/molecules/legacy-hero';
+import LegacyInputBar from '@/components/molecules/legacy-input-bar';
+import LegacyTranscript from '@/components/molecules/legacy-transcript';
+import DynamicRegion from '@/components/organisms/dynamic-region';
+import ToastOverlay from '@/components/organisms/toast-overlay';
 import { useAgentStatus } from '@/hooks/useAgentStatus';
+import { useTaskPolling } from '@/hooks/useTaskPolling';
 import { useTaskToastDriver } from '@/hooks/useTaskToastDriver';
 import { useVoiceSession } from '@/hooks/useVoiceSession';
 
+/**
+ * Conversation page — port of src/web-client-html.ts. Renders the legacy
+ * DOM structure (header / hero / status-bar / dynamic-region / main+bottom-
+ * panel) so legacy.css produces a byte-identical look.
+ *
+ * Layout:
+ *   .legacy-shell                            (light-first palette + dark via @media)
+ *     .header                                (avatar + name + status pill + buttons)
+ *     .hero          (when disconnected)     (big avatar + tagline + Start Voice)
+ *     .status-bar                            (keyboard shortcuts)
+ *     .dynamic-region                        (sub-tabs + per-tab content)
+ *     .main                                  (transcript wrapper)
+ *     .bottom-panel  (fixed)                 (text input bar)
+ *     .toast-container                       (transient notifications)
+ */
+
+type AgentState = 'idle' | 'listening' | 'speaking' | 'working' | 'seeing';
+
 export default function ConversationPage() {
-	const { state, connect, disconnect, toggleMute } = useVoiceSession();
-	const { status: serverStatus, error: serverError } = useAgentStatus();
+	const { state: voice, connect, disconnect, toggleMute } = useVoiceSession();
+	const { status: serverStatus } = useAgentStatus();
+	useTaskPolling();
 	useTaskToastDriver();
 
+	const standName = 'Sutando';
+	const tagline = 'Summon your AI superpower';
+	const dashboardUrl = 'http://localhost:7844';
+	const isLive = voice.status === 'live';
+
+	// Map server-reported state ("idle" | "listening" | ...) into the
+	// agent-state class on .avatar-wrap / .hero. Falls back to local
+	// voice status (live=listening, otherwise idle) until SSE delivers
+	// the first agent-state event.
+	const agentState = deriveAgentState(serverStatus?.state, voice.status);
+
+	const onToggleVoice = useCallback(() => {
+		if (isLive) disconnect();
+		else connect();
+	}, [isLive, connect, disconnect]);
+
+	// Chips fill the text input on click — same behavior as the legacy
+	// `trySuggestion` (which set #textInput then triggered Enter).
+	const [pendingChip, setPendingChip] = useState<string | null>(null);
+	const onPickChip = useCallback((label: string) => {
+		setPendingChip(label);
+	}, []);
+
+	// Text submit handler — placeholder. Wiring through to the voice WS as
+	// a text frame requires a small VoiceSession extension; PR-D will do it.
+	const onSubmitText = useCallback((text: string) => {
+		console.log('[conversation] text input:', text);
+	}, []);
+
 	return (
-		<section className="flex h-full flex-col">
-			<PageHeader title={APP_ROUTES.conversation.label} hint={APP_ROUTES.conversation.hint} />
-			<div className="flex-1 space-y-6 px-6 py-6">
-				<p className="max-w-prose text-sm text-[color:var(--color-text-dim)]">{APP_COPY.scaffoldNotice}</p>
+		<div className={`legacy-shell ${isLive ? 'voice-active' : ''}`}>
+			<LegacyHeader
+				standName={standName}
+				voiceStatus={voice.status}
+				agentState={agentState}
+				muted={voice.muted}
+				onToggleVoice={onToggleVoice}
+				onToggleMute={toggleMute}
+				dashboardUrl={dashboardUrl}
+			/>
 
-				<VoiceSessionCard
-					status={state.status}
-					muted={state.muted}
-					bytesSent={state.bytesSent}
-					bytesRecv={state.bytesRecv}
-					errorMessage={state.errorMessage}
-					onConnect={connect}
-					onDisconnect={disconnect}
-					onToggleMute={toggleMute}
+			{!isLive ? (
+				<LegacyHero
+					standName={standName}
+					tagline={tagline}
+					agentState={agentState}
+					voiceStatus={voice.status}
+					onStartVoice={connect}
 				/>
+			) : null}
 
-				<section className="space-y-2">
-					<header>
-						<h2 className="text-sm font-semibold text-[color:var(--color-text)]">{APP_COPY.transcriptTitle}</h2>
-						<p className="mt-1 max-w-prose text-xs text-[color:var(--color-text-mute)]">{APP_COPY.transcriptHint}</p>
-					</header>
-					<Transcript />
-				</section>
+			<KeyboardShortcutsBar />
 
-				<QuestionsPanel />
+			<DynamicRegion connected={isLive} onPickChip={onPickChip} />
 
-				<TaskList />
-
-				<section className="rounded-lg border border-neutral-800/80 bg-[color:var(--color-surface)]/40 p-5">
-					<header>
-						<h2 className="text-sm font-semibold text-[color:var(--color-text)]">{APP_COPY.agentStatusTitle}</h2>
-						<p className="mt-1 max-w-prose text-xs text-[color:var(--color-text-mute)]">
-							{APP_COPY.agentStatusHint}
-						</p>
-					</header>
-					<dl className="mt-4 grid max-w-md grid-cols-2 gap-2 text-xs">
-						<dt className="text-[color:var(--color-text-mute)]">Voice connected</dt>
-						<dd>{formatBool(serverStatus?.voiceConnected)}</dd>
-						<dt className="text-[color:var(--color-text-mute)]">Muted</dt>
-						<dd>{formatBool(serverStatus?.muted)}</dd>
-						<dt className="text-[color:var(--color-text-mute)]">State</dt>
-						<dd className="font-mono">{serverStatus?.state ?? APP_COPY.loading}</dd>
-						<dt className="text-[color:var(--color-text-mute)]">Clients</dt>
-						<dd className="font-mono">{serverStatus?.clients ?? APP_COPY.loading}</dd>
-					</dl>
-					{serverError ? (
-						<p className="mt-3 text-xs text-[color:var(--color-danger)]">{serverError.message}</p>
-					) : null}
-				</section>
+			<div className="main">
+				{voice.errorMessage ? <div className="t-entry t-system">{voice.errorMessage}</div> : null}
 			</div>
-		</section>
+
+			<div className="bottom-panel">
+				<LegacyTranscript />
+				<LegacyInputBar
+					onSubmit={onSubmitText}
+					placeholder="Type a message…"
+					initialValue={pendingChip}
+					onConsumeInitial={() => setPendingChip(null)}
+				/>
+			</div>
+
+			<ToastOverlay />
+		</div>
 	);
 }
 
-const formatBool = (value: boolean | undefined): string => {
-	if (value === undefined) return APP_COPY.loading;
-	return value ? 'yes' : 'no';
-};
+function deriveAgentState(
+	server: string | undefined,
+	voiceStatus: 'idle' | 'connecting' | 'requesting-mic' | 'live' | 'error' | 'closed'
+): AgentState {
+	const valid: AgentState[] = ['idle', 'listening', 'speaking', 'working', 'seeing'];
+	if (server && valid.includes(server as AgentState)) return server as AgentState;
+	if (voiceStatus === 'live') return 'listening';
+	return 'idle';
+}

@@ -4,13 +4,21 @@ export interface DecisionOptionButtonProps {
 	onSelect: (option: string) => void;
 }
 
+// Tint Yes / No specially per the legacy `.q-btn.q-yes/.q-no` rules.
+function variantClass(option: string): string {
+	const normalized = option.trim().toLowerCase();
+	if (normalized === 'yes') return 'q-btn q-yes';
+	if (normalized === 'no') return 'q-btn q-no';
+	return 'q-btn';
+}
+
 export default function DecisionOptionButton({ option, disabled, onSelect }: DecisionOptionButtonProps) {
 	return (
 		<button
 			type="button"
+			className={variantClass(option)}
 			disabled={disabled}
 			onClick={() => onSelect(option)}
-			className="rounded-md border border-emerald-500/40 bg-emerald-500/[0.08] px-2.5 py-1 text-xs text-emerald-200 transition-colors hover:bg-emerald-500/15 hover:text-emerald-100 disabled:opacity-50"
 		>
 			{option}
 		</button>

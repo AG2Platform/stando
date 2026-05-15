@@ -39,52 +39,46 @@ export default function TaskList() {
 	].filter((s) => s !== null);
 
 	return (
-		<section className="rounded-lg border border-neutral-800/80 bg-[color:var(--color-surface)]/40 p-4">
-			<header className="flex flex-wrap items-center gap-3">
-				<h2 className="text-sm font-semibold text-[color:var(--color-text)]">{APP_COPY.taskListTitle}</h2>
+		<div className="tasks">
+			<div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '4px 0 8px' }}>
+				<span className="section-label" style={{ margin: 0 }}>{APP_COPY.taskListTitle}</span>
+				{!isEmpty && doneCount > 0 ? (
+					<button type="button" className="btn-subtle" onClick={taskActions.toggleShowDone}>
+						{showDone ? `${APP_COPY.taskHideDone} ${doneCount}` : `${APP_COPY.taskShowDone} ${doneCount}`}
+					</button>
+				) : null}
 				{!isEmpty ? (
-					<>
-						{doneCount > 0 ? (
-							<button
-								type="button"
-								onClick={taskActions.toggleShowDone}
-								className="text-[11px] uppercase tracking-wide text-[color:var(--color-text-mute)] hover:text-[color:var(--color-text)]"
-							>
-								{showDone
-									? `${APP_COPY.taskHideDone} ${doneCount}`
-									: `${APP_COPY.taskShowDone} ${doneCount}`}
-							</button>
-						) : null}
-						<button
-							type="button"
-							onClick={hasExpanded ? taskActions.collapseAll : taskActions.expandAll}
-							className="text-[11px] uppercase tracking-wide text-[color:var(--color-text-mute)] hover:text-[color:var(--color-text)]"
-						>
-							{hasExpanded ? APP_COPY.taskCollapseAll : APP_COPY.taskExpandAll}
-						</button>
-					</>
+					<button
+						type="button"
+						className="btn-subtle"
+						onClick={hasExpanded ? taskActions.collapseAll : taskActions.expandAll}
+					>
+						{hasExpanded ? APP_COPY.taskCollapseAll : APP_COPY.taskExpandAll}
+					</button>
 				) : null}
 				{systemBadges.length > 0 ? (
-					<span className="ml-auto text-[11px] text-[color:var(--color-danger)]">{systemBadges.join(' · ')}</span>
+					<span style={{ marginLeft: 'auto', fontSize: 11, color: '#e94560' }}>{systemBadges.join(' · ')}</span>
 				) : null}
-			</header>
-
-			<div className="mt-3 flex flex-col gap-2">
-				{isEmpty ? (
-					<p className="px-1 text-xs text-[color:var(--color-text-mute)]">{APP_COPY.taskListEmpty}</p>
-				) : visible.length === 0 ? (
-					<p className="px-1 text-xs text-[color:var(--color-text-mute)]">{APP_COPY.taskListAllDoneHidden}</p>
-				) : (
-					visible.map((task) => (
-						<TaskRow
-							key={task.id}
-							task={task}
-							isExpanded={expanded.has(task.id)}
-							onToggle={taskActions.toggleExpanded}
-						/>
-					))
-				)}
 			</div>
-		</section>
+
+			{isEmpty ? (
+				<div style={{ color: '#666', fontSize: 12, textAlign: 'center', padding: 12 }}>
+					{APP_COPY.taskListEmpty}
+				</div>
+			) : visible.length === 0 ? (
+				<div style={{ color: '#666', fontSize: 12, textAlign: 'center', padding: 12 }}>
+					{APP_COPY.taskListAllDoneHidden}
+				</div>
+			) : (
+				visible.map((task) => (
+					<TaskRow
+						key={task.id}
+						task={task}
+						isExpanded={expanded.has(task.id)}
+						onToggle={taskActions.toggleExpanded}
+					/>
+				))
+			)}
+		</div>
 	);
 }
