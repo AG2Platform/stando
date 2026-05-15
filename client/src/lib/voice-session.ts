@@ -159,6 +159,23 @@ export class VoiceSession {
 		this.updateState({ muted });
 	}
 
+	/**
+	 * Send a typed text message over the open WebSocket as a
+	 * `{type: 'text_input', text}` frame — same shape voice-agent.ts
+	 * expects from the legacy client. Returns true when the frame was
+	 * sent, false when the socket isn't open (caller's responsibility
+	 * to route through the HTTP task-bridge fallback).
+	 */
+	sendText(text: string): boolean {
+		const trimmed = text.trim();
+		if (!trimmed) return false;
+		const ws = this.ws;
+		if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+		ws.send(JSON.stringify({ type: 'text_input', text: trimmed }));
+		this.events.onLog(`sent text: "${trimmed.slice(0, 50)}"`, 'info');
+		return true;
+	}
+
 	private async onWsOpen() {
 		this.events.onLog('WebSocket connected', 'info');
 		this.updateState({ status: 'requesting-mic' });

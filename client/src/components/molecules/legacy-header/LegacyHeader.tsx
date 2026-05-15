@@ -22,6 +22,10 @@ export interface LegacyHeaderProps {
 	onToggleVoice: () => void;
 	onToggleMute: () => void;
 	dashboardUrl: string;
+	/** When the agent-universe dashboard reports avatarGenerated=true,
+	 *  use this PNG instead of the inline SVG. Same source the legacy
+	 *  `<img id="stand-avatar">` pointed at. */
+	avatarPngUrl?: string;
 }
 
 export default function LegacyHeader({
@@ -32,17 +36,22 @@ export default function LegacyHeader({
 	onToggleVoice,
 	onToggleMute,
 	dashboardUrl,
+	avatarPngUrl,
 }: LegacyHeaderProps) {
 	const isLive = voiceStatus === 'live';
 	return (
 		<div className="header">
-			<div className={`avatar-wrap s-${agentState}`}>
-				<div className="avatar-svg-wrap">
-					<AvatarSvgDefault />
-				</div>
+			<div className={`avatar-wrap s-${agentState}`} id="avatar-wrap">
+				{avatarPngUrl ? (
+					<img className="avatar" id="stand-avatar" src={avatarPngUrl} alt={standName} />
+				) : (
+					<div className="avatar-svg-wrap">
+						<AvatarSvgDefault />
+					</div>
+				)}
 			</div>
 			<div className="info">
-				<h1>{standName}</h1>
+				<h1 id="stand-name">{standName}</h1>
 				<div className="meta">
 					<VoiceStatusPill status={voiceStatus} />
 					<a href={dashboardUrl} target="_blank" rel="noreferrer">Dashboard</a>

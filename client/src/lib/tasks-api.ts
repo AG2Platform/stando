@@ -49,3 +49,49 @@ export async function postTaskReply(
 		return { ok: false, error: (err as Error).message };
 	}
 }
+
+export interface PostTaskResult {
+	ok: boolean;
+	task_id?: string;
+	error?: string;
+}
+
+export interface TaskResultPoll {
+	status: 'pending' | 'completed' | 'error';
+	result?: string;
+}
+
+/**
+ * Submit a free-form task as the `web` channel — same path as the
+ * legacy `sendText()` voice-disconnected fallback. The Python agent
+ * bridge writes a task file; the result lands at /result/<task_id>.
+ */
+export async function postWebTask(
+	agentApiOrigin: string,
+	task: string,
+	signal?: AbortSignal
+): Promise<PostTaskResult> {
+	const trimmed = task.trim();
+	if (!trimmed) return { ok: false, error: 'empty task' };
+	try {
+		const response = await fetch(`${stripTrailingSlash(agentApiOrigin)}/task`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ from: 'web', task: trimmed }),
+			signal,
+		});
+		return (await response.json()) as PostTaskResult;
+	} catch (err) {
+		return { ok: false, error: (err as Error).message };
+	}
+}
+
+export async function fetchTaskResult(
+	agentApiOrigin: string,
+	taskId: string,
+	signal?: AbortSignal
+): Promise<TaskResultPoll> {
+	const response = await fetch(`${stripTrailingSlash(agentApiOrigin)}/result/${taskId}`, { signal });
+	if (!response.ok) throw new Error(`fetchTaskResult ${response.status}`);
+	return (await response.json()) as TaskResultPoll;
+}

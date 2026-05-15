@@ -6,9 +6,13 @@ import LegacyInputBar from '@/components/molecules/legacy-input-bar';
 import LegacyTranscript from '@/components/molecules/legacy-transcript';
 import DynamicRegion from '@/components/organisms/dynamic-region';
 import ToastOverlay from '@/components/organisms/toast-overlay';
-import { useAgentStatus } from '@/hooks/useAgentStatus';
+import { useAgentSse } from '@/hooks/useAgentSse';
+import { useMuteStateSync } from '@/hooks/useMuteStateSync';
+import { useStandIdentity } from '@/hooks/useStandIdentity';
 import { useTaskPolling } from '@/hooks/useTaskPolling';
 import { useTaskToastDriver } from '@/hooks/useTaskToastDriver';
+import { useTextSubmit } from '@/hooks/useTextSubmit';
+import { useVoiceAutoReconnect } from '@/hooks/useVoiceAutoReconnect';
 import { useVoiceSession } from '@/hooks/useVoiceSession';
 
 /**
@@ -30,26 +34,39 @@ import { useVoiceSession } from '@/hooks/useVoiceSession';
 type AgentState = 'idle' | 'listening' | 'speaking' | 'working' | 'seeing';
 
 export default function ConversationPage() {
-	const { state: voice, connect, disconnect, toggleMute } = useVoiceSession();
-	const { status: serverStatus } = useAgentStatus();
+	const { state: voice, connect, disconnect, toggleMute, getSession } = useVoiceSession();
+	const submitText = useTextSubmit(getSession);
+	const identity = useStandIdentity();
 	useTaskPolling();
 	useTaskToastDriver();
+	useMuteStateSync({ voiceStatus: voice.status, muted: voice.muted });
+	useVoiceAutoReconnect({ voiceStatus: voice.status, connect });
 
-	const standName = 'Sutando';
-	const tagline = 'Summon your AI superpower';
-	const dashboardUrl = 'http://localhost:7844';
+	const dashboardOrigin = 'http://localhost:7844';
+	const dashboardUrl = dashboardOrigin;
+	const avatarPngUrl = identity?.avatarGenerated ? `${dashboardOrigin}/avatar` : undefined;
+	const standName = identity?.name ? `Sutando — ${identity.name}` : 'Sutando';
+	const tagline =
+		identity?.nameOrigin?.split(' — ')[1] ??
+		identity?.nameOrigin ??
+		'Summon your AI superpower';
+	const hasCustomIdentity = !!(identity?.name || identity?.avatarGenerated);
 	const isLive = voice.status === 'live';
-
-	// Map server-reported state ("idle" | "listening" | ...) into the
-	// agent-state class on .avatar-wrap / .hero. Falls back to local
-	// voice status (live=listening, otherwise idle) until SSE delivers
-	// the first agent-state event.
-	const agentState = deriveAgentState(serverStatus?.state, voice.status);
 
 	const onToggleVoice = useCallback(() => {
 		if (isLive) disconnect();
 		else connect();
 	}, [isLive, connect, disconnect]);
+
+	// Listen to the server-pushed /sse stream. Hotkey toggles fire
+	// onToggleVoice / toggleMute; agent-state pushes drive the avatar ring
+	// color via .s-{state} classes.
+	const { agentState: pushedState } = useAgentSse({
+		onToggleVoice,
+		onToggleMute: toggleMute,
+	});
+	const agentState: AgentState =
+		pushedState !== 'idle' || isLive ? pushedState : 'idle';
 
 	// Chips fill the text input on click — same behavior as the legacy
 	// `trySuggestion` (which set #textInput then triggered Enter).
@@ -58,11 +75,7 @@ export default function ConversationPage() {
 		setPendingChip(label);
 	}, []);
 
-	// Text submit handler — placeholder. Wiring through to the voice WS as
-	// a text frame requires a small VoiceSession extension; PR-D will do it.
-	const onSubmitText = useCallback((text: string) => {
-		console.log('[conversation] text input:', text);
-	}, []);
+	const onSubmitText = submitText;
 
 	return (
 		<div className={`legacy-shell ${isLive ? 'voice-active' : ''}`}>
@@ -74,6 +87,7 @@ export default function ConversationPage() {
 				onToggleVoice={onToggleVoice}
 				onToggleMute={toggleMute}
 				dashboardUrl={dashboardUrl}
+				avatarPngUrl={avatarPngUrl}
 			/>
 
 			{!isLive ? (
@@ -83,6 +97,8 @@ export default function ConversationPage() {
 					agentState={agentState}
 					voiceStatus={voice.status}
 					onStartVoice={connect}
+					avatarPngUrl={avatarPngUrl}
+					hasCustomIdentity={hasCustomIdentity}
 				/>
 			) : null}
 
@@ -109,12 +125,3 @@ export default function ConversationPage() {
 	);
 }
 
-function deriveAgentState(
-	server: string | undefined,
-	voiceStatus: 'idle' | 'connecting' | 'requesting-mic' | 'live' | 'error' | 'closed'
-): AgentState {
-	const valid: AgentState[] = ['idle', 'listening', 'speaking', 'working', 'seeing'];
-	if (server && valid.includes(server as AgentState)) return server as AgentState;
-	if (voiceStatus === 'live') return 'listening';
-	return 'idle';
-}

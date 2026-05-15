@@ -29,6 +29,10 @@ export interface UseVoiceSessionResult {
 	connect: () => void;
 	disconnect: () => void;
 	toggleMute: () => void;
+	/** Stable getter for the underlying session — lets adjacent hooks
+	 *  (e.g. useTextSubmit) reach in for `sendText` without us having
+	 *  to surface every WS interaction on this hook's API. */
+	getSession: () => VoiceSession | null;
 }
 
 export function useVoiceSession(): UseVoiceSessionResult {
@@ -86,5 +90,7 @@ export function useVoiceSession(): UseVoiceSessionResult {
 		sessionRef.current?.toggleMute();
 	}, []);
 
-	return { state, connect, disconnect, toggleMute };
+	const getSession = useCallback(() => sessionRef.current, []);
+
+	return { state, connect, disconnect, toggleMute, getSession };
 }

@@ -75,6 +75,42 @@ class ConversationStore {
 		this.commit({ entries: [...this.snapshot.entries, entry] });
 	}
 
+	/**
+	 * Optimistic append of a user-typed message. Used by the text-input
+	 * bar so the conversation feels instant — the server may also echo
+	 * the same text back as a final transcript, which gets de-duped in
+	 * `handleTranscript` because there's no `currentUserId` pointer.
+	 */
+	appendUserText(text: string): void {
+		const entry: TranscriptEntry = {
+			id: this.nextId(),
+			role: 'user',
+			text,
+			interim: false,
+			ts: Date.now(),
+		};
+		// Clear any half-finished interim entry; otherwise the typed text
+		// would race with Chrome STT or server STT for the same slot.
+		this.currentUserId = null;
+		this.commit({ entries: [...this.snapshot.entries, entry] });
+	}
+
+	/**
+	 * Append a finalized assistant reply. Used by the HTTP task-bridge
+	 * fallback path when voice isn't connected.
+	 */
+	appendAssistantText(text: string): void {
+		const entry: TranscriptEntry = {
+			id: this.nextId(),
+			role: 'assistant',
+			text,
+			interim: false,
+			ts: Date.now(),
+		};
+		this.currentAssistantId = null;
+		this.commit({ entries: [...this.snapshot.entries, entry] });
+	}
+
 	appendMedia(media: TranscriptMedia): void {
 		const entry: TranscriptEntry = {
 			id: this.nextId(),

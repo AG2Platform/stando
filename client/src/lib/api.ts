@@ -33,3 +33,45 @@ export async function fetchVoiceMode(signal?: AbortSignal): Promise<{ mode: 'act
 	if (!res.ok) throw new Error(`/voice-mode returned ${res.status}`);
 	return (await res.json()) as { mode: 'active' | 'meeting' };
 }
+
+/**
+ * Report mute / voice / agent-state to the conversation server.
+ * Mirrors the legacy `fetch('/mute-state?…')` plumbing — the menu-bar
+ * app reads from the same endpoint to draw the recording indicator.
+ */
+export async function postMuteState(patch: {
+	muted?: boolean;
+	voice?: boolean;
+	state?: string;
+}): Promise<void> {
+	const qs = new URLSearchParams();
+	if (patch.muted !== undefined) qs.set('muted', String(patch.muted));
+	if (patch.voice !== undefined) qs.set('voice', String(patch.voice));
+	if (patch.state !== undefined) qs.set('state', patch.state);
+	await fetch(apiUrl(`/mute-state?${qs.toString()}`)).catch(() => {});
+}
+
+export interface StandIdentity {
+	name?: string;
+	nameOrigin?: string;
+	avatarGenerated?: boolean;
+	avatarUrl?: string;
+}
+
+/**
+ * Fetch the persistent identity (custom name + generated avatar URL) the
+ * `agent-universe` dashboard owns on port 7844. Failure-safe — the legacy
+ * `.catch(()=>{})` style was load-bearing because the dashboard server is
+ * optional. Returns null when the endpoint is unreachable.
+ */
+export async function fetchStandIdentity(signal?: AbortSignal): Promise<StandIdentity | null> {
+	const host = window.location.hostname || 'localhost';
+	const url = `http://${host}:7844/stand-identity`;
+	try {
+		const res = await fetch(url, { signal });
+		if (!res.ok) return null;
+		return (await res.json()) as StandIdentity;
+	} catch {
+		return null;
+	}
+}
