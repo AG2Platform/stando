@@ -172,8 +172,12 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 		return 'idle';
 	}
 
-	// Heartbeat: ping every 30s, remove clients that fail to write (stale connections)
-	setInterval(() => {
+	// Heartbeat: ping every 30s, remove clients that fail to write (stale connections).
+	// .unref() so a lone heartbeat doesn't block Node from exiting when the
+	// caller has closed the server (notably the agent-state-endpoint test —
+	// pre-PR-A this lived in a subprocess that got SIGKILL'd, post-PR-A the
+	// in-process timer would otherwise pin the test runner for 30s+).
+	const heartbeat = setInterval(() => {
 		for (let i = sseClients.length - 1; i >= 0; i--) {
 			try {
 				sseClients[i].write(':\n\n'); // SSE comment = keep-alive ping
@@ -182,6 +186,7 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 			}
 		}
 	}, 30_000);
+	heartbeat.unref();
 
 	const server = createServer((req, res) => {
 		const url = new URL(req.url || '/', `http://${req.headers.host}`);
