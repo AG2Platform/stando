@@ -96,11 +96,65 @@ final class ScreenCaptureSupervisor {
         }
     }
 
+    /// Kill any orphaned `screen-capture-server.py` process holding port
+    /// 7845. Without this, a previous Sutando.app install whose menu-bar
+    /// binary has exited (or been replaced) can leave its screen-capture
+    /// child running as an init(1) orphan — and that orphan typically
+    /// has no Screen Recording grant (responsible-process attribution
+    /// rolls up to launchd, not us), so /capture silently fails with
+    /// "could not create image from display" while we're prevented from
+    /// taking over with `Address already in use`.
+    ///
+    /// Runs synchronously and only kills processes whose command line
+    /// references our script name (`screen-capture-server.py`) so we
+    /// don't accidentally take down some unrelated service that has
+    /// bound :7845.
+    private func evictOrphanedScreenCaptureServers() {
+        let pgrep = Process()
+        pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        pgrep.arguments = ["-f", "screen-capture-server\\.py"]
+        let pipe = Pipe()
+        pgrep.standardOutput = pipe
+        pgrep.standardError = FileHandle.nullDevice
+        do { try pgrep.run() } catch { return }
+        pgrep.waitUntilExit()
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        let pids = out.split(separator: "\n")
+            .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+            .filter { $0 != myPid }
+        guard !pids.isEmpty else { return }
+        appendLog("supervisor: evicting orphaned screen-capture-server pid(s)=\(pids.map(String.init).joined(separator: ","))")
+        for pid in pids { kill(pid, SIGTERM) }
+        // Wait up to 1s for graceful exit, then SIGKILL stragglers so
+        // the next bind() can succeed.
+        let deadline = Date().addingTimeInterval(1.0)
+        while Date() < deadline {
+            let stillAlive = pids.filter { kill($0, 0) == 0 }
+            if stillAlive.isEmpty { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        for pid in pids where kill(pid, 0) == 0 {
+            kill(pid, SIGKILL)
+        }
+    }
+
     /// Start the supervisor. Idempotent — calling twice is a no-op.
     func start() {
         queue.sync {
             guard process == nil, !stopping else { return }
             evictLegacyLaunchdJob()
+            // Also kill any orphaned screen-capture-server.py from an
+            // older Sutando.app install — without this, an init(1)-
+            // reparented orphan keeps :7845 bound (and silently fails
+            // captures because it has no Screen Recording grant), and
+            // our spawn loop hits "Address already in use" on every
+            // attempt until the backoff gives up.
+            evictOrphanedScreenCaptureServers()
+            // Reset failure counter — eviction means we cleared the
+            // most likely cause of repeated bind failures, so don't
+            // hold a previous run's backoff against this attempt.
+            consecutiveFailures = 0
             // Give launchd a beat to release port 7845 before we bind.
             // 250ms is empirically enough on M1; if it isn't, the spawn
             // will fail fast and the restart loop covers us.
@@ -152,6 +206,11 @@ final class ScreenCaptureSupervisor {
             appendLog("supervisor: backoff — \(consecutiveFailures) failures in last 30s, giving up")
             return
         }
+        // Re-evict orphans on every retry: if the previous spawn died
+        // with EADDRINUSE the orphan from a stale Sutando.app install
+        // is still there, and waiting for backoff alone won't free the
+        // port. Cheap to call when there's nothing to evict.
+        evictOrphanedScreenCaptureServers()
         lastStartAt = Date()
 
         let proc = Process()

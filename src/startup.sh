@@ -186,7 +186,7 @@ fi
 # 5b. Sutando context drop app (global hotkey ⌃C)
 SUT_SRC_DIR="$REPO/src/Sutando"
 SUT_BIN="$SUT_SRC_DIR/Sutando"
-SUT_SRC_FILES=("$SUT_SRC_DIR/main.swift" "$SUT_SRC_DIR/LaunchAgentInstaller.swift" "$SUT_SRC_DIR/SparkleUpdater.swift" "$SUT_SRC_DIR/CloudAuth.swift" "$SUT_SRC_DIR/CloudClient.swift" "$SUT_SRC_DIR/EnvFile.swift" "$SUT_SRC_DIR/FeedbackWindow.swift" "$SUT_SRC_DIR/Permissions.swift" "$SUT_SRC_DIR/SettingsWindow.swift" "$SUT_SRC_DIR/UnifiedMainWindow.swift" "$SUT_SRC_DIR/Uninstaller.swift" "$SUT_SRC_DIR/WebWindow.swift")
+SUT_SRC_FILES=("$SUT_SRC_DIR/main.swift" "$SUT_SRC_DIR/LaunchAgentInstaller.swift" "$SUT_SRC_DIR/SparkleUpdater.swift" "$SUT_SRC_DIR/CloudAuth.swift" "$SUT_SRC_DIR/CloudClient.swift" "$SUT_SRC_DIR/EnvFile.swift" "$SUT_SRC_DIR/FeedbackWindow.swift" "$SUT_SRC_DIR/OnboardingWindow.swift" "$SUT_SRC_DIR/Permissions.swift" "$SUT_SRC_DIR/ScreenCaptureSupervisor.swift" "$SUT_SRC_DIR/SettingsWindow.swift" "$SUT_SRC_DIR/UnifiedMainWindow.swift" "$SUT_SRC_DIR/Uninstaller.swift" "$SUT_SRC_DIR/WebWindow.swift")
 
 # Rebuild if any source file is newer than binary, or binary is missing.
 sut_needs_build=0

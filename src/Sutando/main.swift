@@ -1,5 +1,6 @@
 import Cocoa
 import Carbon
+import CoreGraphics
 import UserNotifications
 
 // MARK: - Sutando Drop Menu Bar App
@@ -253,6 +254,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// otherwise auto-load on user login — conflicting with the new
     /// "services bound to app lifecycle" model).
     private func autoBootstrapServices() {
+        // Verify Screen Recording grant before the supervisor binds. A
+        // rebuild changes Sutando.app's cdhash, which invalidates any
+        // previously-granted TCC entry — and `screencapture` (the CLI
+        // tool the supervisor's child invokes) silently denies on hash
+        // mismatch without prompting. Without this proactive check,
+        // returning users hit "could not create image from display" on
+        // every /capture call and have no in-app surface that tells
+        // them why or offers to fix it. CGRequestScreenCaptureAccess
+        // surfaces the standard system prompt with "Open System
+        // Settings"; harmless when already granted (returns true and
+        // doesn't prompt). The wizard's SCShareableContent probe only
+        // runs during onboarding — this covers the post-onboarding
+        // returning-user path that PR-cdhash-mismatch first surfaced.
+        if !CGPreflightScreenCaptureAccess() {
+            logToFile("autoBootstrapServices: Screen Recording not granted — requesting prompt")
+            CGRequestScreenCaptureAccess()
+        }
         // Screen-capture has its own supervisor — start it here so it
         // races alongside launchd bootstrap rather than waiting for it.
         // The supervisor handles eviction of any stale launchd-managed
