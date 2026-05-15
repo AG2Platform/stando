@@ -64,9 +64,62 @@ fi
 
 if [ "$INSTALL" = "1" ]; then
     echo "→ Installing to /Applications/Sutando.app..."
-    rm -rf /Applications/Sutando.app
-    cp -R "$REPO/app/build/Sutando.app" /Applications/Sutando.app
-    TARGET=/Applications/Sutando.app
+    DEST=/Applications/Sutando.app
+
+    # macOS 14+ ("App Management" TCC permission) blocks writes to signed
+    # bundles in /Applications/ unless the calling terminal app has been
+    # granted that permission in System Settings → Privacy & Security →
+    # App Management. When the grant is missing, BSD `rm` and `cp` return
+    # EPERM on individual files but exit 0 overall, leaving a half-removed
+    # bundle (Contents/Resources/repo gone, signed Mach-Os stuck). The
+    # launcher then spawns into a void. We detect that case and retry
+    # under sudo, which bypasses TCC.
+    remove_dest() {
+        if [ ! -e "$DEST" ]; then return 0; fi
+        rm -rf "$DEST" 2>/dev/null || true
+        [ ! -e "$DEST" ]
+    }
+
+    if ! remove_dest; then
+        echo "  ⚠ rm couldn't fully remove the old install (macOS App Management blocked it)."
+        echo "    Grant your terminal App Management in System Settings → Privacy & Security,"
+        echo "    or accept the sudo prompt below to wipe with root privileges."
+        # chflags clears any uchg/schg BSD flags before the recursive rm.
+        sudo chflags -R nouchg "$DEST" 2>/dev/null || true
+        sudo rm -rf "$DEST"
+        if [ -e "$DEST" ]; then
+            echo "✗ Could not remove $DEST even with sudo." >&2
+            exit 1
+        fi
+    fi
+
+    # Stage to a sibling path and rename — keeps launchd / Finder from
+    # ever seeing a half-copied bundle. ditto preserves resource forks
+    # and extended attributes (cp -R can drop xattrs on signed binaries
+    # and cause Gatekeeper re-verification on first launch).
+    STAGE="${DEST}.staging.$$"
+    rm -rf "$STAGE" 2>/dev/null || true
+    ditto "$REPO/app/build/Sutando.app" "$STAGE"
+    mv "$STAGE" "$DEST"
+
+    # Verify the launcher has the files it actually needs. Half-installs
+    # (missing repo/ or client/dist) silently produce a do-nothing menu-bar
+    # icon — fail loudly here instead.
+    for required in \
+        Contents/MacOS/Sutando \
+        Contents/Resources/repo/src/voice-agent.ts \
+        Contents/Resources/repo/src/web-server.ts \
+        Contents/Resources/repo/client/dist/index.html \
+        Contents/Resources/repo/node_modules/.bin/tsx
+    do
+        if [ ! -e "$DEST/$required" ]; then
+            echo "✗ Install incomplete — missing $required" >&2
+            exit 1
+        fi
+    done
+
+    echo "  ✓ Installed + verified."
+    TARGET="$DEST"
 else
     TARGET="$REPO/app/build/Sutando.app"
 fi
