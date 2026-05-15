@@ -156,6 +156,14 @@ export async function syncOnce(): Promise<void> {
 		console.log(
 			`[skill-sync] installed ${installedCount} skill(s). Restart the voice agent (or sign out + back in) so the new tools load.`,
 		);
+		// Touch a marker file the menu-bar app can poll, so Settings can
+		// surface a "Restart voice agent to load new skills" prompt.
+		try {
+			const marker = join(skillsInstallDir(), '.new-installs');
+			writeFileSync(marker, JSON.stringify({ ts: Date.now(), count: installedCount }));
+		} catch {
+			/* best-effort, ignore */
+		}
 	}
 }
 

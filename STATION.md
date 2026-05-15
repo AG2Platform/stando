@@ -23,6 +23,24 @@ backends: **deep-research** = Tavily web search + Gemini synthesis;
 third stub (cloud-delegate) was dropped from the final 16 and is
 deprecated in the catalog (migration 0015).
 
+**Same-day visual refresh (2026-05-15 PM):** `/superpower` rebuilt
+with an app-store layout (featured hero + mixed-kind rails:
+Trending / Just landed / Sutando picks; unified Browse with kind
+tab + category chips; all 16 items always visible). New
+`/superpower/installed` for local visibility (built-in capabilities
++ installed skills + activated cloud tools, with uninstall). New
+`/superpower/publish` page with multipart skill upload + cloud-tool
+registration — replaces the legacy `/skills/submit` URL-paste form.
+Wallet pill + "My collection" link added to the Station header.
+FREE tier chip hidden everywhere (was confusable with "free to
+install"). Concierge LLM ranking kept; copy scrubbed of internal
+Phase 5/6 references. `cloud-skill-sync` poll interval dropped
+from 600s → 60s so dashboard installs reach the user's Mac inside
+a minute. Cloud-tool vendor swaps: `image-bg-remove` now on
+fal.ai (sync, ~$0.001/call, was Replicate); `pdf-extract-tables`
+now on Gemini 3 Flash multimodal (no extra vendor, ~$0.0005/page,
+was LlamaParse).
+
 | Phase | Scope | Status |
 |---|---|---|
 | 1 — Schema + dashboard nav | Add `kind / pricing_model / mcp_*` columns to `skills`; add `cloud_tool_sessions`; migrate 3 stub cloud tools; promote Station to a primary nav row + dashboard home strip; placeholder `/superpower` Discover page | done |
@@ -34,8 +52,8 @@ deprecated in the catalog (migration 0015).
 | 6 Wave A — Promote stubs | `cloud-research` → real Tavily search + Gemini synthesis (`lib/llm/web-search.ts`); `cloud-recall` → real pgvector + Gemini embeddings (`lib/llm/embed.ts`, `lib/rag/storage.ts`, migration 0014); `cloud-delegate` deprecated (migration 0015). New `POST /api/superpower/rag/upload` endpoint accepts chunked text into per-user corpora. | done |
 | 6 Wave B — Daily-pull skills | 4 skills covering morning-briefing-pro, email-triage, calendar-prep (rescoped — no LinkedIn), screenshot-explain (NEW killer demo). Mix of inline tools (screenshot-explain) and delegated-to-core (other three). | done |
 | 6 Wave C — Integration skills | 4 skills covering code-reviewer, linear-or-github-triage, commute-and-weather (NEW), receipt-to-expense (NEW). All delegated-to-core; each wires a new external integration (`gh`, Linear API, Open-Meteo, macOS Live Text). | done |
-| 6 Wave D — Lightweight cloud tools | 4 MCP-backed cloud tools: text-translate-quality (DeepL), scrape-and-extract (Jina Reader + Gemini), youtube-transcript (player-response scrape, no API key), image-bg-remove (Replicate rembg). | done |
-| 6 Wave E — PDF cloud tools | 2 MCP-backed cloud tools: pdf-extract-tables (LlamaParse) and pdf-fill-and-sign (self-hosted pdf-lib + Tigris). pdf-lib added to package.json — operator: `npm install` before deploying. | done |
+| 6 Wave D — Lightweight cloud tools | 4 MCP-backed cloud tools: text-translate-quality (DeepL), scrape-and-extract (Jina Reader + Gemini), youtube-transcript (player-response scrape, no API key), image-bg-remove (fal.ai rembg). | done |
+| 6 Wave E — PDF cloud tools | 2 MCP-backed cloud tools: pdf-extract-tables (Gemini multimodal) and pdf-fill-and-sign (self-hosted pdf-lib + Tigris). pdf-lib added to package.json — operator: `npm install` before deploying. | done |
 
 ## Mental model
 
@@ -131,35 +149,49 @@ After: Superpower Station is a **primary surface**.
 
 ### `/superpower` — Discover
 
-Concierge hero + curated grid below the fold.
+App-store layout: header → concierge → featured hero → mixed-kind
+rails → unified browse with kind tab + category chips. Recommended
+and Trending are lenses *over* the full Skill + Cloud-tool catalog,
+not peers of those primitives — cards from both kinds appear in any
+rail.
 
 ```
-┌────────────────────────────────────────┐
-│  Superpower Station                    │
-│                                        │
-│  ┌──────────────────────────────────┐  │
-│  │  What do you want Sutando        │  │
-│  │  to do?                    [→]  │  │
-│  └──────────────────────────────────┘  │
-│                                        │
-│  Recommended for you                   │
-│  ┌────┐ ┌────┐ ┌────┐ ┌────┐         │
-│  │card│ │card│ │card│ │card│  ...    │
-│  └────┘ └────┘ └────┘ └────┘         │
-│                                        │
-│  Trending this week                    │
-│  ┌────┐ ┌────┐ ┌────┐ ┌────┐         │
-│                                        │
-│  Sutando picks                         │
-│  ┌────┐ ┌────┐ ┌────┐ ┌────┐         │
-└────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  Superpower Station   [wallet] [Collection]  │
+│                                              │
+│  ┌──────────────────────────────────────┐    │
+│  │  What do you want Sutando to do? [→] │    │
+│  └──────────────────────────────────────┘    │
+│                                              │
+│  ╔══════════════════════════════════════╗    │
+│  ║  Featured                            ║    │
+│  ║  <one big tile, top-trending pick>   ║    │
+│  ╚══════════════════════════════════════╝    │
+│                                              │
+│  Trending         (horizontal-scroll rail)   │
+│  ┌────┐ ┌────┐ ┌────┐ ┌────┐ ▸             │
+│                                              │
+│  Just landed     (horizontal-scroll rail)    │
+│  ┌────┐ ┌────┐ ┌────┐ ┌────┐ ▸             │
+│                                              │
+│  Sutando picks   (horizontal-scroll rail)    │
+│  ┌────┐ ┌────┐ ┌────┐ ┌────┐ ▸             │
+│                                              │
+│  Browse the catalog                          │
+│  [All 16] [Skills 8] [Cloud tools 8]         │
+│  [daily 8] [voice 7] [developer 4] …         │
+│                                              │
+│  ┌────┐ ┌────┐ ┌────┐ ┌────┐                │
+│  ┌────┐ ┌────┐ ┌────┐ ┌────┐                │
+│  ...                                         │
+└──────────────────────────────────────────────┘
 ```
 
 Card content matches the agent-driven theme:
 
-- Title, tier badge, kind chip (Skill / Cloud tool), price label
+- Title, kind chip (Skill / Cloud tool), tier badge (only when ≠ free)
 - One-line "Sutando says: …" reasoning (generated by `/recommend`)
-- Star rating + install count
+- Price label + star rating or install count
 
 ### `/superpower/[slug]` — Detail
 
@@ -187,12 +219,23 @@ Tabs:
   set pricing model + unit price + unit label, optionally upload a
   client package, submit for review
 
-### `/superpower/mine` — My collection
+### `/superpower/installed` — My collection
 
-- Installed skills + activated cloud tools (with remove)
-- Submissions (status: review / published / denied / deprecated, with
-  edit + resubmit)
-- Per-item usage (call count + credits spent + ratings given)
+- **Built-in capabilities** strip at the top: voice agent, phone,
+  screen capture, macOS tools, browser, channels, memory, proactive
+  loop. Always on, no install needed; gives the user a complete
+  picture of what Sutando can already do.
+- **Installed skills** — items pulled from the cloud catalog and
+  extracted to `~/Library/Application Support/Sutando/cloud-skills/`
+  on the user's Mac. Per-row uninstall.
+- **Activated cloud tools** — items reachable through the MCP
+  gateway. Per-row uninstall.
+- Footer explains the 3-stage propagation (dashboard click → bundle
+  sync ~1 min → voice-agent restart) so the user isn't left wondering
+  why a new skill doesn't show up immediately.
+
+Submissions live separately on `/superpower/publish` (the page also
+hosts the submit forms — one tab for skills, one for cloud tools).
 
 ### Proactive surfacing
 
@@ -277,10 +320,10 @@ no web app can match.
 |---|---|---|---|---|
 | 1 | `deep-research` | ~$0.02 (Tavily + Gemini synth) | 100 cr/call | **done (Wave A)** |
 | 2 | `hosted-rag` | ~$0.00003 (embed + pgvector) | 5 cr/call | **done (Wave A)** |
-| 3 | `pdf-extract-tables` | ~$0.003/page (LlamaParse) | 5 cr/call | **done (Wave E)** |
+| 3 | `pdf-extract-tables` | ~$0.0005/page (Gemini 3 Flash) | 5 cr/call | **done (Wave E)** |
 | 4 | `youtube-transcript` | ~$0.05/20-min video (Gemini 3 Flash Preview) | 5 cr/call | **done (Wave D)** |
 | 5 | `text-translate-quality` | ~$0.005/1k chars (DeepL) | 1 cr/call | **done (Wave D)** |
-| 6 | `image-bg-remove` | ~$0.0023 (Replicate rembg) | 2 cr/call | **done (Wave D)** |
+| 6 | `image-bg-remove` | ~$0.001 (fal.ai rembg) | 2 cr/call | **done (Wave D)** |
 | 7 | **`pdf-fill-and-sign`** (NEW) | $0 self-hosted (pdf-lib + Tigris) | 5 cr/call | **done (Wave E)** |
 | 8 | **`scrape-and-extract`** (NEW) | ~free (Jina Reader) | 2 cr/call | **done (Wave D)** |
 

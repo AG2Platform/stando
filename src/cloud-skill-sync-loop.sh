@@ -6,13 +6,15 @@
 # installs propagate to every Mac the user signs into without manual
 # re-clicks. No-op when signed out.
 #
-# Interval default 600s (10 min). Tunable via SUTANDO_SKILL_SYNC_INTERVAL.
+# Interval default 60s. Tunable via SUTANDO_SKILL_SYNC_INTERVAL. Floor is
+# 30s so a Station install propagates to the user's Mac inside ~30–60s
+# from the click, not 10 minutes.
 
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-INTERVAL="${SUTANDO_SKILL_SYNC_INTERVAL:-600}"
-if [ "$INTERVAL" -lt 120 ]; then INTERVAL=120; fi
+INTERVAL="${SUTANDO_SKILL_SYNC_INTERVAL:-60}"
+if [ "$INTERVAL" -lt 30 ]; then INTERVAL=30; fi
 
 cd "$REPO"
 

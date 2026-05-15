@@ -925,11 +925,12 @@ User actions required before paid beta users can complete an install:
      `text-translate-quality` cloud tool. Use a `:fx`-suffixed key
      for the free tier (500k chars/mo) — the route auto-detects
      and hits api-free.deepl.com vs api.deepl.com.
-   - **`REPLICATE_API_TOKEN`** (added Phase 6 Wave D) — backs the
-     `image-bg-remove` cloud tool. ~$0.0023 per call wholesale.
-   - **`LLAMAPARSE_API_KEY`** (added Phase 6 Wave E) — backs the
-     `pdf-extract-tables` cloud tool. Free tier 1000 pages/day,
-     ~$0.003/page after.
+   - **`FAL_KEY`** (added Phase 6 Wave D) — backs the
+     `image-bg-remove` cloud tool via fal.ai's `imageutils/rembg`
+     model. ~$0.001 per call wholesale.
+   - **No extra key for `pdf-extract-tables`** (Phase 6 Wave E) — uses
+     the existing `GEMINI_MASTER_API_KEY` for inline multimodal PDF
+     parsing. Inline-only, max 20 MB per request.
    - **No key needed** for `scrape-and-extract` (Jina Reader free
      tier), `youtube-transcript` (scrapes player response —
      no auth), or `pdf-fill-and-sign` (self-hosted pdf-lib).
