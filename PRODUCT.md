@@ -11,12 +11,14 @@ asks "how do we deliver Sutando to a user's Mac," this doc asks "once
 they have it, what do they pay for and how does the cloud earn its
 keep."
 
-## Status (2026-05-12)
+## Status (2026-05-14)
 
-DISTRIBUTION.md Phases 0–4.11 are done in code. The app installs
-end-to-end from DMG, the cloud control plane runs locally with the
-admin panel landed. We have beta users waiting. The next chapter is
-turning capability into a product.
+DISTRIBUTION.md Phases 0–4.13 are done in code. The app installs
+end-to-end from DMG, opens a dedicated 5-step onboarding wizard on
+first launch, and runs screen-capture as an in-process child so TCC
+needs only one Screen Recording grant. The cloud control plane runs
+locally with the admin panel landed. We have beta users waiting. The
+next chapter is turning capability into a product.
 
 ### Beta-application + landing redesign (2026-05-14)
 
@@ -89,33 +91,42 @@ relay (2.5 / 2.6 / 2.7), WhatsApp bridge (1.6), and the cloud-tools
 real implementations (3.7 — specialist routing / deep-research worker
 / vector RAG). Those land in dedicated follow-up sessions.
 
-### Onboarding lifecycle (2026-05-13, this session)
+### Onboarding + service lifecycle (2026-05-14)
 
-Services are now bound to the app process — open Sutando.app and the
-voice agent / dashboard / bridges / core agent start automatically; the
-voice web window opens 1.5s after launch; cmd+Q tears every service
-back down. Replaces the old "click Install Background Services in
-Settings, then they auto-start on every user login" model.
+First-launch experience is a dedicated 5-step `OnboardingWindow`
+(Welcome → Gemini key → Claude CLI → Permissions → Services) that
+gates the main UI until `$SUTANDO_HOME/.onboarding-complete` exists.
+Every menu-bar entry point routes back to the wizard while the gate
+is up; cloud sign-in callbacks fired mid-wizard defer bootstrap until
+Done. See DISTRIBUTION.md Phase 4.13 for full mechanics.
 
-Mechanism: `LaunchAgentInstaller` now renders plist templates into
-`$SUTANDO_HOME/LaunchAgents/` instead of `~/Library/LaunchAgents/`.
-Plists outside the system-watched directory don't auto-load at login —
-launchctl only runs them when we explicitly `bootstrap`. `AppDelegate
-.applicationDidFinishLaunching` runs `migrateLegacyPlists()` (one-shot
-`bootout` + `rm` of anything in `~/Library/LaunchAgents/com.sutando.*`,
-covering upgraders), then `bootstrapAll()`, then opens the voice
-window. `applicationWillTerminate` calls `stopAll()` to bootout every
-service synchronously. The Install/Uninstall menu items and Settings
-buttons are gone; the first-launch stepper drops from 4 → 3 steps
-(API key → Claude Code → Permissions). Settings shows a live
-"N services running" status row instead, with a single Restart button.
+Services are bound to the app process. `LaunchAgentInstaller` renders
+plist templates into `$SUTANDO_HOME/LaunchAgents/` (NOT auto-loaded by
+macOS at user login) and the wizard's Services step does the initial
+`bootstrap`; returning launches re-bootstrap from
+`applicationDidFinishLaunching`. `applicationWillTerminate` stops the
+in-process screen-capture supervisor first (releases port 7845
+cleanly) then `bootout`s every loaded `com.sutando.*` job
+synchronously. Upgraders are covered by `migrateLegacyPlists()`,
+which boots out + deletes any leftover
+`~/Library/LaunchAgents/com.sutando.*.plist`.
 
-Files touched: `src/Sutando/LaunchAgentInstaller.swift` (runDir,
-migrateLegacyPlists, stopAll, booteachLabel helper), `src/Sutando/main
-.swift` (autoBootstrapServices, scheduleAutoOpenWebUI,
-applicationWillTerminate, removed install menu items),
-`src/Sutando/SettingsWindow.swift` (3-step stepper, status-only
-services row, restartServicesFromSettings).
+Screen capture runs as a direct child of Sutando.app (`Process()`,
+not launchd) so TCC's responsible-process attribution rolls up to the
+.app bundle — one Screen Recording grant covers it, with no separate
+python3 entry in System Settings → Privacy.
+
+Settings shows a live "N services running" status row with a single
+Restart button.
+
+Files touched: `src/Sutando/OnboardingWindow.swift` (new),
+`src/Sutando/ScreenCaptureSupervisor.swift` (new),
+`src/Sutando/LaunchAgentInstaller.swift` (runDir, migrateLegacyPlists,
+stopAll, skipLabels), `src/Sutando/main.swift` (onboarding gate +
+`proceedAfterOnboardingOrLaunch` + supervisor + `restartSelf()` via
+`open -n`), `src/Sutando/Permissions.swift` (layered Screen Recording
+probe), `src/Sutando/SettingsWindow.swift` (status-only services
+row, restartServicesFromSettings).
 
 What's new vs the morning snapshot:
 
@@ -689,8 +700,9 @@ Both should feel like one product made by people who care.
   back to essentials, add density only where it serves (the admin
   panel can stay denser).
 - **Desktop Settings window refresh** (`src/Sutando/SettingsWindow.swift`)
-  — match cloud style: same fonts, accent colors, spacing tokens. The
-  4-step stepper from Phase 4.8 stays but restyled.
+  — match cloud style: same fonts, accent colors, spacing tokens.
+- **Onboarding wizard polish** (`src/Sutando/OnboardingWindow.swift`)
+  — same style tokens as Settings; the 5-step layout itself stays.
 - **Menu-bar icon** — current "S" character is functional. Replace
   with a mark consistent with the logo. Preserve three states (idle /
   listening / working).

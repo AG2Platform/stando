@@ -86,3 +86,14 @@ voice-state.json
 # Sparkle private key file (if exported via generate_keys -x). The keychain
 # entry is the canonical store; this is a backup that should never be committed.
 /app/sparkle/sparkle.priv
+
+# OnboardingWindow runtime markers — written into $SUTANDO_HOME, which
+# defaults to the repo root in the dev workflow. Tracking them means a
+# fresh clone inherits someone else's wizard state.
+.onboarding-step
+.onboarding-complete
+.firstrun-complete
+
+# Xcode-generated state from opening Package.swift in Xcode. SPM build
+# proper doesn't need it.
+.swiftpm/

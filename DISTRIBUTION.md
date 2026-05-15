@@ -15,7 +15,7 @@ control plane (auth, billing, observability).
 - **Public release** (later): architectural redesign once internal users have
   validated the experience.
 
-## Status (last updated 2026-05-06)
+## Status (last updated 2026-05-14)
 
 Phases 0–4 + post-plan polish implemented end-to-end on the `distribution`
 branches in both repos. The full loop has been smoke-tested both locally
@@ -34,14 +34,15 @@ on a different network. Phase 4.10 below sequences exactly that.
 | Phase 2 — Signing, notarization, auto-update | **DONE** (no creds yet) | Code is wired; release workflow runs in degraded mode until Apple Developer ID + Sparkle key secrets are set in GitHub Actions. Commit `97decf5`. |
 | Phase 3 — Cloud control plane | **DONE** (running locally) | Skeleton, schema, auth, API endpoints, billing, dashboard. Deploy to Vercel still pending — see Phase 4.10. `agent-universe` commit `82ac0b2`. |
 | Phase 4 — Desktop ↔ cloud wiring + telemetry | **DONE** | Sign-in via `sutando://` URL scheme, keychain token, heartbeat, three meters wired (voice, TTS, image-gen). Commit `9e1b80f`. |
-| Phase 4.7 — Settings + first-launch flow | **DONE** (added post-plan) | Triggered by real-world test — original Phase 1.4 deferral was wrong. See section below. |
+| Phase 4.7 — Settings window | **DONE** | Single-pane config surface (cloud, API keys, permissions, tier/wallet, services status). First-launch flow itself lives in Phase 4.13. |
 | Phase 4-bug — launchd installer hardening | **DONE** (added post-plan) | First install bailed mid-way on `Disabled=true` plist. Installer now collects errors instead of throwing + skips disabled plists. |
 | Phase 4-core-agent — Claude Code as launchd service | **DONE** (added post-plan) | Voice agent reported "core agent isn't running" because the original 7-plist set didn't include Claude Code itself. Added `com.sutando.core-agent.plist` + `src/run-core-agent.sh` wrapper. |
-| Phase 4.8 — Self-contained .app | **DONE** (commit `15b2114`) | Bundled Node 22 LTS + tmux + ncurses terminfo (Phase 1.5 finally done); fswatch replaced by Node `fs.watch`; in-app WKWebView windows for voice + dashboard (no more Chrome dependency); Claude Code detect-install-signin row in Settings; 4-step first-launch stepper. |
-| Phase 4.9 — Fresh-Mac install validation | **DONE** (commit `8f96454`) | Six bugs surfaced by walking the install flow on a clean user account: hardened-runtime mic entitlement key, LSUIElement TCC prompt suppression, missing skills symlinks, Claude 2.1.x bypass-permissions warning auto-accept, `screencapture` PATH, python3 Screen Recording grant trigger. |
+| Phase 4.8 — Self-contained .app | **DONE** (commit `15b2114`) | Bundled Node 22 LTS + tmux + ncurses terminfo (Phase 1.5 finally done); fswatch replaced by Node `fs.watch`; in-app WKWebView windows for voice + dashboard (no more Chrome dependency); Claude Code detect-install-signin row in Settings. |
+| Phase 4.9 — Fresh-Mac install validation | **DONE** (commit `8f96454`) | Five install-time bugs fixed by walking the flow on a clean user account: hardened-runtime mic entitlement key, LSUIElement TCC prompt suppression, missing skills symlinks, Claude 2.1.x bypass-permissions warning auto-accept, `screencapture` PATH. (The sixth — python3 Screen Recording — is **SUPERSEDED** by Phase 4.13.) |
 | Phase 4.10 — Distribution test (different-Mac, different-network) | **PENDING** | Three parallel tracks: cloud deploy, signed/notarized DMG, fresh-Mac validation. See section below for the ordered task list. |
 | Phase 4.11 — Admin panel | **DONE** (`agent-universe` commit pending) | `/admin/*` routes — overview, funnel, retention, margins, features, reliability. Schema additions: `users.is_admin`, `usage_events.app_version` + `provider_cost_cents`, three new tables (`onboarding_events`, `error_events`, `sessions`). Three new ingestion endpoints (`/api/onboarding`, `/api/errors`, `/api/sessions`). See section below. |
-| Phase 4.12 — Onboarding lifecycle (services tied to app process) | **DONE** | Plists now render into `$SUTANDO_HOME/LaunchAgents/` (not auto-loaded by macOS), bootstrap on app launch, bootout on cmd+Q. Voice web window auto-opens on launch. Stepper down to 3 steps; Install/Uninstall UI removed. See section below. |
+| Phase 4.12 — Service lifecycle bound to app process | **DONE** | Plists render into `$SUTANDO_HOME/LaunchAgents/` (not auto-loaded by macOS), bootstrap on app launch, bootout on cmd+Q. Voice web window auto-opens on launch. Install/Uninstall UI removed. See section below. |
+| Phase 4.13 — Onboarding wizard + screen-capture supervisor | **DONE** (commit `22e6cd7`) | Dedicated 5-step first-launch window (Welcome → Gemini key → Claude CLI → Permissions → Services); gates the main UI until complete. Screen-capture moved off launchd and into an in-process child of Sutando.app so TCC's responsible-process attribution rolls up to the bundle — one Screen Recording grant covers it. `restartSelf()` relaunches via `open -n <bundle>` so TCC identity survives restart. **SUPERSEDES** Phase 4.7 / 4.8's Settings-as-wizard model. |
 | Phase 5 — Architectural redesign | **PENDING** | Intentionally deferred until after internal release. |
 
 Operational gaps before we can hand a build to an external internal user:
@@ -153,18 +154,19 @@ Findings from the audit (2026-05-04) that constrain the design:
    notarization re-signs the bundled Mach-O binaries (sharp, etc.) and
    doesn't care about the source URL, so the pin is safe.
 5. **Convert inline launches to launchd** [DONE]. LaunchAgent templates ship
-   in `app/LaunchAgents/`. Final service list (8, not 8 — task-bridge dropped
-   because it's a module not a process; core-agent added later in Phase
-   4-core-agent):
+   in `app/LaunchAgents/`. Current launchd-managed set:
    - `com.sutando.voice-agent`
    - `com.sutando.web-client`
    - `com.sutando.dashboard`
    - `com.sutando.agent-api`
-   - `com.sutando.screen-capture`
    - `com.sutando.credential-proxy`
-   - `com.sutando.core-agent` (added post-plan, Phase 4-core-agent)
+   - `com.sutando.core-agent`
    - `com.sutando.phone-conversation` (paid tier; ships `Disabled=true`,
      installer skips bootstrap — see Phase 4-bug)
+
+   `com.sutando.screen-capture` is template-only and skipped by the
+   installer — it runs as an in-process child of Sutando.app via
+   `ScreenCaptureSupervisor`. See Phase 4.13.
 6. **Config layering** [DONE]. `src/load-env.ts` loads repo `.env` first then
    `$SUTANDO_HOME/.env` with override; `startup.sh` sources the latter so
    Python services inherit it; Settings window writes to `$SUTANDO_HOME/.env`
@@ -422,28 +424,25 @@ Deferred to v2 (operational, not code):
 - Hosted Gemini gateway — needs a paid GCP project.
 - These are paid-tier features; BYO works for internal release.
 
-## Phase 4.7 — Settings + first-launch flow [DONE]
+## Phase 4.7 — Settings window [DONE]
 
-Added post-plan after the first real-world test — installing the .app and
-trying to use it required hand-editing `.env`. Original Phase 1.4 wizard
-deferral was wrong.
+`SettingsWindow` is the post-onboarding configuration surface. The
+first-launch flow itself moved to a dedicated wizard — see Phase 4.13.
 
 - `src/Sutando/EnvFile.swift` — round-tripping `.env` parser/writer that
   preserves comments + unknown keys.
-- `src/Sutando/Permissions.swift` — TCC status (Microphone via
-  `AVCaptureDevice`, Accessibility via `AXIsProcessTrusted`, Screen
-  Recording via `CGPreflightScreenCaptureAccess`) plus
-  `x-apple.systempreferences:` deeplinks.
+- `src/Sutando/Permissions.swift` — TCC status + System Settings
+  deeplinks. Screen Recording detection is layered (SCShareableContent
+  with a 30s cache, `CGPreflightScreenCaptureAccess`, plus a foreign-
+  window-name probe) — see Phase 4.13.
 - `src/Sutando/SettingsWindow.swift` — single-pane window with cloud
   account row, API key form (Gemini required + Cartesia + 12 advanced
-  fields under disclosure), permission rows with Grant buttons, and
-  Background Services Install / Uninstall.
+  fields under disclosure), permission rows, tier/wallet/auto-topup,
+  and a status-only Background Services row with a Restart button.
 - `main.swift` — `setupMainMenu()` builds an Edit menu so ⌘V works in
   text fields (LSUIElement apps don't get one by default — without it,
   pasting an API key fails silently). `Settings…` menu item with `⌘,`
-  accelerator. First-launch detection: if no Gemini key + no
-  `$SUTANDO_HOME/.firstrun-complete` marker, Settings auto-opens 300ms
-  after launch.
+  accelerator.
 
 ## Phase 4-bug — launchd installer hardening [DONE]
 
@@ -559,21 +558,11 @@ New section between API keys and Permissions:
   Terminal touch in the install flow)
 - Status auto-refreshes every 1.5s while window is open
 
-### First-launch stepper
+### First-launch stepper [SUPERSEDED by Phase 4.13]
 
-Horizontal 3-step indicator at the top of Settings:
-
-```
-① API key › ② Claude Code › ③ Permissions
-```
-
-(Originally 4 steps; "Background services" was removed in Phase 4.12
-once service install + start became automatic on app launch.)
-
-Each step shows ○ / ✓ based on live state checked every 1.5s. Hides
-once `$SUTANDO_HOME/.firstrun-complete` exists (written on first
-successful Save). Drives non-technical users through setup without a
-README.
+The inline 3-step indicator at the top of Settings has been replaced
+by a dedicated `OnboardingWindow` wizard. Settings no longer renders a
+stepper. See Phase 4.13.
 
 ## Phase 4.9 — Fresh-Mac install validation [DONE — commit `8f96454`]
 
@@ -626,69 +615,148 @@ machine had accumulated state that masked them.
    `screencapture` binary lives at `/usr/sbin/screencapture`. Added
    `/usr/sbin` to the plist template.
 
-6. **Python3 missing from Screen Recording list** — TCC tracks
-   launchd-spawned python3 as a separate identity from `Sutando.app`.
-   Granting Screen Recording to the .app didn't help the helper.
-   `screenRecording.request()` now also pokes the running screen-capture
-   service AND fork-spawns python3 with a one-shot `screencapture` so
-   python3 lands in System Settings → Privacy → Screen Recording
-   alongside Sutando.app. User toggles both in one trip. (System Audio
-   Recording still needs manual grant for the `screen-record` skill —
-   no clean way to register python3 for that without ScreenCaptureKit
-   audio bindings.)
+6. **Python3 missing from Screen Recording list** [SUPERSEDED by
+   Phase 4.13]. Screen-capture no longer runs under launchd; it's an
+   in-process child of Sutando.app via `ScreenCaptureSupervisor`, so
+   TCC's responsible-process attribution rolls up to the .app bundle
+   and a single Screen Recording grant covers it. System Audio
+   Recording for the `screen-record` skill is still a separate grant
+   pending ScreenCaptureKit audio bindings.
 
-## Phase 4.12 — Onboarding lifecycle: services tied to app process [DONE]
+## Phase 4.12 — Service lifecycle bound to app process [DONE]
 
-Done in the same session as the PRODUCT.md beta wave work. The original
-model installed plists into `~/Library/LaunchAgents/` from a Settings
-button, then macOS auto-loaded them on every user login. Two real-world
-problems with that:
-
-- Required a manual "Install Background Services" click before anything
-  worked — non-technical beta users got stuck here.
-- Services kept running across reboots even when the user wasn't using
-  Sutando — confusing surface area; harder to reason about.
-
-The new model binds service lifecycle to the app process:
+Services are tied to the Sutando.app process — no manual install
+step, no macOS-login auto-load.
 
 - **App open** → render plist templates to `$SUTANDO_HOME/LaunchAgents/`
   (writable, NOT auto-loaded by macOS at user login), `launchctl
-  bootstrap` each one, then open the voice web window 1.5s later
-  (WebWindowController retries cold-start failures for 30s so the race
-  is covered).
+  bootstrap` each one. The voice web window opens after onboarding
+  (or, for returning users, alongside service bootstrap).
 - **App quit (cmd+Q)** → `launchctl bootout` every loaded com.sutando.*
-  service synchronously before NSApplication exits.
+  service synchronously before NSApplication exits;
+  `ScreenCaptureSupervisor.stop()` first so port 7845 releases cleanly.
 - **First launch on upgraded machine** → `migrateLegacyPlists()` boots
   out + deletes any leftover `~/Library/LaunchAgents/com.sutando.*.plist`
-  from the old install model, so users don't get double instances (one
-  from login auto-load, one from the new app).
+  from the old install model, so users don't get double instances.
 
 UX consequences:
 
-- Install / Uninstall Background Services menu items removed.
-- Settings "Background services" row no longer has Install/Uninstall —
-  shows a live "N services running" status with a single Restart
-  button.
-- First-launch stepper drops from 4 → 3 steps (API key → Claude Code
-  → Permissions). The 4th step disappeared because background services
-  are now automatic.
+- No Install / Uninstall Background Services menu items.
+- Settings "Background services" row shows a live "N services running"
+  status with a single Restart button.
 
 Files touched:
 
 - `src/Sutando/LaunchAgentInstaller.swift` — `runDir`,
   `legacyLaunchAgentsDir`, `migrateLegacyPlists()`, `stopAll()`,
-  `booteachLabel(in:deletePlist:)` helper. Existing `install()` /
-  `uninstall()` keep the same external shape; they just write to the
-  new runDir.
-- `src/Sutando/main.swift` — `applicationDidFinishLaunching` calls
-  `autoBootstrapServices()` + `scheduleAutoOpenWebUI()`;
-  `applicationWillTerminate` calls `LaunchAgentInstaller().stopAll()`;
-  menu items for install/uninstall removed; in-app Restart/Stop
-  buttons rewired through `LaunchAgentInstaller` instead of pkill.
-- `src/Sutando/SettingsWindow.swift` — `stepNames` collapsed from 4 →
-  3; new `servicesStatusLabel` + `refreshServicesUI()` + Restart
-  button replace the old install row; `restartServicesFromSettings`
+  `booteachLabel(in:deletePlist:)` helper, `skipLabels` set
+  (currently holds `com.sutando.screen-capture` — see Phase 4.13).
+- `src/Sutando/main.swift` — `applicationWillTerminate` calls
+  `screenCaptureSupervisor.stop()` then `LaunchAgentInstaller().stopAll()`;
+  Restart/Stop buttons rewired through `LaunchAgentInstaller` instead
+  of pkill.
+- `src/Sutando/SettingsWindow.swift` — `servicesStatusLabel` +
+  `refreshServicesUI()` + Restart button; `restartServicesFromSettings`
   handler.
+
+## Phase 4.13 — Onboarding wizard + screen-capture supervisor [DONE — commit `22e6cd7`]
+
+Two intertwined desktop changes:
+
+### Onboarding wizard (`src/Sutando/OnboardingWindow.swift`)
+
+Dedicated NSWindow shown on first launch, gated by
+`$SUTANDO_HOME/.onboarding-complete`. Until the marker exists,
+`AppDelegate` shows the wizard instead of the main UnifiedMainWindow,
+and every menu-bar entry point (`openUnifiedWindow`) routes back to
+the wizard.
+
+Five steps:
+
+1. **Welcome** — hero card + Get started.
+2. **Gemini API key** — text field; validated against
+   `generativelanguage.googleapis.com/v1beta/models`; persisted to
+   `$SUTANDO_HOME/.env` via `EnvFile.swift`.
+3. **Claude Code CLI** — detects `claude` on disk; offers in-process
+   `curl -fsSL https://claude.ai/install.sh | bash`; surfaces sign-in
+   when the binary is present.
+4. **Permissions** — Microphone via `AVCaptureDevice.requestAccess`
+   (required, blocks Continue); Screen Recording via
+   `CGRequestScreenCaptureAccess` (optional).
+5. **Services** — runs `LaunchAgentInstaller().install()`, shows
+   `N services running`, then Done.
+
+On Done: writes `.onboarding-complete` (and legacy `.firstrun-complete`),
+clears the `.onboarding-step` resume marker, fires `onComplete` so
+AppDelegate proceeds to `proceedAfterOnboardingOrLaunch()` (cloud
+sign-in if needed → bootstrap → open WebUI). The window has no close
+button and `windowShouldClose` refuses to close until onboarding is
+complete — the only escape valve is quitting the app.
+
+A cloud sign-in callback that fires *during* onboarding defers
+bootstrap until the wizard finishes, so the main window can't punch
+through the gate.
+
+### Screen-capture supervisor (`src/Sutando/ScreenCaptureSupervisor.swift`)
+
+`screen-capture-server.py` runs as a direct child of Sutando.app via
+`Process()` (posix_spawn). TCC tracks Screen Recording grants per
+binary AND tracks a "responsible process" — when launchd spawns the
+service, the responsible process is launchd itself, so the
+python3-running-screencapture call inside the service was attributed
+to a separate identity from Sutando.app and silently failed even
+after the user granted the .app. With the supervisor, the
+responsible process rolls up to Sutando.app: one grant covers it.
+
+- `LaunchAgentInstaller.install()` adds `com.sutando.screen-capture`
+  to a `skipLabels` set — boots out any leftover launchd job and
+  deletes the rendered plist on every install pass.
+- Supervisor handles restart-on-crash with backoff (5 failures in 30s
+  triggers giveup until the next app launch), evicts the legacy
+  launchd job on `start()`, and SIGTERMs the child on `stop()` so
+  port 7845 is free for the next launch.
+- Logs to `$SUTANDO_HOME/logs/screen-capture.log` (same path as the
+  legacy launchd setup).
+
+### `Permissions.swift` Screen Recording detection
+
+Layered to avoid SCShareableContent's "re-prompt on every call against
+a revoked-but-cached grant" trap. `status()` consults, in order:
+
+1. The last `SCShareableContent.current` result if it's under 30s old
+   (catches the toggle-off case).
+2. `CGPreflightScreenCaptureAccess()` — sync, no prompt, sticky after
+   a runtime grant.
+3. `CGWindowListCopyWindowInfo` foreign-window-name probe — sync, no
+   prompt, fast-path complement.
+
+`runLiveScreenRecordingProbe()` is the only place SCShareableContent
+runs and is hooked to `NSApplication.didBecomeActiveNotification` —
+i.e. exactly when the user has plausibly toggled the permission in
+System Settings. Probes are coalesced so concurrent activations don't
+fire multiple in-flight tasks.
+
+### `restartSelf()` via Launch Services
+
+Re-exec'ing the inner binary produces a process with a different
+Launch Services identity from TCC's perspective — even with an
+identical cdhash — so TCC grants attributed to "Sutando.app" wouldn't
+apply to the relaunched process. The `.app`-bundle path now relaunches
+via `/usr/bin/open -n <bundle>` so the new process inherits the
+bundle's TCC identity. Raw-binary dev builds keep the re-exec path.
+
+### Files touched
+
+- New: `src/Sutando/OnboardingWindow.swift` (1,919 lines),
+  `src/Sutando/ScreenCaptureSupervisor.swift` (233 lines),
+  `app/rebuild.sh` (dev convenience: quit / build / launch with
+  `--install` and `--full` flags).
+- Modified: `src/Sutando/main.swift` (onboarding gate +
+  `proceedAfterOnboardingOrLaunch()` + `screenCaptureSupervisor`
+  property + `restartSelf()` via `open -n`),
+  `src/Sutando/LaunchAgentInstaller.swift` (`skipLabels`),
+  `src/Sutando/Permissions.swift` (layered Screen Recording probe +
+  `runLiveScreenRecordingProbe`), `app/build-app.sh` (SWIFT_SOURCES).
 
 ## Phase 4.10 — Distribution test (different Mac, different network) [PENDING]
 
@@ -795,15 +863,18 @@ that has never seen Sutando.
 2. **Download via Safari.** From the GitHub Release page, not via
    `scp`. This exercises the `com.apple.quarantine` xattr that
    triggers Gatekeeper. Drag DMG to /Applications, open.
-3. **Walk the 4-step Settings stepper.**
-   - Gemini key (paste from another machine — confirm ⌘V works since
+3. **Walk the 5-step onboarding wizard** (Phase 4.13).
+   - Welcome.
+   - Gemini API key (paste from another machine — confirm ⌘V works since
      LSUIElement apps need an explicit Edit menu, fixed in Phase 4.7).
-   - Install Claude Code (button runs `curl ... | bash`, then opens
-     Terminal for `claude auth login` — only Terminal touch).
-   - Permissions (mic, screen recording, accessibility — known cliff,
-     watch the funnel telemetry land).
-   - Background services (launchd bootstrap; should install all 7 with
-     `phone-conversation` deferred-disabled).
+     Validated against `generativelanguage.googleapis.com`.
+   - Claude Code CLI (button runs `curl ... | bash` in-process, then
+     opens Terminal for `claude auth login` — only Terminal touch).
+   - Permissions (mic required, screen recording optional — known
+     cliff, watch the funnel telemetry land).
+   - Background services (launchd bootstrap of every plist except
+     `com.sutando.screen-capture`, which runs in-process via
+     `ScreenCaptureSupervisor`; `phone-conversation` ships disabled).
 4. **Sign in to cloud from the second Mac.** Critical: this is the
    first time `sutando://` URL scheme is exercised on hardware where
    that scheme has never been registered.
@@ -1054,12 +1125,11 @@ These will surface during internal use. Don't pre-fix them:
    hack from Phase 4.9.
 5. **Stop running with `--dangerously-skip-permissions`** (`startup.sh:351`).
    Replace with hook-based approval flows + menu-bar consent prompts.
-6. **Bridge python3 helpers through the .app for TCC** — the launchd-
-   spawned python3 needs its own Screen Recording (and System Audio
-   Recording) grants, separate from the .app's. Phase 4.9 papers over
-   this by triggering python3 to register itself, but the right fix is
-   to have the .app's Swift process do screen capture and expose it via
-   XPC/HTTP, so only one TCC grant is ever needed.
+6. **Bridge python3 helpers through the .app for TCC** [PARTIAL — Phase
+   4.13 landed this for screen-capture by spawning the python server
+   as a child of Sutando.app]. Remaining surface: System Audio
+   Recording for the `screen-record` skill still needs ScreenCaptureKit
+   audio bindings exposed via XPC/HTTP from the .app.
 7. **Test infrastructure** — current `tests/` is thin. Need integration tests
    for file bridge, voice round-trip, phone round-trip.
 
@@ -1079,8 +1149,10 @@ to "operational provisioning".
 | Phase 4.7 Settings + first-launch [DONE] | Manual-override Plus subscriptions [PENDING] | — |
 | Phase 4-bug installer hardening [DONE] | Phase 4.10 Track 1 — production deploy (Vercel + DNS + prod Neon/Clerk/Stripe; Tigris deferred) [PENDING] | Phase 4.10 Track 4 — onboarding/error/session emission [DONE] |
 | Phase 4-core-agent claude wrapper [DONE] | Phase 4.11 admin panel [DONE — needs migration applied + admin flag set] | Per-skill `skill.run` metadata emission [PENDING — deferred] |
-| Phase 4.8 bundled runtime + WKWebView + Claude Code installer + stepper [DONE] | Server-side rate sheet for `provider_cost_cents` [PENDING] | — |
+| Phase 4.8 bundled runtime + WKWebView + Claude Code installer [DONE] | Server-side rate sheet for `provider_cost_cents` [PENDING] | — |
 | Phase 4.9 fresh-Mac install fixes [DONE] | Phone relay [PENDING — paid tier] | — |
+| Phase 4.12 service lifecycle bound to app [DONE] | | |
+| Phase 4.13 onboarding wizard + screen-capture supervisor [DONE — commit `22e6cd7`] | | |
 | Phase 4.10 Track 2 — Dev ID cert + Sparkle keys + `apiBase` baked-in + tagged release [PENDING] | | |
 | Phase 4.10 Track 3 — fresh-Mac DMG validation [PENDING — gated on Tracks 1+2] | | |
 | Internal alpha [PENDING — gated on Track 3 success] | | |
