@@ -1,0 +1,8 @@
+{
+	"name": "commute-and-weather",
+	"description": "Should-I-bike-today decisions. Cross-references today's calendar × weather (Open-Meteo, free) × user-defined commute rules. Voice-callable: 'should I bike today', 'do I need a jacket'.",
+	"enabled": true,
+	"access_tier": "owner",
+	"documented_for_core": true,
+	"core_description": "User-invocable: 'should I bike today', 'do I need a jacket', 'is it a good walk day', 'do I need an umbrella'. Delegate to core via `work`. Cross-references today's calendar (first physical meeting) × Open-Meteo weather × user's commute rules (notes/commute-rules.md, with sane defaults). Speaks a conversational verdict (green/yellow/red) with rationale."
+}

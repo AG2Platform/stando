@@ -1,0 +1,8 @@
+{
+	"name": "linear-or-github-triage",
+	"description": "Daily issue/PR triage across Linear + GitHub. Voice-callable: 'what changed in my issues today', 'draft my standup'. Requires LINEAR_API_KEY (Linear) and/or gh auth login (GitHub).",
+	"enabled": true,
+	"access_tier": "owner",
+	"documented_for_core": true,
+	"core_description": "User-invocable: 'what changed in my issues today', 'draft my standup', 'what is on my plate'. Delegate to core via `work`. Queries Linear GraphQL (needs LINEAR_API_KEY) + gh search issues/prs (needs gh auth), triages into action-needed/in-progress/waiting/done, and either speaks a summary OR drafts a standup update copied to clipboard via pbcopy."
+}

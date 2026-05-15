@@ -1,0 +1,8 @@
+{
+	"name": "receipt-to-expense",
+	"description": "Receipt photo → categorized expense line. Uses macOS Live Text OCR (free) + Gemini classification. Output to CSV or Google Sheets. Voice-callable: 'log this receipt', 'add to expenses'.",
+	"enabled": true,
+	"access_tier": "owner",
+	"documented_for_core": true,
+	"core_description": "User-invocable: 'log this receipt', 'add to expenses', 'process this receipt'. Delegate to core via `work`. macOS Live Text OCR (via Shortcuts or PyObjC) → Gemini JSON-mode classification → append to ~/Documents/expenses-<year>.csv or a configured Google Sheet. Image stays local; only the OCR'd text goes to Gemini. Setup writes ~/.config/sutando/expense-store.json on first run."
+}

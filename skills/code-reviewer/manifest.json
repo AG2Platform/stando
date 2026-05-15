@@ -1,0 +1,8 @@
+{
+	"name": "code-reviewer",
+	"description": "Senior-engineer review of a GitHub PR. Voice-callable: 'review PR 1284', 'review my latest PR'. Reads conventions from CLAUDE.md / CONTRIBUTING.md / README before reviewing. Output saved to notes/.",
+	"enabled": true,
+	"access_tier": "owner",
+	"documented_for_core": true,
+	"core_description": "User-invocable: 'review PR <number>', 'review my latest PR', 'review the <topic> PR'. Delegate to core via `work`. Reads gh pr view + gh pr diff + repo conventions (CLAUDE.md / CONTRIBUTING.md), runs a logic/tests/security/performance/naming checklist, writes the review to notes/review-pr-<number>-<ts>.md, speaks a one-paragraph summary. Posting to GitHub via `gh pr review` requires explicit user confirmation (irreversible)."
+}
