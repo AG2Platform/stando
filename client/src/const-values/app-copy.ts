@@ -27,6 +27,10 @@ export const APP_COPY = {
 	agentStatusTitle: 'Server view',
 	agentStatusHint:
 		"What voice-agent.ts reports about its own connection state — independent of this browser's mic capture.",
+	transcriptTitle: 'Transcript',
+	transcriptHint:
+		'Live user + assistant transcript. Server-final entries can be copied; in-progress lines fade in as the model speaks.',
+	transcriptEmpty: 'No transcript yet — connect and speak to populate.',
 } as const;
 
 export type VoiceStatusKey =

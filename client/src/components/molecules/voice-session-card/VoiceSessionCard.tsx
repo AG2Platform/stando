@@ -1,6 +1,6 @@
-import ConnectButton from '@/components/atoms/ConnectButton';
-import MuteButton from '@/components/atoms/MuteButton';
-import StatusBadge from '@/components/atoms/StatusBadge';
+import ConnectButton from '@/components/atoms/connect-button';
+import MuteButton from '@/components/atoms/mute-button';
+import StatusBadge from '@/components/atoms/status-badge';
 import { APP_COPY, type VoiceStatusKey } from '@/const-values/app-copy';
 import type { VoiceSessionStatus } from '@/lib/voice-session';
 import { formatBytes } from '@/utils/format-bytes';

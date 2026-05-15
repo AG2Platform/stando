@@ -1,4 +1,4 @@
-import AppShell from '@/components/molecules/AppShell';
+import AppShell from '@/components/molecules/app-shell';
 import { APP_COPY } from '@/const-values/app-copy';
 import type { AppRouteId } from '@/const-values/app-routes';
 import { useCurrentRoute } from '@/hooks/useCurrentRoute';

@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import { resolveConfig } from '@/lib/config';
+import { conversationStore } from '@/lib/conversation-store';
 import { VoiceSession, type VoiceSessionState } from '@/lib/voice-session';
 
 const INITIAL_STATE: VoiceSessionState = {
@@ -57,6 +58,10 @@ export function useVoiceSession(): UseVoiceSessionResult {
 				const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
 				fn('[voice-session]', msg);
 			},
+			onTranscript: (role, text, partial) => conversationStore.handleTranscript(role, text, partial),
+			onTurnEnd: () => conversationStore.endTurn(),
+			onTurnInterrupted: () => conversationStore.interruptTurn(),
+			onSystemMessage: (text) => conversationStore.appendSystem(text),
 		});
 		sessionRef.current = session;
 		return () => {

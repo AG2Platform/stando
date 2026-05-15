@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import NavTabs from '@/components/atoms/NavTabs';
+import NavTabs from '@/components/atoms/nav-tabs';
 import { APP_COPY } from '@/const-values/app-copy';
 import type { AppRouteId } from '@/const-values/app-routes';
 

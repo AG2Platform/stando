@@ -1,5 +1,6 @@
-import PageHeader from '@/components/atoms/PageHeader';
-import VoiceSessionCard from '@/components/molecules/VoiceSessionCard';
+import PageHeader from '@/components/atoms/page-header';
+import VoiceSessionCard from '@/components/molecules/voice-session-card';
+import Transcript from '@/components/organisms/transcript';
 import { APP_COPY } from '@/const-values/app-copy';
 import { APP_ROUTES } from '@/const-values/app-routes';
 import { useAgentStatus } from '@/hooks/useAgentStatus';
@@ -25,6 +26,14 @@ export default function ConversationPage() {
 					onDisconnect={disconnect}
 					onToggleMute={toggleMute}
 				/>
+
+				<section className="space-y-2">
+					<header>
+						<h2 className="text-sm font-semibold text-[color:var(--color-text)]">{APP_COPY.transcriptTitle}</h2>
+						<p className="mt-1 max-w-prose text-xs text-[color:var(--color-text-mute)]">{APP_COPY.transcriptHint}</p>
+					</header>
+					<Transcript />
+				</section>
 
 				<section className="rounded-lg border border-neutral-800/80 bg-[color:var(--color-surface)]/40 p-5">
 					<header>

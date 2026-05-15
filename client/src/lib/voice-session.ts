@@ -39,6 +39,16 @@ export interface VoiceSessionState {
 export interface VoiceSessionEvents {
 	onStateChange: (next: VoiceSessionState) => void;
 	onLog: (message: string, level: 'info' | 'warn' | 'error') => void;
+	/** Emitted for `transcript` WS frames. `partial` mirrors the legacy
+	 *  semantics: true means in-progress, false means finalized. */
+	onTranscript?: (role: 'user' | 'assistant', text: string, partial: boolean) => void;
+	/** Server signalled the current turn is done. */
+	onTurnEnd?: () => void;
+	/** Server cut off the assistant turn (typically a barge-in). VoiceSession
+	 *  already stops playback internally — this event is for UI cleanup. */
+	onTurnInterrupted?: () => void;
+	/** Local system notice (e.g. "Microphone active — speak now."). */
+	onSystemMessage?: (text: string) => void;
 }
 
 const DEFAULT_INPUT_RATE = 16_000;
@@ -138,6 +148,7 @@ export class VoiceSession {
 			return;
 		}
 		this.startCapture();
+		this.events.onSystemMessage?.('Microphone active — speak now.');
 		this.updateState({ status: 'live' });
 	}
 
@@ -171,13 +182,25 @@ export class VoiceSession {
 			return;
 		}
 		try {
-			const msg = JSON.parse(event.data) as { type?: string; audioFormat?: { inputSampleRate?: number; outputSampleRate?: number } };
+			const msg = JSON.parse(event.data) as {
+				type?: string;
+				role?: 'user' | 'assistant';
+				text?: string;
+				partial?: boolean;
+				audioFormat?: { inputSampleRate?: number; outputSampleRate?: number };
+			};
 			if (msg.type === 'session.config' && msg.audioFormat) {
 				this.inputRate = msg.audioFormat.inputSampleRate ?? this.inputRate;
 				this.outputRate = msg.audioFormat.outputSampleRate ?? this.outputRate;
 				this.events.onLog(`audio format: in=${this.inputRate} out=${this.outputRate}`, 'info');
+			} else if (msg.type === 'transcript' && msg.role && typeof msg.text === 'string') {
+				// `partial` defaults to true in the legacy client when the server omits it.
+				this.events.onTranscript?.(msg.role, msg.text, msg.partial !== false);
+			} else if (msg.type === 'turn.end') {
+				this.events.onTurnEnd?.();
 			} else if (msg.type === 'turn.interrupted') {
 				this.stopActiveSources();
+				this.events.onTurnInterrupted?.();
 			}
 		} catch {
 			/* non-JSON text frame */

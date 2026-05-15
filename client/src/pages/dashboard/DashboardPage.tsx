@@ -1,4 +1,4 @@
-import PageHeader from '@/components/atoms/PageHeader';
+import PageHeader from '@/components/atoms/page-header';
 import { APP_COPY } from '@/const-values/app-copy';
 import { APP_ROUTES } from '@/const-values/app-routes';
 
