@@ -27,14 +27,17 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-TASKS_DIR = REPO / "tasks"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from util_paths import state_dir, state_path  # noqa: E402
+
+TASKS_DIR = state_dir("tasks")
 PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 7847
 
 # Load .env before reading secrets so launchctl / systemd managed restarts
 # pick up GITHUB_WEBHOOK_SECRET without needing it in the plist/unit file.
 try:
     from dotenv import load_dotenv
-    load_dotenv(REPO / ".env")
+    load_dotenv(state_path(".env"))
 except ImportError:
     print("⚠️ python-dotenv not installed — relying on shell env for GITHUB_WEBHOOK_SECRET")
 

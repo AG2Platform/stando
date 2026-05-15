@@ -11,6 +11,10 @@ MSG="$1"
 if [ -z "$MSG" ]; then echo "Usage: bash src/notify.sh 'message'"; exit 1; fi
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# Runtime-state root: respect SUTANDO_HOME (set by the packaged .app),
+# fall back to REPO_DIR for bare-repo dev installs. Mirrors util_paths
+# `_state_root()` so shell + Python writers agree on where results land.
+STATE_ROOT="${SUTANDO_HOME:-$REPO_DIR}"
 TS=$(date +%s%3N)
 
 # Load tokens from channel configs
@@ -19,7 +23,8 @@ DISCORD_USER_ID=$(python3 -c "import json; print(json.load(open('$HOME/.claude/c
 
 # 1. Voice — write proactive message if voice agent is up
 if curl -s -o /dev/null -w "%{http_code}" http://localhost:9900 2>/dev/null | grep -q "426"; then
-  echo "$MSG" > "$REPO_DIR/results/proactive-$TS.txt"
+  mkdir -p "$STATE_ROOT/results"
+  echo "$MSG" > "$STATE_ROOT/results/proactive-$TS.txt"
 fi
 
 # 2. Discord DM
