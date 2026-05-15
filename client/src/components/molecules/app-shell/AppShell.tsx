@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import NavTabs from '@/components/atoms/nav-tabs';
+import ToastOverlay from '@/components/organisms/toast-overlay';
 import { APP_COPY } from '@/const-values/app-copy';
 import type { AppRouteId } from '@/const-values/app-routes';
 
@@ -25,6 +26,7 @@ export default function AppShell({ activeId, onSelect, children }: AppShellProps
 			</div>
 			<NavTabs activeId={activeId} onSelect={onSelect} />
 			<main className="flex-1 overflow-auto">{children}</main>
+			<ToastOverlay />
 		</div>
 	);
 }

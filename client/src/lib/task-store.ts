@@ -70,6 +70,7 @@ class TaskStore {
 			userCollapsed: false,
 			showDone: loadShowDone(),
 			system: INITIAL_SYSTEM,
+			questions: [],
 		};
 	}
 
@@ -118,6 +119,16 @@ class TaskStore {
 			userCollapsed,
 			showDone: this.snapshot.showDone,
 			system: { claudeOk: api.claude !== false, watcherOk: api.watcher !== false },
+			questions: api.questions ?? [],
+		});
+	}
+
+	/** Optimistic local removal after a successful POST /answer. The next
+	 *  poll reconciles the truth. */
+	removeQuestion(id: string): void {
+		this.commit({
+			...this.snapshot,
+			questions: this.snapshot.questions.filter((q) => q.id !== id),
 		});
 	}
 

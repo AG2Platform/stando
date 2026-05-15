@@ -1,15 +1,18 @@
 import PageHeader from '@/components/atoms/page-header';
 import VoiceSessionCard from '@/components/molecules/voice-session-card';
+import QuestionsPanel from '@/components/organisms/questions-panel';
 import TaskList from '@/components/organisms/task-list';
 import Transcript from '@/components/organisms/transcript';
 import { APP_COPY } from '@/const-values/app-copy';
 import { APP_ROUTES } from '@/const-values/app-routes';
 import { useAgentStatus } from '@/hooks/useAgentStatus';
+import { useTaskToastDriver } from '@/hooks/useTaskToastDriver';
 import { useVoiceSession } from '@/hooks/useVoiceSession';
 
 export default function ConversationPage() {
 	const { state, connect, disconnect, toggleMute } = useVoiceSession();
 	const { status: serverStatus, error: serverError } = useAgentStatus();
+	useTaskToastDriver();
 
 	return (
 		<section className="flex h-full flex-col">
@@ -35,6 +38,8 @@ export default function ConversationPage() {
 					</header>
 					<Transcript />
 				</section>
+
+				<QuestionsPanel />
 
 				<TaskList />
 

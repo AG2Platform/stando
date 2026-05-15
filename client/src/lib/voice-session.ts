@@ -36,6 +36,13 @@ export interface VoiceSessionState {
 	bytesRecv: number;
 }
 
+export interface GuiMediaPayload {
+	type: 'image' | 'video';
+	base64: string;
+	mimeType?: string;
+	description?: string;
+}
+
 export interface VoiceSessionEvents {
 	onStateChange: (next: VoiceSessionState) => void;
 	onLog: (message: string, level: 'info' | 'warn' | 'error') => void;
@@ -49,11 +56,32 @@ export interface VoiceSessionEvents {
 	onTurnInterrupted?: () => void;
 	/** Local system notice (e.g. "Microphone active — speak now."). */
 	onSystemMessage?: (text: string) => void;
+	/** gui.update image/video payload (also handles legacy top-level
+	 *  `image`/`video` WS frames). */
+	onGuiMedia?: (media: GuiMediaPayload) => void;
 }
 
 const DEFAULT_INPUT_RATE = 16_000;
 const DEFAULT_OUTPUT_RATE = 24_000;
 const CAPTURE_BUF = 2048;
+
+interface GuiUpdateData {
+	type?: 'image' | 'video' | 'subprocess_log';
+	base64?: string;
+	mimeType?: string;
+	description?: string;
+	line?: string;
+}
+
+interface WsTextFrame {
+	type?: string;
+	role?: 'user' | 'assistant';
+	text?: string;
+	partial?: boolean;
+	audioFormat?: { inputSampleRate?: number; outputSampleRate?: number };
+	payload?: { data?: GuiUpdateData; message?: string };
+	data?: { base64?: string; mimeType?: string; description?: string };
+}
 
 export class VoiceSession {
 	private state: VoiceSessionState = {
@@ -182,13 +210,7 @@ export class VoiceSession {
 			return;
 		}
 		try {
-			const msg = JSON.parse(event.data) as {
-				type?: string;
-				role?: 'user' | 'assistant';
-				text?: string;
-				partial?: boolean;
-				audioFormat?: { inputSampleRate?: number; outputSampleRate?: number };
-			};
+			const msg = JSON.parse(event.data) as WsTextFrame;
 			if (msg.type === 'session.config' && msg.audioFormat) {
 				this.inputRate = msg.audioFormat.inputSampleRate ?? this.inputRate;
 				this.outputRate = msg.audioFormat.outputSampleRate ?? this.outputRate;
@@ -201,9 +223,43 @@ export class VoiceSession {
 			} else if (msg.type === 'turn.interrupted') {
 				this.stopActiveSources();
 				this.events.onTurnInterrupted?.();
+			} else if (msg.type === 'gui.update') {
+				this.handleGuiUpdate(msg.payload?.data);
+			} else if (msg.type === 'gui.notification' && msg.payload?.message) {
+				this.events.onSystemMessage?.(`[notification] ${msg.payload.message}`);
+			} else if (msg.type === 'image' && msg.data?.base64) {
+				this.events.onGuiMedia?.({
+					type: 'image',
+					base64: msg.data.base64,
+					mimeType: msg.data.mimeType,
+					description: msg.data.description,
+				});
+			} else if (msg.type === 'video' && msg.data?.base64) {
+				this.events.onGuiMedia?.({
+					type: 'video',
+					base64: msg.data.base64,
+					mimeType: msg.data.mimeType,
+					description: msg.data.description,
+				});
 			}
 		} catch {
 			/* non-JSON text frame */
+		}
+	}
+
+	private handleGuiUpdate(data: GuiUpdateData | undefined): void {
+		if (!data) return;
+		if (data.type === 'subprocess_log' && data.line) {
+			this.events.onLog(`subprocess ${data.line}`, 'info');
+			return;
+		}
+		if ((data.type === 'image' || data.type === 'video') && data.base64) {
+			this.events.onGuiMedia?.({
+				type: data.type,
+				base64: data.base64,
+				mimeType: data.mimeType,
+				description: data.description,
+			});
 		}
 	}
 

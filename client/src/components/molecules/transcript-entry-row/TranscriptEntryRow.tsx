@@ -1,4 +1,5 @@
 import CopyButton from '@/components/atoms/copy-button';
+import TranscriptMediaView from '@/components/atoms/transcript-media';
 import type { TranscriptEntry } from '@/types/conversation';
 
 export interface TranscriptEntryRowProps {
@@ -36,7 +37,8 @@ export default function TranscriptEntryRow({ entry }: TranscriptEntryRowProps) {
 				</span>
 				{!interim && entry.role !== 'system' ? <CopyButton value={entry.text} /> : null}
 			</header>
-			<p className="mt-1 whitespace-pre-wrap break-words leading-relaxed">{entry.text}</p>
+			{entry.text ? <p className="mt-1 whitespace-pre-wrap break-words leading-relaxed">{entry.text}</p> : null}
+			{entry.media ? <TranscriptMediaView media={entry.media} /> : null}
 		</article>
 	);
 }

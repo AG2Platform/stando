@@ -48,6 +48,12 @@ export const APP_COPY = {
 	taskReplySending: 'Sending…',
 	taskReplySent: 'Replied:',
 	taskReplyFailed: 'Reply failed —',
+	questionsTitle: 'Pending questions',
+	questionPlaceholder: 'Or type a response…',
+	questionSend: 'Send',
+	questionSending: 'Sending…',
+	questionAnswered: 'Answered:',
+	questionFailed: 'Answer failed —',
 } as const;
 
 export type VoiceStatusKey =

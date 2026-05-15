@@ -20,7 +20,7 @@
  * every change so React's referential-equality short-circuit fires.
  */
 
-import type { ConversationSnapshot, TranscriptEntry } from '@/types/conversation';
+import type { ConversationSnapshot, TranscriptEntry, TranscriptMedia } from '@/types/conversation';
 
 const EMPTY_SNAPSHOT: ConversationSnapshot = { entries: [] };
 
@@ -71,6 +71,18 @@ class ConversationStore {
 			text,
 			interim: false,
 			ts: Date.now(),
+		};
+		this.commit({ entries: [...this.snapshot.entries, entry] });
+	}
+
+	appendMedia(media: TranscriptMedia): void {
+		const entry: TranscriptEntry = {
+			id: this.nextId(),
+			role: 'system',
+			text: media.description ?? '',
+			interim: false,
+			ts: Date.now(),
+			media,
 		};
 		this.commit({ entries: [...this.snapshot.entries, entry] });
 	}

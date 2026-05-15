@@ -24,11 +24,19 @@ export interface ApiTask {
 	result?: string;
 }
 
+export interface PendingQuestion {
+	id: string;
+	text: string;
+	detail?: string;
+	/** Custom answer chips. When omitted the panel falls back to Yes/No. */
+	options?: readonly string[];
+}
+
 export interface ApiTasksResponse {
 	tasks: readonly ApiTask[];
 	claude?: boolean;
 	watcher?: boolean;
-	questions?: readonly unknown[];
+	questions?: readonly PendingQuestion[];
 }
 
 export interface SystemHealth {
@@ -42,4 +50,5 @@ export interface TaskListSnapshot {
 	userCollapsed: boolean;
 	showDone: boolean;
 	system: SystemHealth;
+	questions: readonly PendingQuestion[];
 }

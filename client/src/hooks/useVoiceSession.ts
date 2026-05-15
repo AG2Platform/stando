@@ -62,6 +62,7 @@ export function useVoiceSession(): UseVoiceSessionResult {
 			onTurnEnd: () => conversationStore.endTurn(),
 			onTurnInterrupted: () => conversationStore.interruptTurn(),
 			onSystemMessage: (text) => conversationStore.appendSystem(text),
+			onGuiMedia: (media) => conversationStore.appendMedia(media),
 		});
 		sessionRef.current = session;
 		return () => {

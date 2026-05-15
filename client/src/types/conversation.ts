@@ -7,6 +7,17 @@
 
 export type TranscriptRole = 'user' | 'assistant' | 'system';
 
+export type MediaType = 'image' | 'video';
+
+export interface TranscriptMedia {
+	type: MediaType;
+	/** e.g. image/png, video/mp4 — defaults applied at render time. */
+	mimeType?: string;
+	/** Raw base64 (no data: prefix). The renderer builds the data URL. */
+	base64: string;
+	description?: string;
+}
+
 export interface TranscriptEntry {
 	id: string;
 	role: TranscriptRole;
@@ -16,6 +27,9 @@ export interface TranscriptEntry {
 	interim: boolean;
 	/** ms since epoch — used for stable React keys + ordering tests. */
 	ts: number;
+	/** Optional inline media for system entries created from gui.update or
+	 *  top-level `image` / `video` WS frames. */
+	media?: TranscriptMedia;
 }
 
 export interface ConversationSnapshot {
