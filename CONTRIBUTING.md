@@ -42,7 +42,7 @@ See existing skills for examples. Install with `bash skills/install.sh`.
 - **Python**: standard library preferred, no frameworks. Python 3.9+ compatible (avoid `str | None` union syntax — use `Optional[str]`).
 - **TypeScript**: ESM modules, strict mode. Run `npx tsc --noEmit` before submitting.
 - **Shell**: bash, `set -e`, use `$REPO` for paths
-- **Web client**: `GET /` serves the Vite + React bundle from `client/` (see `client/README.md`). The original inline HTML (`src/web-client-html.ts`) survives at `GET /legacy` as a one-release escape hatch and as the fallback when `client/dist/` hasn't been built — both go away in PR-C step 6. New conversation features land under `client/src/` per the frontend-conventions skill; HTTP endpoints (`/sse`, `/sse-status`, `/voice-mode`, `/mute-state`, …) live in `web-server.ts` (hosted in the `voice-agent.ts` process).
+- **Web client**: `GET /` serves the Vite + React bundle from `client/` (see `client/README.md`). Run `pnpm install && pnpm build:client` from the repo root before starting the server; the conversation page returns a 503 with a build hint when `client/dist/` is missing. New conversation features land under `client/src/` per the frontend-conventions skill; HTTP endpoints (`/sse`, `/sse-status`, `/voice-mode`, `/mute-state`, …) live in `web-server.ts` (hosted in the `voice-agent.ts` process).
 - All scripts should work from a fresh clone with minimal setup
 
 ## Pull requests

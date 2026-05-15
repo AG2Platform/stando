@@ -93,7 +93,7 @@ fi
 echo ""
 echo "Key files:"
 
-for f in src/voice-agent.ts src/task-bridge.ts src/web-server.ts src/web-client-html.ts src/health-check.py src/agent-api.py src/dashboard.py CLAUDE.md; do
+for f in src/voice-agent.ts src/task-bridge.ts src/web-server.ts src/health-check.py src/agent-api.py src/dashboard.py CLAUDE.md; do
   if [ -f "$f" ]; then
     pass "$f"
   else

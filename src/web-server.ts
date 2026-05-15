@@ -4,13 +4,10 @@
  * Endpoints:
  *   GET  /, /v2[/*]         — Vite-built React bundle (client/dist). The two
  *                             roots serve the same SPA so existing bookmarks
- *                             pointing at /v2 keep working. Falls back to the
- *                             legacy HTML when the bundle hasn't been built
- *                             (fresh checkout safety net).
- *   GET  /legacy[/*]        — Legacy inline HTML (renderWebClientHtml). One-
- *                             release escape hatch in case a /v2 regression
- *                             takes out the React build; will be retired in
- *                             PR-C step 6 along with web-client-html.ts.
+ *                             pointing at /v2 keep working. A fresh checkout
+ *                             without `pnpm build:client` returns 503 with a
+ *                             pointer to the build command (no longer falls
+ *                             back to inline HTML — PR-C step 6 deleted it).
  *   GET  /sse               — Server-Sent Events: `agent-state`, `toggle-voice`,
  *                             `toggle-mute` — consumed by the page.
  *   GET  /sse-status        — JSON snapshot { muted, voiceConnected, state, label, clients }.
@@ -35,13 +32,11 @@ import { extname, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTmuxStatus } from './tmux-status.js';
 import { statePath } from './util_paths.js';
-import { renderWebClientHtml } from './web-client-html.js';
 
 // Dist directory for the React bundle (`client/`). Resolved once at module
 // load — web-server.ts lives in `src/`, so `../client/dist` lands at the
-// workspace root. After PR-C step 5 the bundle serves both `/` and `/v2`;
-// the legacy HTML survives at `/legacy` for one release and is the fresh-
-// checkout fallback when client/dist isn't built yet.
+// workspace root. PR-C step 6 retired the inline HTML fallback; `pnpm
+// build:client` must run for `/` to render anything.
 const CLIENT_DIST_DIR = fileURLToPath(new URL('../client/dist/', import.meta.url));
 
 const STATIC_MIME_TYPES: Record<string, string> = {
@@ -143,8 +138,6 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 	const HTTP_PORT = opts.port;
 	const HTTP_HOST = opts.host;
 	const WS_PORT = opts.wsPort;
-	const DEFAULT_WS_URL = `ws://localhost:${WS_PORT}`;
-	const HTML = renderWebClientHtml({ wsPort: WS_PORT, defaultWsUrl: DEFAULT_WS_URL });
 
 	// SSE clients for remote toggle
 	const sseClients: import('node:http').ServerResponse[] = [];
@@ -481,21 +474,6 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 			return;
 		}
 
-		// /legacy[/*] — escape hatch serving the original inline HTML
-		// (renderWebClientHtml). Survives PR-C step 5 for one release in case
-		// a regression takes out the React build; retired in step 6 when
-		// web-client-html.ts is deleted.
-		if (url.pathname === '/legacy' || url.pathname.startsWith('/legacy/')) {
-			res.writeHead(200, {
-				'Content-Type': 'text/html; charset=utf-8',
-				'Cache-Control': 'no-cache, no-store, must-revalidate',
-				'Pragma': 'no-cache',
-				'Expires': '0',
-			});
-			res.end(HTML);
-			return;
-		}
-
 		// Static asset + SPA fallback. Vite's index.html references hashed
 		// assets via relative paths (./assets/index-XXXX.js). When the
 		// browser resolves those against /, the request comes in as
@@ -509,8 +487,8 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 		//      index.html for a missing .js file produces "Unexpected
 		//      token '<'" in the console and a blank page — the exact
 		//      symptom we hit after PR-C step 5.
-		//   4. Fall back to the legacy HTML only when client/dist/index.html
-		//      itself is missing (fresh checkout without `pnpm build:client`).
+		//   4. Return a 503 with build hint when client/dist/index.html
+		//      itself is missing (fresh checkout, no `pnpm build:client`).
 		const isV2Path = url.pathname === '/v2' || url.pathname.startsWith('/v2/');
 		let rel: string;
 		if (isV2Path) {
@@ -523,11 +501,6 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 
 		if (serveDistFile(rel, res, { spaFallback: false })) return;
 
-		// Path missed. Asset-shaped requests (have an extension) → 404 so
-		// the browser surfaces a real network error instead of trying to
-		// parse HTML as JS. Route-shaped requests (extension-less) → fall
-		// back to index.html for SPA routing, or legacy HTML if the React
-		// bundle isn't built.
 		const looksLikeAsset = !!extname(rel) && rel !== 'index.html';
 		if (looksLikeAsset) {
 			res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -536,13 +509,16 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 		}
 
 		if (serveDistFile('index.html', res, { spaFallback: false })) return;
-		res.writeHead(200, {
+		res.writeHead(503, {
 			'Content-Type': 'text/html; charset=utf-8',
-			'Cache-Control': 'no-cache, no-store, must-revalidate',
-			'Pragma': 'no-cache',
-			'Expires': '0',
+			'Cache-Control': 'no-cache',
 		});
-		res.end(HTML);
+		res.end(
+			`<!doctype html><meta charset="utf-8"><title>Sutando — build required</title>` +
+				`<style>body{font-family:-apple-system,sans-serif;max-width:560px;margin:80px auto;padding:0 20px;color:#222}</style>` +
+				`<h1>Sutando client not built</h1>` +
+				`<p>Run <code>pnpm install && pnpm build:client</code> from the repo root, then refresh this page.</p>`
+		);
 	});
 
 	server.listen(HTTP_PORT, HTTP_HOST, () => {

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useConversation } from '@/hooks/useConversation';
 import type { TranscriptEntry } from '@/types/conversation';
 
@@ -20,6 +20,36 @@ function entryClass(entry: TranscriptEntry): string {
 	if (entry.interim && entry.role === 'user') return 't-entry t-interim';
 	if (entry.role === 'user') return 't-entry t-user';
 	return 't-entry t-assistant';
+}
+
+/**
+ * Hover copy pill — appears in the top-right of any finalized t-user or
+ * t-assistant entry (visibility driven by the legacy.css :hover rule).
+ * Skips system entries and in-flight interim entries to match the legacy
+ * `addCopyBtn` call sites in handleTranscript.
+ */
+function CopyButton({ text }: { text: string }) {
+	const [copied, setCopied] = useState(false);
+	const timerRef = useRef<number | null>(null);
+	useEffect(
+		() => () => {
+			if (timerRef.current != null) window.clearTimeout(timerRef.current);
+		},
+		[]
+	);
+	const onClick = (ev: React.MouseEvent) => {
+		ev.stopPropagation();
+		void navigator.clipboard.writeText(text).then(() => {
+			setCopied(true);
+			if (timerRef.current != null) window.clearTimeout(timerRef.current);
+			timerRef.current = window.setTimeout(() => setCopied(false), 1500);
+		});
+	};
+	return (
+		<span className="copy-btn" onClick={onClick} role="button">
+			{copied ? 'Copied' : 'Copy'}
+		</span>
+	);
 }
 
 function renderMedia(entry: TranscriptEntry) {
@@ -70,12 +100,16 @@ export default function LegacyTranscript() {
 			{entries.length === 0 ? (
 				<div className="t-entry t-system">Ask Sutando anything.</div>
 			) : (
-				entries.map((entry) => (
-					<div key={entry.id} className={entryClass(entry)}>
-						{entry.text}
-						{renderMedia(entry)}
-					</div>
-				))
+				entries.map((entry) => {
+					const showCopy = !entry.interim && entry.role !== 'system' && entry.text.length > 0;
+					return (
+						<div key={entry.id} className={entryClass(entry)}>
+							{entry.text}
+							{renderMedia(entry)}
+							{showCopy ? <CopyButton text={entry.text} /> : null}
+						</div>
+					);
+				})
 			)}
 		</div>
 	);

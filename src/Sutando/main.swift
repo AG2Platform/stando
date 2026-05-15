@@ -422,10 +422,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(editMenuItem)
 
         // View menu — Cmd+R force-reloads the active pane in the unified
-        // window. Needed after we push new web-client-html.ts / dashboard.py
-        // styles (or any code that changes the served HTML); WKWebView
-        // otherwise sticks to the previously-cached page even after the
-        // backing service has restarted.
+        // window. Needed after we push new client/ React assets or
+        // dashboard.py styles (or any code that changes the served HTML);
+        // WKWebView otherwise sticks to the previously-cached page even
+        // after the backing service has restarted.
         let viewMenuItem = NSMenuItem()
         let viewMenu = NSMenu(title: "View")
         let reloadItem = NSMenuItem(title: "Reload Active Pane", action: #selector(reloadActivePane), keyEquivalent: "r")

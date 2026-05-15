@@ -95,3 +95,17 @@ export async function fetchTaskResult(
 	if (!response.ok) throw new Error(`fetchTaskResult ${response.status}`);
 	return (await response.json()) as TaskResultPoll;
 }
+
+export type ActivityItem =
+	| { type: 'commit'; hash: string; message: string }
+	| { type: 'task'; id: string; preview: string };
+
+export async function fetchActivity(
+	agentApiOrigin: string,
+	signal?: AbortSignal
+): Promise<ActivityItem[]> {
+	const response = await fetch(`${stripTrailingSlash(agentApiOrigin)}/activity`, { signal });
+	if (!response.ok) throw new Error(`fetchActivity ${response.status}`);
+	const data = (await response.json()) as { activity?: ActivityItem[] };
+	return data.activity ?? [];
+}

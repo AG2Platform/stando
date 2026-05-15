@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import StarterChips from '@/components/molecules/starter-chips';
+import ActivityPanel from '@/components/organisms/activity-panel';
+import NotesPanel from '@/components/organisms/notes-panel';
 import QuestionsPanel from '@/components/organisms/questions-panel';
 import TaskList from '@/components/organisms/task-list';
 import { useTasks } from '@/hooks/useTasks';
@@ -10,11 +12,7 @@ import { useTasks } from '@/hooks/useTasks';
  *
  * Tabs: Starter / Tasks / Notes / Questions / Activity. Counts appear in
  * the tab label when non-zero. Mirrors renderDRTabs() + renderTabContent()
- * in src/web-client-html.ts.
- *
- * Notes + Activity panels are placeholders for now — they need backends
- * (notes/ folder, activity log) that haven't been ported yet. Starter,
- * Tasks, and Questions are wired to the existing React stores.
+ * in src/web-client-html.ts. All five tabs are wired to live data.
  */
 
 type DynamicRegionTab = 'starter' | 'tasks' | 'notes' | 'questions' | 'activity';
@@ -63,16 +61,10 @@ export default function DynamicRegion({ connected, onPickChip }: DynamicRegionPr
 			<div className="dr-content">
 				{active === 'starter' ? <StarterChips connected={connected} onPickChip={onPickChip} /> : null}
 				{active === 'tasks' ? <TaskList /> : null}
-				{active === 'notes' ? <PlaceholderPanel label="Notes panel coming soon." /> : null}
+				{active === 'notes' ? <NotesPanel /> : null}
 				{active === 'questions' ? <QuestionsPanel /> : null}
-				{active === 'activity' ? <PlaceholderPanel label="Activity feed coming soon." /> : null}
+				{active === 'activity' ? <ActivityPanel /> : null}
 			</div>
 		</div>
-	);
-}
-
-function PlaceholderPanel({ label }: { label: string }) {
-	return (
-		<div style={{ color: '#666', fontSize: 13, textAlign: 'center', padding: 12 }}>{label}</div>
 	);
 }
