@@ -64,6 +64,7 @@ SWIFT_SOURCES=(
     "$REPO/src/Sutando/Permissions.swift"
     "$REPO/src/Sutando/ScreenCaptureSupervisor.swift"
     "$REPO/src/Sutando/SettingsWindow.swift"
+    "$REPO/src/Sutando/SkillsViewController.swift"
     "$REPO/src/Sutando/UnifiedMainWindow.swift"
     "$REPO/src/Sutando/Uninstaller.swift"
     "$REPO/src/Sutando/WebWindow.swift"
