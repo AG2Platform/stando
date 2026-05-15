@@ -28,7 +28,7 @@
     <true/>
 
     <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
+    <string>13.0</string>
 
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>

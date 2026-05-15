@@ -54,6 +54,22 @@ struct LaunchAgentPaths {
 
 class LaunchAgentInstaller {
 
+    /// Service labels this app version no longer ships. On every
+    /// `install()` we bootout + delete any stale plist matching one of
+    /// these labels in `runDir` so old broken services don't keep
+    /// respawning after an upgrade. Add a label here when removing a
+    /// .plist.template from `app/LaunchAgents/`.
+    ///
+    /// `com.sutando.screen-capture`: replaced by the in-process
+    /// `ScreenCaptureServer` in Sutando.app — the launchd-spawned Python
+    /// helper resolved through `xcode-select` to Xcode's bundled
+    /// Python.app, which TCC silently denies Screen Recording for.
+    /// Serving /capture from the .app means the `screencapture` child
+    /// inherits Sutando.app's stable code-signed identity.
+    static let deprecatedLabels: Set<String> = [
+        "com.sutando.screen-capture",
+    ]
+
     /// Default paths derived from the running .app bundle and HOME.
     /// `repoDir`: `Bundle.main.resourcePath/repo` if bundled, else the dev
     /// repo (resolved by main.swift's `workspace`).
@@ -178,6 +194,13 @@ class LaunchAgentInstaller {
         try FileManager.default.createDirectory(atPath: runDir, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(atPath: paths.sutandoHome + "/logs", withIntermediateDirectories: true)
 
+        // Bootout + delete any deprecated services left behind by older
+        // app versions. Without this, KeepAlive=true plists like the
+        // legacy screen-capture launchd job keep respawning even after
+        // the template is removed, blocking the in-process replacement
+        // from binding its port.
+        purgeDeprecatedServices()
+
         // Install Sutando skills into ~/.claude/skills/. Skills are required
         // for the core-agent service: claude looks them up by name when it
         // sees `/proactive-loop` (or any other skill slash command), and
@@ -219,31 +242,8 @@ class LaunchAgentInstaller {
         let phs = placeholders(paths)
         let files = try FileManager.default.contentsOfDirectory(atPath: templatesDir)
         var summary = LaunchAgentInstallSummary()
-        // Labels we explicitly skip even if their template is present in
-        // the bundle. Used by services that have moved off launchd
-        // because TCC's responsible-process attribution made the
-        // launchd path unworkable. See ScreenCaptureSupervisor.swift.
-        let skipLabels: Set<String> = ["com.sutando.screen-capture"]
         for file in files where file.hasSuffix(".plist.template") {
             let label = String(file.dropLast(".plist.template".count))
-            if skipLabels.contains(label) {
-                // Best-effort: bootout any leftover launchd job from a
-                // previous install of this label so we don't fight over
-                // its port. Same logic the supervisor runs at startup;
-                // duplicating here covers the user who upgrades but
-                // doesn't quit-and-relaunch immediately.
-                let uid = getuid()
-                let proc = Process()
-                proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-                proc.arguments = ["bootout", "gui/\(uid)/\(label)"]
-                proc.standardOutput = FileHandle.nullDevice
-                proc.standardError = FileHandle.nullDevice
-                _ = try? proc.run()
-                proc.waitUntilExit()
-                let stalePlist = paths.sutandoHome + "/LaunchAgents/\(label).plist"
-                try? FileManager.default.removeItem(atPath: stalePlist)
-                continue
-            }
             let templatePath = templatesDir + "/" + file
             guard let template = try? String(contentsOfFile: templatePath, encoding: .utf8) else {
                 summary.failed.append((label, "could not read template at \(templatePath)"))
@@ -509,6 +509,31 @@ class LaunchAgentInstaller {
             processed.append(label)
         }
         return processed
+    }
+
+    /// Bootout + delete any plist whose label is in `deprecatedLabels`
+    /// across both the new `runDir` and the legacy
+    /// `~/Library/LaunchAgents/`. Silent on errors — bootout fails
+    /// routinely (service not loaded) and that's the desired no-op.
+    private func purgeDeprecatedServices() {
+        let uid = String(getuid())
+        for dir in [runDir, legacyLaunchAgentsDir] {
+            for label in Self.deprecatedLabels {
+                let plistPath = dir + "/" + label + ".plist"
+                let exists = FileManager.default.fileExists(atPath: plistPath)
+                let out = Process()
+                out.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+                out.arguments = ["bootout", "gui/\(uid)/\(label)"]
+                out.standardOutput = FileHandle.nullDevice
+                out.standardError = FileHandle.nullDevice
+                try? out.run()
+                out.waitUntilExit()
+                if exists {
+                    waitUntilLabelStopped(label: label, timeoutSeconds: 5)
+                    try? FileManager.default.removeItem(atPath: plistPath)
+                }
+            }
+        }
     }
 
     private func killCoreAgentTmux() {

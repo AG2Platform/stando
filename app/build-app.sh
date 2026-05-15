@@ -55,20 +55,19 @@ echo "  Compiling launcher..."
 SWIFT_SOURCES=(
     "$REPO/src/Sutando/main.swift"
     "$REPO/src/Sutando/LaunchAgentInstaller.swift"
+    "$REPO/src/Sutando/ScreenCaptureServer.swift"
     "$REPO/src/Sutando/SparkleUpdater.swift"
     "$REPO/src/Sutando/CloudAuth.swift"
     "$REPO/src/Sutando/CloudClient.swift"
     "$REPO/src/Sutando/EnvFile.swift"
     "$REPO/src/Sutando/FeedbackWindow.swift"
-    "$REPO/src/Sutando/OnboardingWindow.swift"
     "$REPO/src/Sutando/Permissions.swift"
-    "$REPO/src/Sutando/ScreenCaptureSupervisor.swift"
     "$REPO/src/Sutando/SettingsWindow.swift"
     "$REPO/src/Sutando/UnifiedMainWindow.swift"
     "$REPO/src/Sutando/Uninstaller.swift"
     "$REPO/src/Sutando/WebWindow.swift"
 )
-SWIFT_FRAMEWORKS=(-framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation -framework WebKit)
+SWIFT_FRAMEWORKS=(-framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation -framework WebKit -framework Network -framework UserNotifications)
 SWIFT_FLAGS=(-O -o "$APP/Contents/MacOS/Sutando")
 
 # Optional Sparkle linking. When ENABLE_SPARKLE=1 the launcher links

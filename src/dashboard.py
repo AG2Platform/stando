@@ -156,9 +156,11 @@ def get_system_stats() -> dict:
     }
 
 
+VOICE_UI_URL = os.environ.get("VOICE_UI_URL", "http://localhost:8080")
+
 HTML = """<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Sutando Dashboard</title>
+<title>Sutando</title>
 <style>
 /* Cloud-matching palette — see web-client.ts header for the full spec.
    Light-first, dark via prefers-color-scheme. Variables let us swap
@@ -176,7 +178,21 @@ HTML = """<!DOCTYPE html>
   }
 }
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:20px}
+html,body{height:100%}
+body{font-family:-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;padding:20px;display:flex;flex-direction:column}
+.app-header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid #1a1a2a;flex-shrink:0}
+.app-header img{width:40px;height:40px;border-radius:50%;border:2px solid #4ecca3;display:none;object-fit:cover}
+.app-header h1{font-size:14px;color:#fff;margin:0}
+.app-header .sub{font-size:10px;color:#555;margin:0}
+.tabs{margin-left:auto;display:flex;gap:4px;background:#12121e;border:1px solid #1e1e30;border-radius:8px;padding:4px}
+.tab{background:transparent;border:0;color:#888;padding:6px 18px;font-size:13px;font-weight:500;cursor:pointer;border-radius:6px;transition:background 0.12s,color 0.12s}
+.tab:hover{color:#bbb}
+.tab.active{background:#1e1e30;color:#fff}
+.tab-content{flex:1;display:none;min-height:0;overflow:auto}
+.tab-content.active{display:flex;flex-direction:column}
+#tab-voice.active{display:block}
+.voice-frame{display:block;width:100%;height:100%;border:0;background:#0a0a12}
+.dash-body{padding:20px;flex:1}
 .grid{max-width:900px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:600px){.grid{grid-template-columns:1fr}}
 .card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px}
@@ -198,25 +214,83 @@ h2{font-size:12px;color:#555;text-transform:uppercase;letter-spacing:0.5px;margi
 .pending-badge{display:inline-block;background:#2a2a1a;color:#aa8;padding:2px 8px;border-radius:10px;font-size:11px}
 .pending-badge.done{background:#1a2a1a;color:#5a9a6a}
 .refresh{font-size:10px;color:#333;text-align:center;margin-top:12px}
-.intro{max-width:900px;margin:12px auto 0;color:#7b7b90;font-size:12px;line-height:1.45}
+.intro{max-width:900px;margin:0 auto 12px;color:#7b7b90;font-size:12px;line-height:1.45}
 </style></head><body>
-<div style="max-width:900px;margin:0 auto">
-<div style="display:flex;align-items:center;gap:14px">
-<img id="stand-avatar" src="/avatar" style="width:56px;height:56px;border-radius:50%;border:2px solid #4ecca3;display:none;object-fit:cover">
+<header class="app-header">
+<img id="stand-avatar" src="/avatar" alt="">
 <div><h1 id="stand-name">Sutando</h1>
-<p class="sub" id="stand-sub">Operational view of use cases, health, activity, and quota</p></div></div>
-<script>
-fetch('/stand-identity').then(r=>r.json()).then(s=>{
-  if(s.name){document.getElementById('stand-name').textContent='Sutando — '+s.name;
-  document.getElementById('stand-sub').textContent='Stand awakened '+s.awakened+' · live status for '+(s.capabilities?.primary?.split('—')[0]?.trim()||'active systems')}
-  if(s.avatarGenerated){var img=document.getElementById('stand-avatar');img.style.display='block'}
-}).catch(()=>{});
-</script>
+<p class="sub" id="stand-sub">Voice + dashboard</p></div>
+<div class="tabs" role="tablist">
+<button class="tab active" data-tab="voice" role="tab">Voice</button>
+<button class="tab" data-tab="dashboard" role="tab">Dashboard</button>
 </div>
+</header>
+
+<section class="tab-content active" id="tab-voice" role="tabpanel">
+<iframe class="voice-frame" src="__VOICE_URL__" allow="microphone; camera; autoplay; clipboard-read; clipboard-write" referrerpolicy="no-referrer"></iframe>
+</section>
+
+<section class="tab-content" id="tab-dashboard" role="tabpanel">
+<div class="dash-body">
 <p class="intro">Tracks current system status alongside the latest capability matrix, recent activity, local endpoints, and quota pressure.</p>
 <div class="grid" id="content">__CONTENT__</div>
 <p class="refresh">Auto-refreshes every 15s</p>
-<script>setInterval(()=>location.reload(),15000)</script>
+</div>
+</section>
+
+<script>
+(function(){
+  // Header identity (same data the legacy dashboard fetched).
+  fetch('/stand-identity').then(r=>r.json()).then(function(s){
+    if(s && s.name){
+      document.getElementById('stand-name').textContent = 'Sutando — ' + s.name;
+      var sub = 'Stand awakened ' + (s.awakened || '');
+      if (s.capabilities && s.capabilities.primary) {
+        sub += ' · ' + s.capabilities.primary.split('—')[0].trim();
+      }
+      document.getElementById('stand-sub').textContent = sub;
+    }
+    if (s && s.avatarGenerated) {
+      document.getElementById('stand-avatar').style.display = 'block';
+    }
+  }).catch(function(){});
+
+  // Tab switching. Persist the active tab in localStorage + URL hash so
+  // reloads and deep links land where the user expects.
+  function activate(name){
+    var valid = name === 'voice' || name === 'dashboard';
+    if (!valid) name = 'voice';
+    document.querySelectorAll('.tab').forEach(function(b){
+      b.classList.toggle('active', b.dataset.tab === name);
+    });
+    document.querySelectorAll('.tab-content').forEach(function(c){
+      c.classList.toggle('active', c.id === 'tab-' + name);
+    });
+    try { localStorage.setItem('sutando.activeTab', name); } catch(e){}
+    if (location.hash !== '#' + name) {
+      history.replaceState(null, '', '#' + name);
+    }
+  }
+  document.querySelectorAll('.tab').forEach(function(b){
+    b.addEventListener('click', function(){ activate(b.dataset.tab); });
+  });
+  var initial = (location.hash || '').slice(1)
+              || (function(){ try { return localStorage.getItem('sutando.activeTab'); } catch(e){ return null; } })()
+              || 'voice';
+  activate(initial);
+
+  // Refresh just the dashboard cards every 15s — never the voice iframe,
+  // which would kill the WebSocket connection.
+  setInterval(function(){
+    var dash = document.getElementById('tab-dashboard');
+    if (!dash.classList.contains('active')) return;
+    fetch('/dashboard-cards', { cache: 'no-store' }).then(function(r){ return r.text(); }).then(function(html){
+      var content = document.getElementById('content');
+      if (content) content.innerHTML = html;
+    }).catch(function(){});
+  }, 15000);
+})();
+</script>
 </body></html>"""
 
 
@@ -262,7 +336,12 @@ def get_use_case_matrix() -> str:
     return '<table style="width:100%;font-size:11px;border-collapse:collapse"><tr style="color:#555;text-align:left"><th></th><th>Use Case</th><th>Details</th></tr>' + ''.join(rows) + '</table>'
 
 
-def render_dashboard() -> str:
+def render_dashboard_cards() -> str:
+    """Return just the inner HTML for the `<div class="grid">` card area.
+    The full page calls this and substitutes it into the outer shell; the
+    `/dashboard-cards` endpoint returns this directly so the active page
+    can refresh the cards without reloading (and killing) the voice iframe.
+    """
     health = get_health()
     activity = get_activity(5)
     pending = get_pending_count()
@@ -339,9 +418,8 @@ def render_dashboard() -> str:
     cards.append(f"""<div class="card full">
 <h2>Quick Links</h2>
 <div style="display:flex;gap:12px;flex-wrap:wrap;font-size:12px">
-<a href="http://localhost:8080" style="color:#4a8aaa;text-decoration:none">Voice UI :8080</a>
+<a href="#voice" style="color:#4a8aaa;text-decoration:none">Voice (tab)</a>
 <a href="http://localhost:7843" style="color:#4a8aaa;text-decoration:none">Task API :7843</a>
-<a href="http://localhost:7844" style="color:#4a8aaa;text-decoration:none">Dashboard :7844</a>
 <a href="http://localhost:7845" style="color:#4a8aaa;text-decoration:none">Screen Capture :7845</a>
 <a href="/notes-ui" style="color:#4a8aaa;text-decoration:none">Notes Browser</a>
 <a href="https://github.com/sonichi/sutando" style="color:#4a8aaa;text-decoration:none">GitHub</a>
@@ -349,7 +427,16 @@ def render_dashboard() -> str:
 <a href="https://discord.gg/uZHWXXmrCS" style="color:#4a8aaa;text-decoration:none">Discord</a>
 </div></div>""")
 
-    return HTML.replace("__CONTENT__", "\n".join(cards))
+    return "\n".join(cards)
+
+
+def render_dashboard() -> str:
+    cards_html = render_dashboard_cards()
+    return (
+        HTML
+        .replace("__CONTENT__", cards_html)
+        .replace("__VOICE_URL__", VOICE_UI_URL)
+    )
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -370,6 +457,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             html = render_dashboard()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html.encode())
+        elif urlparse(self.path).path == "/dashboard-cards":
+            html = render_dashboard_cards()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(html.encode())
         elif urlparse(self.path).path == "/avatar":

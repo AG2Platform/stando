@@ -31,7 +31,13 @@ Phase 0.5.
 | `com.sutando.web-client` | 8080 | yes |
 | `com.sutando.dashboard` | 7844 | yes |
 | `com.sutando.agent-api` | 7843 | yes |
-| `com.sutando.screen-capture` | 7845 | yes |
 | `com.sutando.credential-proxy` | 7846 | yes (for Claude quota visibility) |
+
+Note: screen capture (port 7845) used to ship as `com.sutando.screen-capture`
+but now runs in-process inside `Sutando.app` (`ScreenCaptureServer.swift`).
+This was moved out of launchd because `/usr/bin/python3` resolves through
+`xcode-select` to Xcode's bundled Python.app — a binary identity TCC silently
+denies Screen Recording for. Owning the port from the .app means
+`screencapture` inherits Sutando's stable, signed code identity.
 | `com.sutando.core-agent` | (none) | yes (Claude Code in tmux; supervises `tasks/`) |
 | `com.sutando.phone-conversation` | 3100 | optional (paid tier; ships `Disabled=true`, the installer skips bootstrap) |
