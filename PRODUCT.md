@@ -927,9 +927,12 @@ User actions required before paid beta users can complete an install:
      and hits api-free.deepl.com vs api.deepl.com.
    - **`REPLICATE_API_TOKEN`** (added Phase 6 Wave D) — backs the
      `image-bg-remove` cloud tool. ~$0.0023 per call wholesale.
+   - **`LLAMAPARSE_API_KEY`** (added Phase 6 Wave E) — backs the
+     `pdf-extract-tables` cloud tool. Free tier 1000 pages/day,
+     ~$0.003/page after.
    - **No key needed** for `scrape-and-extract` (Jina Reader free
-     tier) or `youtube-transcript` (scrapes the player response
-     directly — no auth, no rate-limit on our side).
+     tier), `youtube-transcript` (scrapes player response —
+     no auth), or `pdf-fill-and-sign` (self-hosted pdf-lib).
 6. **Tigris bucket** (for memory snapshots) — provision a bucket, set
    `AWS_ENDPOINT_URL_S3` + `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`
    + `AWS_REGION` + `OBJECT_STORE_BUCKET`. Without them, the snapshot

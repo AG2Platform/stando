@@ -32,7 +32,10 @@ deprecated in the catalog (migration 0015).
 | 5 — Agentic features | `lib/llm/gemini.ts` thin wrapper over `gemini-3-flash-preview` (text + JSON-schema modes). `lib/superpower/agentic.ts` holds shared `recommendForIntent()` + `summarizeReviews()` with 1h in-process caches. Routes: `POST /api/superpower/recommend` (used by desktop proactive loop), `GET /api/superpower/preview/[slug]` (LLM-generates sample invocations on first call + caches into `skills.preview_invocations`), `POST /api/superpower/items/[slug]/try` (one sandboxed cloud-tool call per user-slug per 7 days against marketing budget; skills return cached previews). `/superpower` page now ranks via Gemini server-side with keyword fallback; `/superpower/[slug]` Try button is live + review summary is LLM-synthesized. Proactive-loop hook deferred to Phase 6. | done |
 | 5.5 — Audit fixes | 13 bugs from the Phase 5 audit: voice-agent skill-loader blocker, costCents conflated with credits, agentic cache version (items.length → content hash), station_find ↔ Gemini recommend wiring, sign-out MCP cleanup, cloud-skill-sync kind branching, install/sync race mutex, mcp_introspect_cache invalidation on package upload, re-package status flip, /try arg coercion via inputSchema, preview schema strictness, honest disclosure of the 7-day /try throttle, cap-group wildcard for `cloud.*`. MCP gateway now refunds on upstream errors. | done |
 | 6 Wave A — Promote stubs | `cloud-research` → real Tavily search + Gemini synthesis (`lib/llm/web-search.ts`); `cloud-recall` → real pgvector + Gemini embeddings (`lib/llm/embed.ts`, `lib/rag/storage.ts`, migration 0014); `cloud-delegate` deprecated (migration 0015). New `POST /api/superpower/rag/upload` endpoint accepts chunked text into per-user corpora. | done |
-| 6 Wave B-E — Catalog items | Build the remaining 14 items in the final 16-item catalog (see Bootstrap content below). | pending |
+| 6 Wave B — Daily-pull skills | 4 skills covering morning-briefing-pro, email-triage, calendar-prep (rescoped — no LinkedIn), screenshot-explain (NEW killer demo). Mix of inline tools (screenshot-explain) and delegated-to-core (other three). | done |
+| 6 Wave C — Integration skills | 4 skills covering code-reviewer, linear-or-github-triage, commute-and-weather (NEW), receipt-to-expense (NEW). All delegated-to-core; each wires a new external integration (`gh`, Linear API, Open-Meteo, macOS Live Text). | done |
+| 6 Wave D — Lightweight cloud tools | 4 MCP-backed cloud tools: text-translate-quality (DeepL), scrape-and-extract (Jina Reader + Gemini), youtube-transcript (player-response scrape, no API key), image-bg-remove (Replicate rembg). | done |
+| 6 Wave E — PDF cloud tools | 2 MCP-backed cloud tools: pdf-extract-tables (LlamaParse) and pdf-fill-and-sign (self-hosted pdf-lib + Tigris). pdf-lib added to package.json — operator: `npm install` before deploying. | done |
 
 ## Mental model
 
@@ -259,14 +262,14 @@ no web app can match.
 
 | # | Slug | Why | Status |
 |---|---|---|---|
-| 1 | `morning-briefing-pro` | Richer briefing + voice options; daily-pull morning ritual | pending |
-| 2 | `email-triage` | Gmail urgency triage + draft replies; #1 Zapier category | pending |
-| 3 | `calendar-prep` | Last-thread + meeting-notes + agenda draft (LinkedIn step dropped) | pending |
-| 4 | `code-reviewer` | PR URL → senior review via `gh` + Claude; dev-cohort daily pull | pending |
-| 5 | **`screenshot-explain`** (NEW) | Local region screenshot + Gemini vision → explain. Sutando's killer demo — one keystroke beats any web GPT | pending |
-| 6 | **`commute-and-weather`** (NEW) | Calendar × weather × user-rule. Morning-routine reinforcer | pending |
-| 7 | **`receipt-to-expense`** (NEW) | Photo → OCR (Live Text) → CSV/Sheets. Photo input is the unique unlock | pending |
-| 8 | **`linear-or-github-triage`** (NEW) | "What changed in my issues today" + draft updates. Standup prep | pending |
+| 1 | `morning-briefing-pro` | Richer briefing + voice options; daily-pull morning ritual | **done (Wave B)** |
+| 2 | `email-triage` | Gmail urgency triage + draft replies; #1 Zapier category | **done (Wave B)** |
+| 3 | `calendar-prep` | Last-thread + meeting-notes + agenda draft (LinkedIn step dropped) | **done (Wave B)** |
+| 4 | `code-reviewer` | PR URL → senior review via `gh` + Claude; dev-cohort daily pull | **done (Wave C)** |
+| 5 | **`screenshot-explain`** (NEW) | Local region screenshot + Gemini vision → explain. Sutando's killer demo — one keystroke beats any web GPT | **done (Wave B)** |
+| 6 | **`commute-and-weather`** (NEW) | Calendar × weather × user-rule. Morning-routine reinforcer | **done (Wave C)** |
+| 7 | **`receipt-to-expense`** (NEW) | Photo → OCR (Live Text) → CSV/Sheets. Photo input is the unique unlock | **done (Wave C)** |
+| 8 | **`linear-or-github-triage`** (NEW) | "What changed in my issues today" + draft updates. Standup prep | **done (Wave C)** |
 
 ### Cloud tools (usage-based, MCP) — 8
 
@@ -274,12 +277,12 @@ no web app can match.
 |---|---|---|---|---|
 | 1 | `deep-research` | ~$0.02 (Tavily + Gemini synth) | 100 cr/call | **done (Wave A)** |
 | 2 | `hosted-rag` | ~$0.00003 (embed + pgvector) | 5 cr/call | **done (Wave A)** |
-| 3 | `pdf-extract-tables` | ~$0.005/page (Reducto) | 5 cr/page | pending |
-| 4 | `youtube-transcript` | ~free (yt-dlp + Whisper-tiny) | 5 cr/call | pending |
-| 5 | `text-translate-quality` | ~$0.005/1k chars (DeepL) | 1 cr/1k chars | pending |
-| 6 | `image-bg-remove` | ~free (rembg local) | 2 cr/call | pending |
-| 7 | **`pdf-fill-and-sign`** (NEW) | $0 self-hosted (PyPDF + ImageMagick) | 5 cr/call | pending |
-| 8 | **`scrape-and-extract`** (NEW) | ~$0.001/page (Firecrawl) | 2 cr/page | pending |
+| 3 | `pdf-extract-tables` | ~$0.003/page (LlamaParse) | 5 cr/call | **done (Wave E)** |
+| 4 | `youtube-transcript` | ~free (player-response scrape) | 5 cr/call | **done (Wave D)** |
+| 5 | `text-translate-quality` | ~$0.005/1k chars (DeepL) | 1 cr/call | **done (Wave D)** |
+| 6 | `image-bg-remove` | ~$0.0023 (Replicate rembg) | 2 cr/call | **done (Wave D)** |
+| 7 | **`pdf-fill-and-sign`** (NEW) | $0 self-hosted (pdf-lib + Tigris) | 5 cr/call | **done (Wave E)** |
+| 8 | **`scrape-and-extract`** (NEW) | ~free (Jina Reader) | 2 cr/call | **done (Wave D)** |
 
 ### Dropped from the original 24
 
