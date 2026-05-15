@@ -9,13 +9,19 @@ This document is the source of truth for the design. PRODUCT.md tracks
 strategy + wave status; STATION.md tracks what we're actually building
 and where it lives in code.
 
-## Status (2026-05-14)
+## Status (2026-05-15)
 
-Phases 1 → 5 landed. Discover concierge ranks via gemini-3-flash-preview,
-detail pages render LLM-synthesized review summaries, the Try button
-actually invokes cloud tools against a sandbox budget. Phase 6
-(bootstrap content) is the last piece before the Station is content-
-complete.
+Phases 1 → 5 landed; Phase 5.5 cleaned up 13 audit-surfaced bugs
+(blocker: voice-agent now scans cloud-skills install dir; cost-cents
+unit fix in MCP gateway; agentic cache version derived from content
+hash; sign-out cleans the `~/.claude.json` entry; cloud-skill-sync
+skips kind=cloud_tool silently; per-slug install lock; schema-driven
+arg coercion in /try; honest disclosure of the /try throttle; etc.).
+Wave A of Phase 6 promoted two of the three stub cloud tools to real
+backends: **deep-research** = Tavily web search + Gemini synthesis;
+**hosted-rag** = pgvector + Gemini embeddings (migration 0014). The
+third stub (cloud-delegate) was dropped from the final 16 and is
+deprecated in the catalog (migration 0015).
 
 | Phase | Scope | Status |
 |---|---|---|
@@ -24,7 +30,9 @@ complete.
 | 3 — Built-in `superpower-station` skill + publishing APIs | `/api/superpower/skills/upload` (multipart + Tigris + server-side SHA-256), `/api/superpower/cloud-tools/register`, `/api/superpower/cloud-tools/{id}/package`, `/api/superpower/submissions`, resubmit route. Desktop `skills/superpower-station/` with 8 voice-callable tools. Install routes now resolve `tigris://` bundles via short-lived presigned GETs. | done |
 | 4 — MCP gateway | `POST /api/mcp/v1` Streamable HTTP MCP server (`lib/mcp/protocol.ts` + handler). Per-user dynamic `tools/list` driven by `skill_installs` JOIN `skills WHERE kind='cloud_tool'`, with cached `mcp_introspect_cache`. Pre-flight `checkAndConsume` + per-call wallet debit at `unit_price_credits`. ON CONFLICT-safe `cloud_tool_sessions` upsert + `usage_events` audit. 3 internal MCP upstreams shipped (`/api/internal/mcp/{cloud-delegate,cloud-research,cloud-recall}`) sharing `lib/mcp/internal-server.ts`; `internal:<slug>` URL scheme resolves to local routes in both dev + prod. Desktop `src/register-station-mcp.py` wires `~/.claude.json` MCP entry from `cloud-auth.json` on sign-in (Swift) + every startup (bash). | done |
 | 5 — Agentic features | `lib/llm/gemini.ts` thin wrapper over `gemini-3-flash-preview` (text + JSON-schema modes). `lib/superpower/agentic.ts` holds shared `recommendForIntent()` + `summarizeReviews()` with 1h in-process caches. Routes: `POST /api/superpower/recommend` (used by desktop proactive loop), `GET /api/superpower/preview/[slug]` (LLM-generates sample invocations on first call + caches into `skills.preview_invocations`), `POST /api/superpower/items/[slug]/try` (one sandboxed cloud-tool call per user-slug per 7 days against marketing budget; skills return cached previews). `/superpower` page now ranks via Gemini server-side with keyword fallback; `/superpower/[slug]` Try button is live + review summary is LLM-synthesized. Proactive-loop hook deferred to Phase 6. | done |
-| 6 — Bootstrap content | Build + publish 12 skills + 12 cloud tools | pending |
+| 5.5 — Audit fixes | 13 bugs from the Phase 5 audit: voice-agent skill-loader blocker, costCents conflated with credits, agentic cache version (items.length → content hash), station_find ↔ Gemini recommend wiring, sign-out MCP cleanup, cloud-skill-sync kind branching, install/sync race mutex, mcp_introspect_cache invalidation on package upload, re-package status flip, /try arg coercion via inputSchema, preview schema strictness, honest disclosure of the 7-day /try throttle, cap-group wildcard for `cloud.*`. MCP gateway now refunds on upstream errors. | done |
+| 6 Wave A — Promote stubs | `cloud-research` → real Tavily search + Gemini synthesis (`lib/llm/web-search.ts`); `cloud-recall` → real pgvector + Gemini embeddings (`lib/llm/embed.ts`, `lib/rag/storage.ts`, migration 0014); `cloud-delegate` deprecated (migration 0015). New `POST /api/superpower/rag/upload` endpoint accepts chunked text into per-user corpora. | done |
+| 6 Wave B-E — Catalog items | Build the remaining 14 items in the final 16-item catalog (see Bootstrap content below). | pending |
 
 ## Mental model
 
@@ -234,35 +242,62 @@ POST /api/mcp/v1                             (Streamable HTTP MCP server)
 
 ## Bootstrap content
 
-### Skills (one-time install)
+The original 24-item list was reviewed against Anthropic Skills, the
+ChatGPT GPT Store, Raycast Store, Apple Shortcuts, Zapier templates,
+and the awesome-MCP-servers registry. **Final catalog: 16 items**
+(8 skills + 8 cloud tools). Dropped items either lacked daily-use
+pull (interview-coach, travel-planner, daily-journal, recipe-
+companion, flashcard-maker, voice-clone-ephemeral, image-upscale-4k)
+or are no longer viable (linkedin-profile-lookup — Proxycurl shut
+down July 2025 after LinkedIn lawsuit). `cloud-delegate` was dropped
+in favor of routing delegation through Sutando's core agent
+directly. The four NEW items leverage Sutando's unique surfaces
+(screen-capture, voice, calendar integration) for daily-pull value
+no web app can match.
 
-1. `morning-briefing-pro` — richer briefing + voice options
-2. `calendar-prep` — auto-pull attendee LinkedIn + last thread + draft talking points
-3. `email-triage` — Gmail urgency triage + draft replies
-4. `expense-tracker` — voice "spent $X" → CSV / Sheets
-5. `interview-coach` — mock interview + scoring
-6. `paper-summary` — arXiv URL → summary + key figures
-7. `meeting-recorder` — record + transcribe + Notion publish
-8. `code-reviewer` — PR URL → senior review
-9. `recipe-companion` — voice-guided cooking
-10. `travel-planner` — voice "plan 4 days in Lisbon"
-11. `daily-journal` — evening reflection + weekly synthesis
-12. `flashcard-maker` — notes → Anki decks
+### Skills (one-time install, local compute) — 8
 
-### Cloud tools (usage-based, MCP)
+| # | Slug | Why | Status |
+|---|---|---|---|
+| 1 | `morning-briefing-pro` | Richer briefing + voice options; daily-pull morning ritual | pending |
+| 2 | `email-triage` | Gmail urgency triage + draft replies; #1 Zapier category | pending |
+| 3 | `calendar-prep` | Last-thread + meeting-notes + agenda draft (LinkedIn step dropped) | pending |
+| 4 | `code-reviewer` | PR URL → senior review via `gh` + Claude; dev-cohort daily pull | pending |
+| 5 | **`screenshot-explain`** (NEW) | Local region screenshot + Gemini vision → explain. Sutando's killer demo — one keystroke beats any web GPT | pending |
+| 6 | **`commute-and-weather`** (NEW) | Calendar × weather × user-rule. Morning-routine reinforcer | pending |
+| 7 | **`receipt-to-expense`** (NEW) | Photo → OCR (Live Text) → CSV/Sheets. Photo input is the unique unlock | pending |
+| 8 | **`linear-or-github-triage`** (NEW) | "What changed in my issues today" + draft updates. Standup prep | pending |
 
-1. `deep-research` (Phase 4 — promote existing stub)
-2. `delegate-to-specialist` (Phase 4 — promote existing stub)
-3. `hosted-rag` (Phase 4 — promote existing stub)
-4. `web-screenshot-pro` (Cloudflare Browser)
-5. `pdf-extract-tables` (Reducto / LlamaParse-class)
-6. `voice-clone-ephemeral` (Cartesia)
-7. `youtube-transcript`
-8. `code-search` (Sourcegraph-style)
-9. `image-upscale-4k`
-10. `image-bg-remove`
-11. `text-translate-quality` (DeepL-class)
-12. `linkedin-profile-lookup` (Proxycurl)
+### Cloud tools (usage-based, MCP) — 8
+
+| # | Slug | Wholesale cost | Price | Status |
+|---|---|---|---|---|
+| 1 | `deep-research` | ~$0.02 (Tavily + Gemini synth) | 100 cr/call | **done (Wave A)** |
+| 2 | `hosted-rag` | ~$0.00003 (embed + pgvector) | 5 cr/call | **done (Wave A)** |
+| 3 | `pdf-extract-tables` | ~$0.005/page (Reducto) | 5 cr/page | pending |
+| 4 | `youtube-transcript` | ~free (yt-dlp + Whisper-tiny) | 5 cr/call | pending |
+| 5 | `text-translate-quality` | ~$0.005/1k chars (DeepL) | 1 cr/1k chars | pending |
+| 6 | `image-bg-remove` | ~free (rembg local) | 2 cr/call | pending |
+| 7 | **`pdf-fill-and-sign`** (NEW) | $0 self-hosted (PyPDF + ImageMagick) | 5 cr/call | pending |
+| 8 | **`scrape-and-extract`** (NEW) | ~$0.001/page (Firecrawl) | 2 cr/page | pending |
+
+### Dropped from the original 24
+
+Skills: `expense-tracker` (Reminders.app covers it; replaced with
+`receipt-to-expense`), `interview-coach`, `paper-summary`,
+`meeting-recorder`, `recipe-companion`, `travel-planner`,
+`daily-journal`, `flashcard-maker` — all low daily-use pull or
+cold-start every install.
+
+Cloud tools: `delegate-to-specialist` (deprecated in migration 0015;
+delegation handled by Sutando's core agent directly),
+`web-screenshot-pro` (overlaps with the new `screenshot-explain`
+local skill + existing browser-tools), `voice-clone-ephemeral`
+(niche use case, ~$5+ wholesale per clone), `code-search`
+(Sourcegraph heavy; `gh code-search` + grep cover the dev cohort),
+`image-upscale-4k` (novelty / one-time), `linkedin-profile-lookup`
+(**dead** — Proxycurl shut down July 2025 after LinkedIn lawsuit;
+no legally clean alternative).
 
 ## Open questions
 

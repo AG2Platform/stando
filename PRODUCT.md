@@ -890,11 +890,18 @@ Things to weigh in on before we start implementation:
 
 User actions required before paid beta users can complete an install:
 
-1. **Migrations** — `npm run db:migrate` against Neon applies 0004 → 0009
+1. **Migrations** — `npm run db:migrate` against Neon applies 0004 → 0015
    (beta gate, billing caps, feedback, skills, memory snapshots,
-   auto-topup payment method + mutex).
+   auto-topup payment method + mutex, Superpower Station schema,
+   cloud-tool sessions unique idx, **0014 pgvector + rag_documents**,
+   **0015 deprecate cloud-delegate**). Migration 0014 requires the
+   `vector` extension which Neon supports natively (`CREATE EXTENSION`
+   on first run is included).
 2. **Seed cloud tools** — `psql $DATABASE_URL -f lib/db/seeds/cloud-tools.sql`
-   adds the three v1 cloud tools (delegate / research / recall) to the catalog.
+   seeds the original 3 cloud tools (delegate / research / recall).
+   Wave A flips `cloud-delegate` to `deprecated` via migration 0015;
+   `cloud-research` + `cloud-recall` get real backends in code
+   without any seed change.
 3. **Stripe** — create Plus / Pro / Max products at $29 / $99 / $199;
    set `STRIPE_PRICE_{PLUS,PRO,MAX}_MONTHLY`; add
    `checkout.session.completed` to the webhook event subscriptions
@@ -910,6 +917,10 @@ User actions required before paid beta users can complete an install:
 5. **Managed-gateway provider keys** — `GEMINI_MASTER_API_KEY` +
    `CARTESIA_MASTER_API_KEY`. Without them, gateway routes 503 and the
    desktop falls back to BYOK.
+   - **`TAVILY_API_KEY`** (added Phase 6 Wave A) — backs the
+     `deep-research` cloud tool's web-search step. Without it, the
+     tool returns a "not configured" error and the gateway still
+     debits 0 credits (handler short-circuits before billing).
 6. **Tigris bucket** (for memory snapshots) — provision a bucket, set
    `AWS_ENDPOINT_URL_S3` + `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`
    + `AWS_REGION` + `OBJECT_STORE_BUCKET`. Without them, the snapshot
