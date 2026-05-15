@@ -131,6 +131,26 @@ cp "$REPO/CLAUDE.md" "$APP/Contents/Resources/repo/CLAUDE.md"
     cp "$REPO/PERSONAL_CLAUDE.md.example" "$APP/Contents/Resources/repo/PERSONAL_CLAUDE.md.example"
 [ -d "$REPO/assets" ] && cp -R "$REPO/assets" "$APP/Contents/Resources/repo/assets"
 
+# React frontend (Vite + React 19) — `src/web-server.ts` serves
+# `client/dist/index.html` + hashed assets at GET / and /v2. Without this
+# step the bundle falls back to the legacy inline HTML even though
+# web-server.ts knows the React routes — which is the exact symptom we
+# hit after PR-C step 5 shipped.
+#
+# Build first if dist/ is missing or stale relative to the workspace
+# package.json. `pnpm` is required at build time but not at runtime
+# (everything ends up in client/dist/ which is plain static files).
+echo "  Building + staging React client (client/dist/)..."
+if [ ! -d "$REPO/client/dist" ] || [ "$REPO/client/package.json" -nt "$REPO/client/dist/index.html" ]; then
+    (cd "$REPO" && pnpm --filter @sutando/client build 2>&1 | tail -5)
+fi
+mkdir -p "$APP/Contents/Resources/repo/client"
+cp -R "$REPO/client/dist" "$APP/Contents/Resources/repo/client/dist"
+# package.json + index.html are useful for diagnostics inside the bundle
+# (lets you run `node` against the staged copy if something goes wrong).
+cp "$REPO/client/package.json" "$APP/Contents/Resources/repo/client/package.json"
+[ -f "$REPO/client/index.html" ] && cp "$REPO/client/index.html" "$APP/Contents/Resources/repo/client/index.html"
+
 # Production-only install directly into the bundle. Skips devDeps
 # (typescript, @types/*) which a runtime never touches. Cuts ~30MB and
 # fewer Mach-O binaries for Apple's notary to scan.
