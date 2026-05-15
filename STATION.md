@@ -278,7 +278,7 @@ no web app can match.
 | 1 | `deep-research` | ~$0.02 (Tavily + Gemini synth) | 100 cr/call | **done (Wave A)** |
 | 2 | `hosted-rag` | ~$0.00003 (embed + pgvector) | 5 cr/call | **done (Wave A)** |
 | 3 | `pdf-extract-tables` | ~$0.003/page (LlamaParse) | 5 cr/call | **done (Wave E)** |
-| 4 | `youtube-transcript` | ~$0.025/20-min video (Gemini 2.5 Flash video) | 5 cr/call | **done (Wave D)** |
+| 4 | `youtube-transcript` | ~$0.05/20-min video (Gemini 3 Flash Preview) | 5 cr/call | **done (Wave D)** |
 | 5 | `text-translate-quality` | ~$0.005/1k chars (DeepL) | 1 cr/call | **done (Wave D)** |
 | 6 | `image-bg-remove` | ~$0.0023 (Replicate rembg) | 2 cr/call | **done (Wave D)** |
 | 7 | **`pdf-fill-and-sign`** (NEW) | $0 self-hosted (pdf-lib + Tigris) | 5 cr/call | **done (Wave E)** |
