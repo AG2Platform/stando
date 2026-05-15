@@ -781,6 +781,13 @@ each bucket; buckets can partially overlap.
 
 ### Wave 3 — Skill marketplace + cloud tools
 
+The Wave 3 scaffold (catalog tables, install/review/submit routes,
+admin review, desktop `skill-installer`) is the foundation for the
+release-grade **Superpower Station** — see [`STATION.md`](STATION.md)
+for the full design (mental model, MCP gateway, agentic UX, bootstrap
+content, phases). Wave 3 rows below stay as the historical scaffold;
+new work tracks against the Station phase table in `STATION.md`.
+
 | # | Item | Repo | Status |
 |---|---|---|---|
 | 3.1 | Skill bundle format + signing pipeline (Apple Developer ID) | sutando | partial — bundle format defined; tarball hosting (CDN + signed-URL upload) + Apple Developer ID signing pipeline deferred to post-beta. Install path verifies SHA-256 today against the manifest's `signing_hash`. |

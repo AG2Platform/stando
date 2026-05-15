@@ -1,0 +1,7 @@
+{
+	"name": "superpower-station",
+	"description": "Browse, install, publish skills + register cloud tools from the Sutando Superpower Station. Voice-callable: 'find a skill for X', 'install Y', 'publish my-skill', 'register a cloud tool'.",
+	"enabled": true,
+	"access_tier": "owner",
+	"tools": "./tools.ts"
+}

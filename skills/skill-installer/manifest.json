@@ -1,7 +1,7 @@
 {
 	"name": "skill-installer",
-	"description": "Browse + install cloud marketplace skills. Voice-callable: 'find a skill for X', 'install Y', 'review Y'.",
-	"enabled": true,
+	"description": "(Superseded by `superpower-station`.) Browse + install cloud marketplace skills. Kept enabled=false so the new `superpower-station` skill owns the catalog tools without name collisions.",
+	"enabled": false,
 	"access_tier": "owner",
 	"tools": "./tools.ts"
 }

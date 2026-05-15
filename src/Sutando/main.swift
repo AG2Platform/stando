@@ -311,6 +311,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             guard let self = self else { return }
             self.runMemoryHydrate()
+            self.runStationMcpRegister()
             // Don't punch through the onboarding gate from a sign-in
             // callback. If the wizard is still up, let the user finish
             // it; the wizard's onComplete handler will re-enter the
@@ -383,6 +384,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self.logToFile("runMemoryHydrate: exit=\(task.terminationStatus)")
             } catch {
                 self.logToFile("runMemoryHydrate: launch failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Best-effort Superpower Station MCP registration. Writes the
+    /// Sutando MCP server entry into `~/.claude.json` using the API
+    /// base + Bearer token from cloud-auth.json. Idempotent — only
+    /// rewrites the file when the entry actually changes. See
+    /// `src/register-station-mcp.py` for the full behavior.
+    private func runStationMcpRegister() {
+        let script = workspace + "/src/register-station-mcp.py"
+        guard FileManager.default.fileExists(atPath: script) else {
+            logToFile("runStationMcpRegister: \(script) not found — skipping")
+            return
+        }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self = self else { return }
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            task.arguments = ["python3", script]
+            task.currentDirectoryURL = URL(fileURLWithPath: self.workspace)
+            let logsDir = self.stateRoot + "/logs"
+            try? FileManager.default.createDirectory(
+                atPath: logsDir,
+                withIntermediateDirectories: true
+            )
+            let logPath = logsDir + "/station-mcp.log"
+            if let fh = FileHandle(forWritingAtPath: logPath) ?? {
+                FileManager.default.createFile(atPath: logPath, contents: nil)
+                return FileHandle(forWritingAtPath: logPath)
+            }() {
+                fh.seekToEndOfFile()
+                task.standardOutput = fh
+                task.standardError = fh
+            }
+            do {
+                try task.run()
+                task.waitUntilExit()
+                self.logToFile("runStationMcpRegister: exit=\(task.terminationStatus)")
+            } catch {
+                self.logToFile("runStationMcpRegister: launch failed: \(error.localizedDescription)")
             }
         }
     }
