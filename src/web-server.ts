@@ -24,9 +24,55 @@
 
 import { createServer } from 'node:http';
 import { writeFileSync, readFileSync, statSync } from 'node:fs';
+import { extname, normalize, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { readTmuxStatus } from './tmux-status.js';
 import { statePath } from './util_paths.js';
 import { renderWebClientHtml } from './web-client-html.js';
+
+// Dist directory for the React bundle (`client/`). Resolved once at module
+// load — web-server.ts lives in `src/`, so `../client/dist` lands at the
+// workspace root. PR-B serves this bundle at `/v2`; PR-C+ migrate features
+// off the legacy `/` HTML and eventually flip the routes.
+const CLIENT_DIST_DIR = fileURLToPath(new URL('../client/dist/', import.meta.url));
+
+const STATIC_MIME_TYPES: Record<string, string> = {
+	'.html': 'text/html; charset=utf-8',
+	'.js': 'application/javascript; charset=utf-8',
+	'.mjs': 'application/javascript; charset=utf-8',
+	'.css': 'text/css; charset=utf-8',
+	'.json': 'application/json; charset=utf-8',
+	'.map': 'application/json; charset=utf-8',
+	'.svg': 'image/svg+xml',
+	'.png': 'image/png',
+	'.jpg': 'image/jpeg',
+	'.jpeg': 'image/jpeg',
+	'.gif': 'image/gif',
+	'.webp': 'image/webp',
+	'.ico': 'image/x-icon',
+	'.woff': 'font/woff',
+	'.woff2': 'font/woff2',
+};
+
+/**
+ * Resolve a request path under `/v2/` to a file inside `client/dist/`.
+ * Returns null when the path escapes the dist root (defense against
+ * `/v2/../etc/passwd` style traversal) or when the file is missing —
+ * either case falls through to a 404 in the caller.
+ */
+function resolveDistFile(relPathRaw: string): string | null {
+	const relPath = relPathRaw.replace(/^\/+/, '') || 'index.html';
+	const normalized = normalize(relPath);
+	if (normalized.startsWith('..') || normalized.includes(`..${sep}`)) return null;
+	const abs = CLIENT_DIST_DIR + normalized;
+	try {
+		const stat = statSync(abs);
+		if (!stat.isFile()) return null;
+		return abs;
+	} catch {
+		return null;
+	}
+}
 
 export interface WebServerOptions {
 	/** Port for the HTTP server (default: 8080, matches the legacy CLIENT_PORT env). */
@@ -385,6 +431,42 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 					res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'parse failed' }));
 				}
 			});
+			return;
+		}
+
+		// /v2[/*] — Vite-built React bundle from client/dist/. Lives alongside
+		// the legacy / route until PR-C migrates real features off the inline
+		// HTML and we flip /v2 ↔ /. Falls through to the legacy HTML when the
+		// bundle hasn't been built yet (e.g. fresh checkout without
+		// `pnpm --filter @sutando/client build`), so the desktop app still
+		// works during incremental adoption.
+		if (url.pathname === '/v2' || url.pathname.startsWith('/v2/')) {
+			const rel = url.pathname === '/v2' ? 'index.html' : url.pathname.slice('/v2/'.length);
+			const file = resolveDistFile(rel) ?? resolveDistFile('index.html');
+			if (file) {
+				const mime = STATIC_MIME_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
+				try {
+					const body = readFileSync(file);
+					res.writeHead(200, {
+						'Content-Type': mime,
+						// Hashed asset filenames from Vite are safe to cache long-term;
+						// index.html must always be fresh so SPA route changes ship.
+						'Cache-Control': file.endsWith('index.html')
+							? 'no-cache, no-store, must-revalidate'
+							: 'public, max-age=31536000, immutable',
+					});
+					res.end(body);
+					return;
+				} catch {
+					res.writeHead(500);
+					res.end('Failed to read static asset');
+					return;
+				}
+			}
+			res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+			res.end(
+				`/v2 bundle not built yet. Run \`pnpm --filter @sutando/client build\` from the repo root.`
+			);
 			return;
 		}
 

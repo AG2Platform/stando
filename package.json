@@ -8,6 +8,8 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts && npm run test:py",
     "test:py": "for f in tests/*.test.py; do echo \"--- $f ---\" && python3 \"$f\" || exit 1; done",
+    "build:client": "pnpm --filter @sutando/client build",
+    "dev:client": "pnpm --filter @sutando/client dev",
     "postinstall": "node -e \"const {chmodSync,existsSync}=require('fs'); for (const arch of ['darwin-arm64','darwin-x64','linux-x64','linux-arm64']) { const p='node_modules/node-pty/prebuilds/'+arch+'/spawn-helper'; if (existsSync(p)) { try { chmodSync(p, 0o755) } catch (_) {} } }\""
   },
   "dependencies": {

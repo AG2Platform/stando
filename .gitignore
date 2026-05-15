@@ -6,6 +6,11 @@ device.json
 PERSONAL_CLAUDE.md
 node_modules/
 dist/
+# Vite + React frontend (PR-B). The src/ tree is checked in; node_modules
+# + dist are regenerable via `pnpm install` + `pnpm --filter @sutando/client build`.
+client/node_modules/
+client/dist/
+client/.vite/
 *.log
 __pycache__/
 .DS_Store
