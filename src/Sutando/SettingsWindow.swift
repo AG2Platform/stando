@@ -32,6 +32,17 @@ private func sutandoHomePath() -> String {
 
 private func envFilePath() -> String { sutandoHomePath() + "/.env" }
 
+/// Touch a sentinel file the voice-agent polls. Voice-agent reads
+/// `geminiMode` once at session start via `resolveVoiceApiKey()`; this
+/// nudges it to self-exit so launchd KeepAlive restarts it with fresh
+/// state. Used after a successful PATCH /api/me geminiMode toggle.
+private func signalVoiceKeyReload() {
+    let dir = sutandoHomePath() + "/state"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let path = dir + "/voice-key-reload.request"
+    FileManager.default.createFile(atPath: path, contents: Data(), attributes: nil)
+}
+
 // Marker for "user has completed initial setup". Created when the user
 // clicks Save with a valid Gemini key. Absence triggers the first-launch
 // auto-open behavior in main.swift.
@@ -884,6 +895,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                     // Next poll will confirm; force refresh sooner so the
                     // status line + comp card reflect the new state.
                     self.lastMeFetchTs = 0
+                    // Bounce voice-agent so resolveVoiceApiKey() re-runs with
+                    // the new mode on its next session — otherwise the toggle
+                    // would only take effect after a manual app restart.
+                    signalVoiceKeyReload()
                 case .requiresPaid:
                     self.geminiModeBYOKRadio?.state = previousByok
                     self.geminiModeManagedRadio?.state = previousManaged

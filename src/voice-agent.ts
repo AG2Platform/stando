@@ -277,6 +277,22 @@ function applyModeRequest() {
 }
 setInterval(applyModeRequest, 1_000);
 
+// Poll state/voice-key-reload.request every 1s — Settings writes this file
+// after a successful PATCH /api/me on the geminiMode toggle (BYOK ↔ Managed).
+// resolveVoiceApiKey() runs only at VoiceSession construction, so the new
+// mode would otherwise sit unused until the next launchd-driven restart.
+// On detection we exit; launchd's KeepAlive (ThrottleInterval=5s) brings
+// us back up with a fresh resolveVoiceApiKey() call.
+function applyVoiceKeyReloadRequest() {
+	const reqPath = statePath('state/voice-key-reload.request');
+	if (!existsSync(reqPath)) return;
+	try { unlinkSync(reqPath); } catch { /* ignore */ }
+	console.log(`${ts()} [Voice] Key-reload requested by Settings — exiting for launchd restart`);
+	// Small grace period so the log line + any in-flight writes flush.
+	setTimeout(() => process.exit(0), 200);
+}
+setInterval(applyVoiceKeyReloadRequest, 1_000);
+
 // Detect active meeting on startup — sync so it runs before first greeting
 try {
 	const zoomRunning = execSyncTop('pgrep -f "zoom.us" 2>/dev/null', { encoding: 'utf-8' }).trim();
