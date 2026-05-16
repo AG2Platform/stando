@@ -125,9 +125,9 @@ function parseSkillFrontmatter(content: string): { name?: string; description?: 
 export const findTool: ToolDefinition = {
 	name: 'station_find',
 	description:
-		'Search the Superpower Station catalog (skills + cloud tools) by intent. Uses Gemini-ranked semantic search so the user can describe what they want in natural language ("something to triage email" / "tool that summarizes papers"), not just keywords. Falls back to keyword match if the LLM is offline.',
+		'Search the Superpower Station catalog (skills + cloud tools). Pass an intent for semantic search ("something to triage email"), a keyword, or a generic browse phrase ("what is available", "list everything", "browse") — generic phrases return the most-installed items so the user can see what is there. Also use when the user asks "what skills does the Station have" / "show me the catalog".',
 	parameters: z.object({
-		query: z.string().describe('Free-text intent, e.g. "help with morning routine", "translate text", "summarize a paper".'),
+		query: z.string().describe('Free-text intent, keyword, or "browse" / "list" / "what is available" for a generic catalog overview.'),
 	}),
 	execution: 'inline',
 	async execute(args) {
@@ -163,7 +163,7 @@ export const findTool: ToolDefinition = {
 		};
 		const bySlug = new Map(body.skills.map((s) => [s.slug, s]));
 
-		let ranking: 'gemini' | 'keyword' = 'keyword';
+		let ranking: 'gemini' | 'keyword' | 'popular' = 'keyword';
 		let ranked: Array<{ slug: string; reasoning?: string; score?: number }> = [];
 		if (recRes && recRes.ok) {
 			try {
@@ -190,6 +190,24 @@ export const findTool: ToolDefinition = {
 				.slice(0, 8)
 				.map((s) => ({ slug: s.slug }));
 		}
+		// Last-resort browse fallback. Generic phrases like "what is available"
+		// match neither the Gemini ranker nor a keyword scan, leaving the user
+		// staring at a "didn't find anything" response while 17 skills sit in
+		// the catalog. Show the most-installed handful so the user can at
+		// least see the surface area; tag the ranking so the caller can phrase
+		// the response correctly ("here are the most popular ones" vs. "best
+		// matches for X").
+		if (ranked.length === 0 && body.skills.length > 0) {
+			ranking = 'popular';
+			ranked = [...body.skills]
+				.sort((a, b) => {
+					const installDelta = (b.installCount ?? 0) - (a.installCount ?? 0);
+					if (installDelta !== 0) return installDelta;
+					return a.name.localeCompare(b.name);
+				})
+				.slice(0, 8)
+				.map((s) => ({ slug: s.slug }));
+		}
 
 		const items = ranked
 			.map((r) => {
@@ -213,7 +231,7 @@ export const findTool: ToolDefinition = {
 				};
 			})
 			.filter((x): x is NonNullable<typeof x> => x !== null);
-		return { query, count: items.length, ranking, items };
+		return { query, count: items.length, ranking, items, catalogTotal: body.skills.length };
 	},
 };
 
