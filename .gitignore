@@ -77,3 +77,6 @@ voice-state.json
 
 # Single-instance lock written by src/voice-agent.ts (acquirePidLock).
 .voice-agent.pid
+
+# Research findings — local only
+findings/
