@@ -10,7 +10,7 @@
     "test:py": "for f in tests/*.test.py; do echo \"--- $f ---\" && python3 \"$f\" || exit 1; done",
     "build:client": "pnpm --filter @sutando/client build",
     "dev:client": "pnpm --filter @sutando/client dev",
-    "postinstall": "node -e \"const {chmodSync,existsSync}=require('fs'); for (const arch of ['darwin-arm64','darwin-x64','linux-x64','linux-arm64']) { const p='node_modules/node-pty/prebuilds/'+arch+'/spawn-helper'; if (existsSync(p)) { try { chmodSync(p, 0o755) } catch (_) {} } }\""
+    "postinstall": "patch-package && node -e \"const {chmodSync,existsSync}=require('fs'); for (const arch of ['darwin-arm64','darwin-x64','linux-x64','linux-arm64']) { const p='node_modules/node-pty/prebuilds/'+arch+'/spawn-helper'; if (existsSync(p)) { try { chmodSync(p, 0o755) } catch (_) {} } }\""
   },
   "dependencies": {
     "@ai-sdk/google": "^1.2.0",
@@ -19,6 +19,7 @@
     "bodhi-realtime-agent": "github:sonichi/bodhi_realtime_agent#ffec0cdf60bc8cba5e33e06ff2007b64157df3cd",
     "dotenv": "^17.4.1",
     "node-pty": "^1.1.0",
+    "patch-package": "^8.0.1",
     "playwright": "^1.58.2",
     "tsx": "^4.21.0",
     "ws": "^8.20.0",

@@ -329,6 +329,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             guard let self = self else { return }
             self.runMemoryHydrate()
+            self.runStationMcpRegister()
             // Don't punch through the onboarding gate from a sign-in
             // callback. If the wizard is still up, let the user finish
             // it; the wizard's onComplete handler will re-enter the
@@ -402,6 +403,64 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             } catch {
                 self.logToFile("runMemoryHydrate: launch failed: \(error.localizedDescription)")
             }
+        }
+    }
+
+    /// Best-effort Superpower Station MCP registration. Writes the
+    /// Sutando MCP server entry into `~/.claude.json` using the API
+    /// base + Bearer token from cloud-auth.json. Idempotent — only
+    /// rewrites the file when the entry actually changes. See
+    /// `src/register-station-mcp.py` for the full behavior.
+    private func runStationMcpRegister() {
+        runStationMcp(args: ["python3", workspace + "/src/register-station-mcp.py"], synchronous: false, label: "register")
+    }
+
+    /// Sign-out counterpart: deletes the sutando-station entry from
+    /// `~/.claude.json` so the stale Bearer token doesn't sit around for
+    /// Claude Code to retry forever. Runs synchronously because the app
+    /// is about to terminate — async would race the 0.3s terminate delay.
+    private func runStationMcpUnregister() {
+        runStationMcp(args: ["python3", workspace + "/src/register-station-mcp.py", "--remove"], synchronous: true, label: "unregister")
+    }
+
+    private func runStationMcp(args: [String], synchronous: Bool, label: String) {
+        let script = args.count >= 2 ? args[1] : ""
+        guard FileManager.default.fileExists(atPath: script) else {
+            logToFile("runStationMcp[\(label)]: \(script) not found — skipping")
+            return
+        }
+        let work: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            task.arguments = args
+            task.currentDirectoryURL = URL(fileURLWithPath: self.workspace)
+            let logsDir = self.stateRoot + "/logs"
+            try? FileManager.default.createDirectory(
+                atPath: logsDir,
+                withIntermediateDirectories: true
+            )
+            let logPath = logsDir + "/station-mcp.log"
+            if let fh = FileHandle(forWritingAtPath: logPath) ?? {
+                FileManager.default.createFile(atPath: logPath, contents: nil)
+                return FileHandle(forWritingAtPath: logPath)
+            }() {
+                fh.seekToEndOfFile()
+                task.standardOutput = fh
+                task.standardError = fh
+            }
+            do {
+                try task.run()
+                task.waitUntilExit()
+                self.logToFile("runStationMcp[\(label)]: exit=\(task.terminationStatus)")
+            } catch {
+                self.logToFile("runStationMcp[\(label)]: launch failed: \(error.localizedDescription)")
+            }
+        }
+        if synchronous {
+            work()
+        } else {
+            DispatchQueue.global(qos: .utility).async(execute: work)
         }
     }
 
@@ -556,6 +615,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let installer = LaunchAgentInstaller()
         let removed = installer.uninstall()
         logToFile("performSignOutAndQuit: uninstalled \(removed.joined(separator: ", "))")
+        // Remove the MCP entry from ~/.claude.json BEFORE clearing the
+        // cloud token. Otherwise a stale Bearer token sits in the file
+        // forever and Claude Code keeps retrying it on every launch.
+        runStationMcpUnregister()
         CloudAuth.shared.signOut()
         // Give the notification a moment to surface before we terminate.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {

@@ -119,7 +119,24 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     private var subtitleLabel: NSTextField!
     private var statusBanner: NSTextField!
 
-    // Step 2 — Gemini key
+    // Step 2 — Connect Sutando (managed Gemini vs BYOK)
+    private enum GeminiOnboardingMode { case managed, byok }
+    private var geminiOnboardingMode: GeminiOnboardingMode = .managed
+    private var geminiManagedRadio: NSButton!
+    private var geminiBYOKRadio: NSButton!
+    private var geminiManagedSection: NSView!
+    private var geminiBYOKSection: NSView!
+    // Managed sub-section
+    private var managedSignInButton: NSButton!
+    private var managedRefreshButton: NSButton!
+    private var managedSignInSpinner: NSProgressIndicator!
+    private var managedStatusLabel: NSTextField!
+    private var managedCompCardContainer: NSView!
+    private var managedCompLabel: NSTextField!
+    private var managedSnapshot: CloudMeSnapshot?
+    private var managedSnapshotInFlight = false
+    private var managedModeSetInFlight = false
+    // BYOK sub-section (existing)
     private var geminiKeyField: NSSecureTextField!
     private var geminiValidateButton: NSButton!
     private var geminiStatusLabel: NSTextField!
@@ -465,7 +482,193 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 14
+        stack.spacing = 16
+
+        // Mode chooser at the top — two radios.
+        let chooser = makeGeminiModeChooserView()
+        stack.addArrangedSubview(chooser)
+
+        // Managed sub-section — sign in to claim 2 months of Max.
+        let managed = makeManagedGeminiSection()
+        geminiManagedSection = managed
+        stack.addArrangedSubview(managed)
+
+        // BYOK sub-section — paste a Gemini key. Old onboarding behavior.
+        let byok = makeBYOKGeminiSection()
+        geminiBYOKSection = byok
+        stack.addArrangedSubview(byok)
+
+        // Listen for sign-in callbacks. Step 2 fires CloudAuth.startSignIn();
+        // the browser → sutando:// callback lands in CloudAuth.handle(url:)
+        // which posts this notification on the main thread.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(onboardingCloudSignedIn(_:)),
+            name: .cloudAuthDidSignIn,
+            object: nil
+        )
+
+        applyGeminiOnboardingMode()
+        // If the user is already signed in (resumed onboarding or signed
+        // in from the menu before reaching step 2), refresh the snapshot
+        // so the comp card + Continue gate light up without a click.
+        if CloudAuth.shared.isSignedIn {
+            refreshManagedSnapshot()
+        } else {
+            applyManagedSnapshot(nil)
+        }
+
+        return stack
+    }
+
+    /// Header section: title + two radios. Radio change flips the mode and
+    /// re-applies section visibility / Continue-button gate.
+    private func makeGeminiModeChooserView() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+
+        let managedRadio = NSButton(
+            radioButtonWithTitle: "Sign in to Sutando — claim 2 months of Max free  (Recommended)",
+            target: self,
+            action: #selector(geminiOnboardingModeChanged(_:))
+        )
+        managedRadio.font = .systemFont(ofSize: 13, weight: .medium)
+        managedRadio.tag = 0
+        managedRadio.state = .on
+        geminiManagedRadio = managedRadio
+        stack.addArrangedSubview(managedRadio)
+
+        let managedHint = NSTextField(labelWithString:
+            "Beta users get 2 months of Max — voice, vision, image, video on us. We mint per-session Gemini Live tokens; no keys to manage."
+        )
+        managedHint.font = .systemFont(ofSize: 11)
+        managedHint.textColor = .secondaryLabelColor
+        managedHint.maximumNumberOfLines = 3
+        managedHint.lineBreakMode = .byWordWrapping
+        managedHint.preferredMaxLayoutWidth = 600
+        let managedHintInset = NSStackView()
+        managedHintInset.orientation = .horizontal
+        managedHintInset.edgeInsets = NSEdgeInsets(top: 0, left: 22, bottom: 0, right: 0)
+        managedHintInset.addArrangedSubview(managedHint)
+        stack.addArrangedSubview(managedHintInset)
+
+        let byokRadio = NSButton(
+            radioButtonWithTitle: "Bring my own Gemini key  (Free tier)",
+            target: self,
+            action: #selector(geminiOnboardingModeChanged(_:))
+        )
+        byokRadio.font = .systemFont(ofSize: 13, weight: .medium)
+        byokRadio.tag = 1
+        byokRadio.state = .off
+        geminiBYOKRadio = byokRadio
+        stack.addArrangedSubview(byokRadio)
+
+        let byokHint = NSTextField(labelWithString:
+            "Get a key from Google AI Studio. Stored locally on this Mac; voice connects direct to Google."
+        )
+        byokHint.font = .systemFont(ofSize: 11)
+        byokHint.textColor = .secondaryLabelColor
+        byokHint.maximumNumberOfLines = 2
+        byokHint.lineBreakMode = .byWordWrapping
+        byokHint.preferredMaxLayoutWidth = 600
+        let byokHintInset = NSStackView()
+        byokHintInset.orientation = .horizontal
+        byokHintInset.edgeInsets = NSEdgeInsets(top: 0, left: 22, bottom: 0, right: 0)
+        byokHintInset.addArrangedSubview(byokHint)
+        stack.addArrangedSubview(byokHintInset)
+
+        return stack
+    }
+
+    /// The "Sign in to Sutando" section. Shows Sign-in button when signed
+    /// out; comp card + green status when signed in with an active comp.
+    private func makeManagedGeminiSection() -> NSView {
+        let outer = NSStackView()
+        outer.orientation = .vertical
+        outer.alignment = .leading
+        outer.spacing = 10
+        outer.edgeInsets = NSEdgeInsets(top: 6, left: 0, bottom: 0, right: 0)
+
+        // Comp card — hidden until the snapshot returns with comp.active.
+        let card = NSStackView()
+        card.orientation = .vertical
+        card.alignment = .leading
+        card.spacing = 4
+        card.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        card.wantsLayer = true
+        card.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.08).cgColor
+        card.layer?.cornerRadius = 6
+        card.isHidden = true
+        managedCompCardContainer = card
+
+        let compLabel = NSTextField(labelWithString: "")
+        compLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        compLabel.maximumNumberOfLines = 2
+        compLabel.lineBreakMode = .byWordWrapping
+        compLabel.preferredMaxLayoutWidth = 580
+        managedCompLabel = compLabel
+        card.addArrangedSubview(compLabel)
+        outer.addArrangedSubview(card)
+
+        // Action row — sign-in button + refresh button + spinner.
+        let actionRow = NSStackView()
+        actionRow.orientation = .horizontal
+        actionRow.spacing = 10
+        actionRow.alignment = .centerY
+
+        let signInButton = NSButton(
+            title: "Sign in to Sutando",
+            target: self,
+            action: #selector(signInToSutando)
+        )
+        signInButton.bezelStyle = .rounded
+        managedSignInButton = signInButton
+        actionRow.addArrangedSubview(signInButton)
+
+        let refresh = NSButton(
+            title: "I've signed in — refresh",
+            target: self,
+            action: #selector(refreshManagedFromAction)
+        )
+        refresh.bezelStyle = .rounded
+        refresh.isHidden = true
+        managedRefreshButton = refresh
+        actionRow.addArrangedSubview(refresh)
+
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.widthAnchor.constraint(equalToConstant: 16).isActive = true
+        spinner.heightAnchor.constraint(equalToConstant: 16).isActive = true
+        managedSignInSpinner = spinner
+        actionRow.addArrangedSubview(spinner)
+
+        outer.addArrangedSubview(actionRow)
+
+        let status = NSTextField(labelWithString: "")
+        status.font = .systemFont(ofSize: 11)
+        status.textColor = .secondaryLabelColor
+        status.maximumNumberOfLines = 3
+        status.lineBreakMode = .byWordWrapping
+        status.preferredMaxLayoutWidth = 600
+        managedStatusLabel = status
+        outer.addArrangedSubview(status)
+
+        return outer
+    }
+
+    /// The BYOK section — identical to the pre-Wave-4.9 step 2 body, just
+    /// extracted into its own view so the mode chooser can show/hide it.
+    private func makeBYOKGeminiSection() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 6, left: 0, bottom: 0, right: 0)
 
         let helpRow = NSStackView()
         helpRow.orientation = .horizontal
@@ -544,6 +747,134 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         }
 
         return stack
+    }
+
+    // MARK: - Step 2 mode chooser actions
+
+    @objc private func geminiOnboardingModeChanged(_ sender: NSButton) {
+        geminiOnboardingMode = (sender.tag == 1) ? .byok : .managed
+        applyGeminiOnboardingMode()
+        updateContinueButton()
+    }
+
+    private func applyGeminiOnboardingMode() {
+        switch geminiOnboardingMode {
+        case .managed:
+            geminiManagedRadio?.state = .on
+            geminiBYOKRadio?.state = .off
+            geminiManagedSection?.isHidden = false
+            geminiBYOKSection?.isHidden = true
+        case .byok:
+            geminiManagedRadio?.state = .off
+            geminiBYOKRadio?.state = .on
+            geminiManagedSection?.isHidden = true
+            geminiBYOKSection?.isHidden = false
+        }
+    }
+
+    @objc private func signInToSutando() {
+        managedSignInButton?.isEnabled = false
+        managedSignInSpinner?.startAnimation(nil)
+        managedStatusLabel?.stringValue = "Opening browser… approve sign-in there, then come back."
+        managedStatusLabel?.textColor = .secondaryLabelColor
+        managedRefreshButton?.isHidden = false
+        _ = CloudAuth.shared.startSignIn()
+    }
+
+    @objc private func refreshManagedFromAction() {
+        refreshManagedSnapshot()
+    }
+
+    /// Fired by CloudAuth on a successful sutando:// callback. Auto-refresh
+    /// the snapshot so the comp card + Continue gate light up immediately,
+    /// no manual poll-button click required.
+    @objc private func onboardingCloudSignedIn(_ note: Notification) {
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshManagedSnapshot()
+        }
+    }
+
+    private func refreshManagedSnapshot() {
+        if managedSnapshotInFlight { return }
+        guard CloudAuth.shared.isSignedIn else {
+            applyManagedSnapshot(nil)
+            return
+        }
+        managedSnapshotInFlight = true
+        managedSignInSpinner?.startAnimation(nil)
+        CloudClient.fetchMe { [weak self] snap in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.managedSnapshotInFlight = false
+                self.managedSignInSpinner?.stopAnimation(nil)
+                self.applyManagedSnapshot(snap)
+            }
+        }
+    }
+
+    private func applyManagedSnapshot(_ snap: CloudMeSnapshot?) {
+        managedSnapshot = snap
+
+        guard let s = snap else {
+            // Not signed in (or fetch failed).
+            managedCompCardContainer?.isHidden = true
+            managedSignInButton?.title = "Sign in to Sutando"
+            managedSignInButton?.isEnabled = true
+            managedRefreshButton?.isHidden = true
+            if CloudAuth.shared.isSignedIn {
+                managedStatusLabel?.stringValue = "Couldn't load your account just now. Click \"I've signed in — refresh\" or check your connection."
+                managedStatusLabel?.textColor = .systemOrange
+                managedRefreshButton?.isHidden = false
+            } else {
+                managedStatusLabel?.stringValue = "Not signed in yet. We'll open the browser and finish on this Mac."
+                managedStatusLabel?.textColor = .secondaryLabelColor
+            }
+            updateContinueButton()
+            return
+        }
+
+        // Signed-in. Decide UX from comp + effectivePlan.
+        managedSignInButton?.title = "Signed in"
+        managedSignInButton?.isEnabled = false
+        managedRefreshButton?.isHidden = true
+
+        if let comp = s.comp, comp.active {
+            let endsAt = String(comp.endsAt.prefix(10))
+            managedCompLabel?.stringValue = String(
+                format: "🎁 Beta gift unlocked — %@ tier through %@ (%d days). %d cr/mo grant.",
+                comp.plan.capitalized,
+                endsAt,
+                comp.daysRemaining,
+                comp.monthlyCreditGrant
+            )
+            managedCompCardContainer?.isHidden = false
+            managedStatusLabel?.stringValue = "Click Continue and we'll switch you to managed Gemini."
+            managedStatusLabel?.textColor = .systemGreen
+        } else {
+            let effective = (s.effectivePlan ?? s.plan).lowercased()
+            if effective != "free" {
+                managedCompCardContainer?.isHidden = true
+                managedStatusLabel?.stringValue = String(
+                    format: "Signed in on the %@ plan. Click Continue to use managed Gemini.",
+                    effective.capitalized
+                )
+                managedStatusLabel?.textColor = .systemGreen
+            } else {
+                managedCompCardContainer?.isHidden = true
+                managedStatusLabel?.stringValue = "Signed in, but your beta application isn't approved yet. Switch to \"Bring my own Gemini key\" to keep going, or wait for the approval email."
+                managedStatusLabel?.textColor = .systemOrange
+            }
+        }
+        updateContinueButton()
+    }
+
+    /// True if managed mode is currently viable for advancing past step 2.
+    /// Requires sign-in AND a non-free effective plan (comp counts).
+    private func managedReadyToProceed() -> Bool {
+        guard CloudAuth.shared.isSignedIn, let s = managedSnapshot else { return false }
+        if s.comp?.active == true { return true }
+        let effective = (s.effectivePlan ?? s.plan).lowercased()
+        return effective != "free"
     }
 
     private func makeClaudeCLIView() -> NSView {
@@ -959,8 +1290,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
             titleLabel.stringValue = "Welcome to Sutando"
             subtitleLabel.stringValue = "Your personal AI agent. A few quick steps and you're ready."
         case .geminiKey:
-            titleLabel.stringValue = "Add a Gemini API key"
-            subtitleLabel.stringValue = "Required so Sutando can hear you and see your screen."
+            titleLabel.stringValue = "Connect Sutando"
+            subtitleLabel.stringValue = "Sign in for managed Gemini (2 months free for beta users), or bring your own Gemini key."
         case .claudeCLI:
             titleLabel.stringValue = "Install Claude Code"
             subtitleLabel.stringValue = "Powers the core agent that does the work behind your tasks."
@@ -1001,10 +1332,15 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
             continueButton.isEnabled = true
         case .geminiKey:
             continueButton.title = "Continue"
-            // Allow continue if the user has a non-empty key AND has
-            // either validated it this session or is using a saved key.
-            let hasKey = !geminiKeyField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty
-            continueButton.isEnabled = hasKey && geminiKeyValidated
+            switch geminiOnboardingMode {
+            case .managed:
+                continueButton.isEnabled = managedReadyToProceed() && !managedModeSetInFlight
+            case .byok:
+                // Allow continue if the user has a non-empty key AND has
+                // either validated it this session or is using a saved key.
+                let hasKey = !geminiKeyField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty
+                continueButton.isEnabled = hasKey && geminiKeyValidated
+            }
         case .claudeCLI:
             continueButton.title = "Continue"
             // Sign-in is the strong gate. The "Skip and finish later"
@@ -1030,7 +1366,19 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func goForward() {
         switch currentStep {
-        case .welcome, .geminiKey, .claudeCLI, .permissions:
+        case .geminiKey:
+            // Managed-mode users get a server-side `geminiMode='managed'` PATCH
+            // before we advance, so the voice agent's first session starts in
+            // managed mode without waiting for a Settings toggle. BYOK users
+            // skip the PATCH entirely (default mode is already 'byok').
+            if geminiOnboardingMode == .managed && managedReadyToProceed() {
+                advanceManagedAfterPatch()
+                return
+            }
+            if let next = Step(rawValue: currentStep.rawValue + 1) {
+                showStep(next)
+            }
+        case .welcome, .claudeCLI, .permissions:
             if let next = Step(rawValue: currentStep.rawValue + 1) {
                 showStep(next)
             }
@@ -1039,6 +1387,37 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
                 completeOnboarding()
             } else {
                 installServices()
+            }
+        }
+    }
+
+    private func advanceManagedAfterPatch() {
+        managedModeSetInFlight = true
+        managedSignInSpinner?.startAnimation(nil)
+        managedStatusLabel?.stringValue = "Enabling managed Gemini…"
+        managedStatusLabel?.textColor = .secondaryLabelColor
+        updateContinueButton()
+        CloudClient.setGeminiMode("managed") { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                self.managedModeSetInFlight = false
+                self.managedSignInSpinner?.stopAnimation(nil)
+                switch result {
+                case .ok:
+                    if let next = Step(rawValue: self.currentStep.rawValue + 1) {
+                        self.showStep(next)
+                    }
+                case .requiresPaid:
+                    // Shouldn't happen if managedReadyToProceed() passed, but
+                    // be defensive — keep them on step 2 and explain.
+                    self.managedStatusLabel?.stringValue = "Server says managed mode requires a paid plan. Switch to BYOK to continue."
+                    self.managedStatusLabel?.textColor = .systemOrange
+                    self.updateContinueButton()
+                case .failure(let detail):
+                    self.managedStatusLabel?.stringValue = "Couldn't enable managed mode: \(detail). Try again or switch to BYOK."
+                    self.managedStatusLabel?.textColor = .systemRed
+                    self.updateContinueButton()
+                }
             }
         }
     }

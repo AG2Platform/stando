@@ -11,14 +11,385 @@ asks "how do we deliver Sutando to a user's Mac," this doc asks "once
 they have it, what do they pay for and how does the cloud earn its
 keep."
 
-## Status (2026-05-14)
+## Status (2026-05-15, late session)
 
 DISTRIBUTION.md Phases 0–4.13 are done in code. The app installs
 end-to-end from DMG, opens a dedicated 5-step onboarding wizard on
 first launch, and runs screen-capture as an in-process child so TCC
 needs only one Screen Recording grant. The cloud control plane runs
-locally with the admin panel landed. We have beta users waiting. The
-next chapter is turning capability into a product.
+locally with the admin panel landed. Waves 1–3 are functionally
+complete; the deferred Wave 2.3 / 2.4 managed-voice piece has been
+unblocked by Gemini's ephemeral-token API and folded into Wave 4
+below.
+
+**Wave 4 is shipped end-to-end through Slice 4** (rows 4.1–4.10 in
+the wave table). Migrations 0016 + 0017 applied to dev + prod Neon.
+The full managed-Gemini flow validated live in prod: admin Approve
+on `/admin/waitlist` grants a 2-month Max comp + 10000 credits
+atomically, `/api/me` returns `effectivePlan='max'` + `comp.active=true`
++ `geminiMode`, the desktop Settings → Gemini API toggle PATCHes
+the user to managed mode, `voice-agent.ts` mints a fresh ephemeral
+token per session via `POST /api/gateway/voice-key`, Bodhi connects
+to Gemini Live on v1alpha (`Startup] session.start() succeeded` in
+the logs), and the audio session is up. The desktop **Skills** pane
+is its own sidebar entry alongside Conversation / Core CLI / Dashboard
+/ Settings (refactored mid-slice from a Settings section based on
+user feedback). `/admin/comps` + `/admin/rates` are live read-only
+admin surfaces; revoke + editable rate-sheet land in Slice 5. Every
+`usage_events` insert now backfills `provider_cost_cents` from the
+seeded `rate_sheet` so `/admin/margins` reflects real cost-to-serve.
+
+The remaining work — Slice 5 — is author revenue (80/20 split on
+skill installs, `author_balances`, payout stubs), the monthly grant
+cron (re-grant comp credits at month boundary + free-tier $5/mo
+bootstrap), comp expiry UX (T-7d email + T+0 demotion + 30%-off-Pro
+CTA), learned skills (opt-in proactive-loop detection rule), and
+the `/admin` overview cards that fold all of the above into the
+business-analytics surface.
+
+### Beta launch chapter — managed Gemini, 2-month Max comp, Skills UI, analytics (2026-05-15)
+
+Wave 4 wires the rest of the monetization story. Four threads land
+together because each one's incentives shape the others:
+
+1. **2-month free Max comp for every approved beta user.** Approval
+   flips `beta_status='approved'` AND inserts a `plan_comps` row that
+   grants Max-tier caps + 10000 cr/mo for 60 days. After expiry the
+   user lands on Free unless they subscribe. We need real consumption
+   data to know which tier converts; charging at the door contaminates
+   that signal.
+2. **Managed Gemini via ephemeral tokens.** Supersedes the
+   24h-keychain-sub-key design from Wave 2.3 / 2.4. Per-session
+   tokens with 30-min TTL, minted on demand from the desktop's
+   existing bearer auth. No keychain entry, no renewal cron, blast
+   radius on token leak drops from 24h to 30 min.
+3. **Desktop Skills UI.** First in-app surface for "what can Sutando
+   do" — built-in + installed-from-Station + cloud-tools activated +
+   local + learned. Publish-to-Station from the desktop with the 80/20
+   author share made explicit on the form.
+4. **Analytics gap closure.** `usage_events.provider_cost_cents` is
+   defined but never populated; today's margin reports silently fall
+   back to retail credits and report the wrong number. A `rate_sheet`
+   table + middleware backfills wholesale cost on every event so
+   comp-burn analytics are answerable. New `/admin/comps` +
+   `/admin/rates` pages for operator control.
+
+**Why ephemeral tokens replace the 24h-sub-key design.** Google's
+`auth_tokens.create` API (see
+[`ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens`](https://ai.google.dev/gemini-api/docs/live-api/ephemeral-tokens))
+mints per-session tokens with configurable `expire_time`
+(default 30 min) and `new_session_expire_time` (default 1 min to
+start a session), optionally constrained to a specific Live model.
+Tokens are passed as the `apiKey` field of the standard Gemini SDK
+and the client connects to Google directly — no audio proxy. Billing
+attributes to the project that minted, which is our master Gemini
+project. This collapses Wave 2.3 / 2.4's "mint sub-keys, store in
+keychain, renew on heartbeat" architecture to a single REST endpoint
+on cloud + one extra await on desktop. The architectural-principle
+exception below is updated to match.
+
+**Why a 2-month Max comp specifically.** North Star item #3 ("do
+users upgrade past Free when friction is removed") can't be answered
+with the data we'd collect from a paid beta — we'd be conflating
+"product earned an upgrade" with "user had spare $29 at sign-up." 2
+months of Max ($199-equivalent × 2 = $398 retail) is generous enough
+that the constraint becomes "did the product earn it." Caps stay
+enforced (120 hr voice on Max), so we still gather real consumption
+patterns under realistic constraints.
+
+**Why provider_cost_cents now.** `lib/db/schema.ts:178` declares the
+column; `lib/admin/queries.ts:200` (`userMargins`) does
+`COALESCE(provider_cost_cents, cost_cents)` and silently substitutes
+retail credits when NULL. Today that's always — no emitter populates
+it. Comp-burn analytics that drive the "extend the comp policy?"
+decision can't run on retail numbers; they need wholesale ground
+truth. This is the single most load-bearing gap for "very clear
+monitoring on everything that incurs charges."
+
+**Schema additions:**
+
+```sql
+-- Migration 0016: plan comps (the 2-month Max beta gift lives here)
+CREATE TABLE plan_comps (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid REFERENCES users(id) ON DELETE cascade,
+  comp_plan varchar(16) NOT NULL,           -- 'plus' | 'pro' | 'max'
+  reason varchar(64) NOT NULL,              -- 'beta_admission' | 'influencer' | 'support_credit' | 'manual'
+  starts_at timestamptz NOT NULL DEFAULT now(),
+  ends_at timestamptz NOT NULL,
+  monthly_credit_grant int NOT NULL DEFAULT 0,
+  last_grant_at timestamptz,
+  granted_by uuid REFERENCES users(id),     -- admin user_id (NULL = system-auto)
+  notes text,
+  revoked_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX plan_comps_user_active_idx ON plan_comps (user_id)
+  WHERE revoked_at IS NULL AND ends_at > now();
+
+-- Migration 0017: wholesale rate sheet (drives provider_cost_cents)
+CREATE TABLE rate_sheet (
+  kind varchar(64) PRIMARY KEY,
+  provider varchar(32) NOT NULL,
+  unit_label varchar(32) NOT NULL,
+  wholesale_cents_per_unit numeric(12,6) NOT NULL,
+  retail_credits_per_unit numeric(10,3) NOT NULL,
+  notes text,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  updated_by uuid REFERENCES users(id)
+);
+
+-- Migration 0018: author revenue (80/20 split + payout state)
+ALTER TABLE credits_ledger ADD COLUMN recipient_user_id uuid REFERENCES users(id);
+-- For author-revenue rows: user_id = payer (installer), recipient_user_id = author.
+-- For normal debits / refunds: recipient_user_id = NULL.
+
+CREATE TABLE author_balances (
+  user_id uuid PRIMARY KEY REFERENCES users(id),
+  balance_credits int NOT NULL DEFAULT 0,
+  lifetime_earned_credits int NOT NULL DEFAULT 0,
+  lifetime_paid_credits int NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE author_payouts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid REFERENCES users(id),
+  amount_credits int NOT NULL,
+  status varchar(16) NOT NULL,              -- 'pending' | 'paid' | 'failed' | 'reversed'
+  stripe_transfer_id text,
+  paid_at timestamptz,
+  failure_reason text,
+  notes text,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Migration 0019: monthly grant idempotency (comp re-grant + free-$5/mo cron)
+CREATE TABLE monthly_grants (
+  user_id uuid REFERENCES users(id),
+  grant_kind varchar(32) NOT NULL,          -- 'free_tier_bootstrap' | 'comp_monthly' | 'subscription_renewal'
+  period_ymd varchar(7) NOT NULL,           -- '2026-05'
+  credits_granted int NOT NULL,
+  granted_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, grant_kind, period_ymd)
+);
+
+ALTER TABLE users ADD COLUMN gemini_mode varchar(16) NOT NULL DEFAULT 'byok';
+-- 'byok' | 'managed'. Free tier locked to 'byok' server-side; UI hides toggle.
+```
+
+**New code surfaces:**
+
+- **`lib/billing/effective-plan.ts`** — canonical resolver. Single
+  source for "what tier is this user on right now."
+  `effectivePlan(userId)` returns `{plan, source: 'subscription' |
+  'comp', paidPlan, compPlan?, expiresAt?}`. Comp wins iff
+  `comp_plan > paid_plan` by rank. Called from `/api/me`, every
+  gateway plan-gate, `checkAndConsume`, and the desktop tier panel.
+- **`lib/billing/rate-sheet.ts`** — middleware wrapping every
+  `usage_events` INSERT site (5 today:
+  `app/api/gateway/llm/[...path]/route.ts`,
+  `app/api/gateway/tts/[...path]/route.ts`,
+  `app/api/mcp/v1/route.ts`, `app/api/usage/route.ts`, internal MCP
+  routes). Populates `provider_cost_cents = round(rate.wholesale_cents_per_unit
+  × event.units)`. Soft-fails on unknown kinds (warn, don't block).
+- **`POST /api/gateway/voice-key`** — mints an ephemeral Live API
+  token via Google's `auth_tokens.create`. Requires paid
+  effectivePlan; pre-flight `checkAndConsume('voice.gemini', 0)` for
+  burst + cap. Returns `{token, expireTime, sessionExpire, model}`.
+  Logs an audit `usage_events` row with `kind='voice.gemini.token_mint'`,
+  units=1, no debit.
+- **Approval grant** — `app/admin/waitlist/actions.ts` `approveUser`
+  wraps INSERT INTO plan_comps + first-month `creditWalletOnce` in
+  one transaction. Comp revoke (`/admin/comps`) sets `revoked_at` +
+  recomputes effective plan inline.
+- **Monthly grant cron** (`lib/cron/monthly-comp-grants.ts`) —
+  iterates active comps + active subscriptions + free tier (if
+  bootstrap enabled), INSERTs `monthly_grants` ON CONFLICT DO NOTHING,
+  calls `creditWalletOnce` for each new row. Idempotent: safe to run
+  hourly.
+
+**`/api/me` extension:**
+
+Adds four fields, all derivable once 0016 + the `gemini_mode` column land:
+
+```ts
+{
+  // existing: id, email, plan, currentPeriodEnd, walletCredits,
+  //   autoTopupEnabled, autoTopupThresholdCredits,
+  //   hasSavedPaymentMethod, devices[], usagePanel
+  paidPlan: 'free' | 'plus' | 'pro' | 'max',     // users.plan
+  effectivePlan: 'free' | 'plus' | 'pro' | 'max', // resolver output
+  comp: null | {
+    active: true,
+    plan: 'max',
+    reason: 'beta_admission',
+    startsAt, endsAt, monthlyCreditGrant, daysRemaining,
+  },
+  geminiMode: 'byok' | 'managed',                 // users.gemini_mode
+}
+```
+
+The desktop tier panel (`SettingsWindow.swift:477`) renders the comp
+card above the wallet row when `comp.active`. The existing 1.5s
+polling timer (`SettingsWindow.swift:1569`) plus the 15s server
+roundtrip throttle is unchanged.
+
+**Desktop UI — Managed Gemini:**
+
+`Settings → Cloud account` gains a "Gemini API" sub-section with a
+two-radio toggle (BYOK vs Sutando-managed). Sutando-managed is
+disabled for Free + Plus-when-no-comp; copy explains.
+
+For already-onboarded BYOK users on Free whose comp activates: a
+one-shot banner appears above the Gemini section the first time
+`comp.active && geminiMode==='byok'` resolves true. Two buttons,
+"Switch to managed" / "Keep using my key." Dismissed forever after
+either click.
+
+`OnboardingWindow.swift` step 2 becomes a two-radio chooser instead
+of a key-only field:
+
+- **Sign in to Sutando + claim 2 months of Max free** (Recommended) —
+  routes through the existing CLI-login flow; on
+  `cloudAuthDidSignIn`, if comp is active, wizard sets
+  `geminiMode='managed'` and auto-advances to step 3.
+- **Bring my own Gemini key** — standard BYOK key field +
+  validate-against-`generativelanguage.googleapis.com`, current
+  behavior unchanged.
+
+**Desktop UI — Skills:**
+
+New `Settings → Skills` section (NSStackView, same idiom as existing
+sections in `SettingsWindow.swift:255`). Five collapsible groups:
+
+| Group | Source | Per-row actions |
+|---|---|---|
+| Installed from Station | `skill_installs` JOIN `skills WHERE kind='skill'` | Rate · Uninstall |
+| Cloud tools activated | `cloud_tool_sessions` JOIN `skills WHERE kind='cloud_tool'` | Deactivate (shows callsThisPeriod + creditsDebited) |
+| Built-in (35) | `skills/` walk on desktop | (collapsed by default, no actions) |
+| Local (private) | `$SUTANDO_PRIVATE_DIR/skills/` walk | Open files · Publish to Station… (paid only) |
+| Learned from your workflows (Beta) | `$SUTANDO_HOME/learned-skills/` walk | Review · Refine · Publish… · Delete |
+
+Filter chip strip at top: `All · Built-in · Station · Local ·
+Learned`. Search matches name + description across groups.
+
+**Publish-to-Station sheet** wraps the existing `station_publish_skill`
+voice tool (`skills/superpower-station/tools.ts:586`) in a native
+form: slug · display name · description · categories · price
+(Free / Paid, with a derived "Author share (80%): X credits / install"
+line when Paid) · tier required · bundle preview (file tree + tool
+count + size). Paid radio is disabled for Free users with copy
+"Upgrade to Plus to publish paid skills" — the only desktop Free→Plus
+upgrade prompt that isn't a cap-hit consequence.
+
+**Learned skills (Beta opt-in):**
+
+Default-off. Toggle in `Settings → Skills → Learned from your
+workflows` header: "Enable learned skills (Beta)".
+
+When enabled, the proactive loop watches workflow repetition. After
+N=4 similar invocation sequences within 30 days, it generates a
+candidate skill bundle at `$SUTANDO_HOME/learned-skills/<slug>/`:
+
+- `manifest.json` with `source: 'learned'`, `learned_from: 4`,
+  `learned_at: <iso>`, `enabled: true`
+- `SKILL.md` — auto-generated description (editable)
+- `tools.ts` — a single tool that calls Sutando's own `work` tool
+  with a templated prompt derived from the observed pattern (no
+  auto-generated scripts — too risky for beta)
+
+The loop queues a yes/no question via `pending-questions.md`. User
+says yes → skill is finalized. User says "refine" → reopens the
+manifest + prompt for edits. The new directory slots into
+`inline-tools.ts:800`'s existing walk between cloud-skills and
+private; no new infrastructure.
+
+Publishing a learned skill goes through the standard review flow
+plus one pre-flight that scrubs personal references (file paths,
+account names, email addresses) from `SKILL.md` before upload.
+
+**New admin surfaces:**
+
+- **`/admin/comps`** — table of active comps; columns: user, plan,
+  started, ends, monthly grant, total granted, burn-vs-grant ratio.
+  Per-row [Revoke] sets `revoked_at` + immediate plan recompute.
+  Filter chips by reason.
+- **`/admin/rates`** — editable wholesale rate sheet. Per-row
+  [Recompute provider_cost since…] backfills retroactively when a
+  rate changes. `rate_sheet.updated_by` carries the audit trail.
+- **`/admin` overview** gains four cards:
+  - **Comp burn this month** — sum of `provider_cost_cents` for
+    events attributed to users with `comp.active`. The beta runway
+    metric.
+  - **TTFP** (time-to-first-paid) — for users whose comps expired, %
+    converted to paid + days-to-conversion distribution.
+  - **Per-provider burn** — Google / Twilio / Cartesia / fal.ai
+    horizontal bars over 30d.
+  - **Author earnings leaderboard** — top 10 by
+    `author_balances.lifetime_earned_credits`.
+
+**Wave 4 — Beta launch:**
+
+| # | Item | Repo | Status |
+|---|---|---|---|
+| 4.1 | Migration 0016 + `lib/billing/effective-plan.ts` + admin approval grants 2mo Max comp atomically | agent-universe | **done** — `59ef4a2`; partial-index hot path for active-comp lookup; idempotent `grantComp` with dedup key per month bucket |
+| 4.2 | `/api/me` extension — paidPlan / effectivePlan / comp / geminiMode | agent-universe | **done** — `59ef4a2`; PATCH `/api/me geminiMode='managed'` 402s for free effectivePlan (server-side gate) |
+| 4.3 | `/admin/comps` page + revoke action | agent-universe | **partial** — `fe3b5db` ships read-only table (active comps, monthly grant, lifetime credits, days remaining, granted-by). Revoke action **deferred to Slice 5** |
+| 4.4 | Migration 0017 + `rate_sheet` seed + `lib/billing/rate-sheet.ts` middleware wrapping all 5 INSERT sites | agent-universe | **done** — `fe3b5db`; 16 kinds seeded across 8 providers; 5-min in-process cache; soft-fail on unknown kind |
+| 4.5 | `/admin/rates` page + retroactive recompute action | agent-universe | **partial** — `fe3b5db` ships read-only table with missing-rate callout. Editable form + recompute-since-date **deferred to Slice 5** |
+| 4.6 | `POST /api/gateway/voice-key` ephemeral-token minter | agent-universe | **done** — `2dccb0c`; uses `@google/genai authTokens.create` on v1alpha; per-session 30-min TTL. Iterated through `86048cc` to drop `liveConnectConstraints.model` (model-lock caused Google code 1011 on the Live WS handshake) |
+| 4.7 | `voice-agent.ts` calls voice-key when `geminiMode='managed'`, refresh 5 min before expiry | sutando | **done** — `cf0b376`; `resolveVoiceApiKey()` mints at session start and falls back to BYOK on mint failure. Long-session refresh **deferred to follow-up** (typical sessions fit in 30 min) |
+| 4.8 | Settings → Gemini mode toggle + comp-activation banner for BYOK users | sutando | **partial** — `8fb1842` ships the BYOK/Managed radio toggle + active-comp card in the Settings → Gemini API section. One-shot activation banner for already-onboarded BYOK users **deferred** |
+| 4.9 | OnboardingWindow step 2 — two-radio (managed / BYOK) | sutando | **deferred** — only affects new-user onboarding; existing BYOK users get the same option via Settings |
+| 4.10 | Settings → Skills section (view + filter + uninstall + deactivate) | sutando | **done** — `7ec12a4` shipped as a Settings section, then `4dd75e1` refactored Skills into its own sidebar pane alongside Conversation / Core CLI / Dashboard / Settings per user feedback. 4 groups (Installed / Cloud tools / Local / Built-in collapsible). 30s cloud-fetch throttle while pane is visible. Uninstall route (`/api/skills/[id]/uninstall` in `c4ad8e5`) hard-deletes + clears `cloud_tool_sessions` for cloud tools |
+| 4.11 | Settings → Skills → Publish sheet (paid only) | sutando | **partial** — desktop "Publish a skill →" button deep-links to `/superpower/publish` web form (existing flow covers it). Native sheet **deferred** |
+| 4.12 | Migration 0018 + 80/20 split on skill install + author_balances materializer | agent-universe | pending (Slice 5) |
+| 4.13 | Author balance card on dashboard + Settings (lifetime earned, payout stub) | both | pending (Slice 5) |
+| 4.14 | Migration 0019 + monthly_grants idempotency + monthly comp + free-$5 grant cron | agent-universe | pending (Slice 5) |
+| 4.15 | `/admin` overview — comp burn, TTFP, per-provider burn, author leaderboard | agent-universe | pending (Slice 5) |
+| 4.16 | Learned skills directory + opt-in toggle + one proactive-loop detection rule | sutando | pending (Slice 5) |
+| 4.17 | Comp expiry T-7d Loops email + T+0 demotion + 30%-off-Pro CTA | both | pending (Slice 5) |
+
+**Mid-flight fixes that emerged during end-to-end validation:**
+
+- **Clerk middleware was 404'ing `/api/me` + `/api/gateway/*`** for
+  Bearer-only desktop calls. Both routes authenticate inside the
+  handler (via `authedKeyFromRequest`) — they were missing from
+  `middleware.ts`'s `isPublicRoute` matcher and getting
+  protect-rewritten to `/404`. Same long-standing bug had been
+  silently breaking `/api/gateway/llm` (vision/image) for managed-mode
+  prod calls since Wave 2; surfaced when Settings tried to fetch
+  the new `/api/me` shape. Fixed in agent-universe `4686efa`.
+- **Bodhi-realtime-agent calls `new GoogleGenAI({ apiKey })` without
+  `httpOptions: { apiVersion: 'v1alpha' }`**. Ephemeral auth tokens
+  are v1alpha-only — Bodhi's WebSocket connect got HTTP 404 from
+  Google. Patched all 3 GoogleGenAI constructor sites in
+  `node_modules/bodhi-realtime-agent/dist/index.js` and wired
+  `patch-package` (as a production dep, not devDep, because the
+  bundle's `npm ci --omit=dev` strips devDeps). `app/build-app.sh`
+  now stages `patches/` into the bundle so the bundled `npm ci`
+  postinstall re-applies the diff on every install. Fixed in
+  sutando `a0cdef0`.
+- **Unconstrained ephemeral tokens.** Initial mint used
+  `liveConnectConstraints: { model }` — locking the token to one
+  model — and Bodhi's actual connect model didn't match exactly,
+  returning code 1011 "Internal error" on the WS handshake. For
+  beta we drop the constraint; the 30-min TTL is the primary
+  blast-radius bound. Fixed in agent-universe `86048cc`.
+- **Skills extracted from Settings to its own sidebar pane.** User
+  feedback during testing: Settings was the wrong home for skill
+  management — too buried in one long scrolling pane. New
+  `SkillsViewController` lives as a first-class pane in
+  `UnifiedMainWindow`'s left sidebar (`square.grid.2x2` icon,
+  between Dashboard and Settings). Fixed in sutando `4dd75e1`.
+
+**Authoring docs:** `agent-universe/STATION_AUTHORING.md` (commit
+`701c9ed`) covers both authoring paths — skill bundles (manifest +
+`SKILL.md` + optional inline tools) and cloud-tool MCP registration
+(Streamable HTTP shape, pricing config, `internal:` vs `https:`
+upstreams, rate-sheet wholesale row for accurate margin reporting,
+admin review semantics).
 
 ### Beta-application + landing redesign (2026-05-14)
 
@@ -332,7 +703,11 @@ These constrain every implementation decision below:
 
 1. **Cloud proxies API calls; desktop does not hold provider keys.**
    Exception: Gemini Live needs direct desktop → Google for latency,
-   so cloud mints 24h ephemeral sub-keys stored in macOS keychain.
+   so cloud mints **per-session ephemeral tokens** (~30 min TTL,
+   model-constrained) via Google's `auth_tokens.create` API on
+   demand. Tokens live in desktop process memory only — no keychain
+   entry, no renewal cron. Supersedes the original "24h sub-key
+   stored in keychain" design (see Wave 4 chapter, 2026-05-15).
 2. **Skills are signed code with declared permissions.** Marketplace
    skills must be signed by Sutando's Developer ID before publish.
    Manifest declares permission surfaces (filesystem, network,
@@ -770,8 +1145,8 @@ each bucket; buckets can partially overlap.
 |---|---|---|---|
 | 2.1 | `/api/gateway/llm` Gemini proxy + plan gate + per-user attribution (header `X-Sutando-Kind` decides debit: image=5cr, video=60cr, text/vision none) | agent-universe | done |
 | 2.2 | `/api/gateway/tts` for Cartesia; image/video share `/api/gateway/llm` since they hit the same Gemini API surface | agent-universe | done |
-| 2.3 | Ephemeral Gemini Live key minter `/api/gateway/voice-key` (24h, per-user, daily quota) | agent-universe | deferred — voice stays BYOK until Vertex AI Live release |
-| 2.4 | Desktop reads ephemeral key from keychain on startup; refreshes on heartbeat | sutando | deferred — paired with 2.3 |
+| 2.3 | Ephemeral Gemini Live key minter `/api/gateway/voice-key` | agent-universe | **superseded by Wave 4.6** — Google's `auth_tokens.create` lets us mint per-session tokens (~30 min TTL) on demand; no 24h keychain entry, no renewal cron |
+| 2.4 | Desktop reads ephemeral key from keychain on startup; refreshes on heartbeat | sutando | **superseded by Wave 4.7** — voice-agent calls `/api/gateway/voice-key` at session start, refresh 5 min before expiry; no keychain involvement |
 | 2.5 | Hosted Twilio relay: number provisioning, webhook relay, inbound forwarder | agent-universe | deferred — dedicated follow-up session |
 | 2.6 | Desktop `phone-conversation` skill switches to cloud-relay URL when paid tier active | sutando | deferred — paired with 2.5 |
 | 2.7 | `VERIFIED_CALLERS` migrate from `.env` to cloud-managed allowlist | both | deferred — paired with 2.5 |
@@ -780,6 +1155,13 @@ each bucket; buckets can partially overlap.
 | 2.10 | Desktop conditional gateway routing — `gatewayBaseUrl(kind)` helper + try-gateway-fall-back-to-BYOK pattern in `browser-tools.ts` (Gemini vision) | sutando | done — Gemini vision (existing), Cartesia TTS via REST `/tts/bytes` (`cartesia-tts.ts` falls back to BYOK WebSocket on non-cap failures), image / video generation via `genai.Client(http_options=HttpOptions(base_url=…))` with `X-Sutando-Kind` headers. 402 / 429 surface as clean "top up" / "rate limited" errors |
 
 ### Wave 3 — Skill marketplace + cloud tools
+
+The Wave 3 scaffold (catalog tables, install/review/submit routes,
+admin review, desktop `skill-installer`) is the foundation for the
+release-grade **Superpower Station** — see [`STATION.md`](STATION.md)
+for the full design (mental model, MCP gateway, agentic UX, bootstrap
+content, phases). Wave 3 rows below stay as the historical scaffold;
+new work tracks against the Station phase table in `STATION.md`.
 
 | # | Item | Repo | Status |
 |---|---|---|---|
@@ -870,6 +1252,44 @@ Things to weigh in on before we start implementation:
 5. **Feedback skill behavior** — does the `report-feedback` skill
    always take a voice note, or can users mark "no narration" and
    just attach context? can mark "no narration"
+6. **Comp grant timing on approval** — atomic immediate 10k-credit
+   grant + Max plan caps, or staged "Max for caps now, credits drip
+   monthly"?
+   **Resolved 2026-05-15: atomic immediate grant.** The first email
+   reads "you're in with $100 of credit ready" instead of "you'll
+   accrue credits monthly." Cheap to fix mistakes via `/admin/comps`
+   revoke; the runway-burn cost of an accidental approval is bounded
+   by the same caps that limit a legitimate Max user.
+7. **`geminiMode` default for already-onboarded BYOK users when their
+   comp activates** — auto-flip to managed, or keep BYOK with banner?
+   **Resolved 2026-05-15: keep BYOK + show one-shot banner.** Users
+   dislike surprise mode changes; the banner offers the switch
+   without performing it for them. New users who go through Onboarding
+   step 2's "Sign in to Sutando" path get `geminiMode='managed'` set
+   explicitly — that's user-chosen, not surprise.
+8. **Author share on cloud-tool calls** (separate from skill installs
+   which are 80/20). Should Sutando-authored cloud tools also pay
+   80% to the operator? **Resolved 2026-05-15: 100% Sutando on
+   Sutando-authored cloud tools, 80/20 on third-party-authored cloud
+   tools when they exist** (post-beta, since beta-scope marketplace
+   doesn't yet accept third-party cloud-tool registrations from non-
+   Sutando authors — only skills).
+9. **Free-tier $5/mo grant timing** — on signup, or first-of-month?
+   **Resolved 2026-05-15: first-of-month idempotent grant.** Matches
+   subscription cadence; simpler accounting. `monthly_grants` table
+   keys on `(user_id, 'free_tier_bootstrap', 'YYYY-MM')` so the cron
+   is safe to run hourly.
+10. **Learned skills — opt-in or default-on?**
+    **Resolved 2026-05-15: default-OFF for beta** with a clear
+    "Enable learned skills (Beta)" toggle in Settings → Skills. The
+    proactive-loop already runs; this just gates the "save as skill"
+    action. Privacy posture stays conservative; users opt into the
+    feature explicitly.
+11. **Comp expiry UX** — silent demotion or active conversion event?
+    **Resolved 2026-05-15: active conversion event.** T-7d Loops
+    email + Settings/dashboard banner; T+0 plan demotion with a
+    "convert to paid Pro 30% off first month" one-click CTA. Turns
+    the comp end date from a churn moment into an upgrade moment.
 
 ## Cross-references
 
@@ -883,11 +1303,18 @@ Things to weigh in on before we start implementation:
 
 User actions required before paid beta users can complete an install:
 
-1. **Migrations** — `npm run db:migrate` against Neon applies 0004 → 0009
+1. **Migrations** — `npm run db:migrate` against Neon applies 0004 → 0015
    (beta gate, billing caps, feedback, skills, memory snapshots,
-   auto-topup payment method + mutex).
+   auto-topup payment method + mutex, Superpower Station schema,
+   cloud-tool sessions unique idx, **0014 pgvector + rag_documents**,
+   **0015 deprecate cloud-delegate**). Migration 0014 requires the
+   `vector` extension which Neon supports natively (`CREATE EXTENSION`
+   on first run is included).
 2. **Seed cloud tools** — `psql $DATABASE_URL -f lib/db/seeds/cloud-tools.sql`
-   adds the three v1 cloud tools (delegate / research / recall) to the catalog.
+   seeds the original 3 cloud tools (delegate / research / recall).
+   Wave A flips `cloud-delegate` to `deprecated` via migration 0015;
+   `cloud-research` + `cloud-recall` get real backends in code
+   without any seed change.
 3. **Stripe** — create Plus / Pro / Max products at $29 / $99 / $199;
    set `STRIPE_PRICE_{PLUS,PRO,MAX}_MONTHLY`; add
    `checkout.session.completed` to the webhook event subscriptions
@@ -903,6 +1330,23 @@ User actions required before paid beta users can complete an install:
 5. **Managed-gateway provider keys** — `GEMINI_MASTER_API_KEY` +
    `CARTESIA_MASTER_API_KEY`. Without them, gateway routes 503 and the
    desktop falls back to BYOK.
+   - **`TAVILY_API_KEY`** (added Phase 6 Wave A) — backs the
+     `deep-research` cloud tool's web-search step. Without it, the
+     tool returns a "not configured" error and the gateway refunds
+     the call.
+   - **`DEEPL_API_KEY`** (added Phase 6 Wave D) — backs the
+     `text-translate-quality` cloud tool. Use a `:fx`-suffixed key
+     for the free tier (500k chars/mo) — the route auto-detects
+     and hits api-free.deepl.com vs api.deepl.com.
+   - **`FAL_KEY`** (added Phase 6 Wave D) — backs the
+     `image-bg-remove` cloud tool via fal.ai's `imageutils/rembg`
+     model. ~$0.001 per call wholesale.
+   - **No extra key for `pdf-extract-tables`** (Phase 6 Wave E) — uses
+     the existing `GEMINI_MASTER_API_KEY` for inline multimodal PDF
+     parsing. Inline-only, max 20 MB per request.
+   - **No key needed** for `scrape-and-extract` (Jina Reader free
+     tier), `youtube-transcript` (scrapes player response —
+     no auth), or `pdf-fill-and-sign` (self-hosted pdf-lib).
 6. **Tigris bucket** (for memory snapshots) — provision a bucket, set
    `AWS_ENDPOINT_URL_S3` + `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`
    + `AWS_REGION` + `OBJECT_STORE_BUCKET`. Without them, the snapshot

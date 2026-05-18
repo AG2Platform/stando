@@ -47,6 +47,8 @@ import {
 	recordError as cloudRecordError,
 	onCapHit as cloudOnCapHit,
 	flush as cloudFlush,
+	fetchMeSnapshot,
+	mintVoiceKey,
 	type CapHitInfo,
 } from './cloud-client.js';
 
@@ -89,11 +91,21 @@ function assertGeminiKey(name: string, value: string): void {
 }
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? '';
-assertGeminiKey('GEMINI_API_KEY', GEMINI_API_KEY);
+// Wave 4 (managed Gemini): a user who picked "Sign in to Sutando" in
+// onboarding step 2 won't have a BYOK Gemini key set. Their voice
+// session uses an ephemeral token minted on demand by
+// /api/gateway/voice-key, and subagent text LLM stays unconfigured
+// until the user opts in to BYOK or we route the subagent path
+// through the gateway. So: only hard-assert the key when it's set;
+// if it's missing we lazy-check at session-start time once we know
+// the user's geminiMode.
+if (GEMINI_API_KEY) {
+	assertGeminiKey('GEMINI_API_KEY', GEMINI_API_KEY);
+}
 // Optional: separate key for the Gemini Live voice session. Lets users put voice
 // on a free-tier key (unlimited on free tier, rate-limited) while keeping text/
 // vision/STT on a paid-tier key. Falls back to GEMINI_API_KEY when unset.
-const GEMINI_VOICE_API_KEY = process.env.GEMINI_VOICE_API_KEY || GEMINI_API_KEY;
+const GEMINI_VOICE_API_KEY_ENV = process.env.GEMINI_VOICE_API_KEY || GEMINI_API_KEY;
 // Only shape-check the voice key if user opted in — silent fallback to the
 // main key is the backward-compatible path.
 if (process.env.GEMINI_VOICE_API_KEY) {
@@ -155,10 +167,59 @@ if (CARTESIA_API_KEY) {
 // Routes with the voice key so free-tier voice setups don't leak subagent
 // traffic onto the paid GEMINI_API_KEY. Deliberate tradeoff: subagents lose
 // access to any paid-tier quota on GEMINI_API_KEY (rate-limited on free).
-// If subagent throughput becomes a concern, revisit by giving subagents
-// their own key or routing to `createGoogleGenerativeAI({apiKey:GEMINI_API_KEY})`.
-const google = createGoogleGenerativeAI({ apiKey: GEMINI_VOICE_API_KEY });
+// Managed-mode users without a BYOK key get a placeholder here; subagent
+// text LLM calls will fail until we route them through /api/gateway/llm
+// (Wave 4.7 follow-up). Voice itself uses ephemeral tokens, not this.
+const google = createGoogleGenerativeAI({ apiKey: GEMINI_VOICE_API_KEY_ENV || 'BYOK_MISSING_managed_voice_only' });
 let sessionRef: VoiceSession | null = null;
+
+// =============================================================================
+// Wave 4: Managed-Gemini key resolver
+// =============================================================================
+//
+// Called once at session start. When the user is on geminiMode='managed'
+// (paid effectivePlan, opted in via Settings), we mint an ephemeral Live
+// API token via /api/gateway/voice-key. Otherwise (BYOK), we use the
+// GEMINI_VOICE_API_KEY_ENV resolved at module load.
+//
+// On any managed-path failure (offline, gateway misconfigured, comp
+// expired mid-session) we fall back to GEMINI_VOICE_API_KEY_ENV if it's
+// set. If neither is available, voice-agent.ts surfaces the error to
+// the user via the existing cap-hit / startup-error machinery.
+//
+// Tokens default to a 30-min TTL on the server side. bodhi-realtime-agent
+// handles session resumption automatically with the same token; if a
+// session outlasts the TTL the connection drops and we'd need a fresh
+// mint. For beta we accept this — typical voice sessions are minutes,
+// not hours. Long-session refresh handling lands in a follow-up.
+async function resolveVoiceApiKey(): Promise<{ key: string; mode: 'byok' | 'managed' | 'managed-fallback' }> {
+	const snapshot = await fetchMeSnapshot();
+	const mode = snapshot?.geminiMode ?? 'byok';
+	if (mode !== 'managed') {
+		if (!GEMINI_VOICE_API_KEY_ENV) {
+			throw new Error(
+				'No Gemini API key configured. Set GEMINI_API_KEY in .env or sign in to Sutando and enable managed Gemini in Settings.',
+			);
+		}
+		return { key: GEMINI_VOICE_API_KEY_ENV, mode: 'byok' };
+	}
+	const mint = await mintVoiceKey({ model: VOICE_NATIVE_AUDIO_MODEL });
+	if (mint?.token) {
+		console.log(`${ts()} [Voice] Managed Gemini token minted (expires ${mint.expireTime})`);
+		return { key: mint.token, mode: 'managed' };
+	}
+	if (GEMINI_VOICE_API_KEY_ENV) {
+		console.warn(
+			`${ts()} [Voice] Managed Gemini mint failed; falling back to BYOK key. ` +
+				`Check cloud sign-in + paid plan / comp status.`,
+		);
+		return { key: GEMINI_VOICE_API_KEY_ENV, mode: 'managed-fallback' };
+	}
+	throw new Error(
+		'Managed Gemini mint failed and no BYOK key is set. ' +
+			'Sign in to Sutando + enable managed Gemini in Settings, or set GEMINI_API_KEY in .env.',
+	);
+}
 
 function ts(): string { return new Date().toISOString().slice(11, 23); }
 
@@ -223,6 +284,22 @@ function applyModeRequest() {
 	}
 }
 setInterval(applyModeRequest, 1_000);
+
+// Poll state/voice-key-reload.request every 1s — Settings writes this file
+// after a successful PATCH /api/me on the geminiMode toggle (BYOK ↔ Managed).
+// resolveVoiceApiKey() runs only at VoiceSession construction, so the new
+// mode would otherwise sit unused until the next launchd-driven restart.
+// On detection we exit; launchd's KeepAlive (ThrottleInterval=5s) brings
+// us back up with a fresh resolveVoiceApiKey() call.
+function applyVoiceKeyReloadRequest() {
+	const reqPath = statePath('state/voice-key-reload.request');
+	if (!existsSync(reqPath)) return;
+	try { unlinkSync(reqPath); } catch { /* ignore */ }
+	console.log(`${ts()} [Voice] Key-reload requested by Settings — exiting for launchd restart`);
+	// Small grace period so the log line + any in-flight writes flush.
+	setTimeout(() => process.exit(0), 200);
+}
+setInterval(applyVoiceKeyReloadRequest, 1_000);
 
 // Detect active meeting on startup — sync so it runs before first greeting
 try {
@@ -895,10 +972,11 @@ async function main() {
 		}
 	}
 
+	const resolvedKey = await resolveVoiceApiKey();
 	const session = new VoiceSession({
 		sessionId: SESSION_ID,
 		userId: 'user',
-		apiKey: GEMINI_VOICE_API_KEY,
+		apiKey: resolvedKey.key,
 		agents: [mainAgent],
 		initialAgent: 'main',
 		port: PORT,

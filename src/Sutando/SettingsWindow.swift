@@ -32,6 +32,17 @@ private func sutandoHomePath() -> String {
 
 private func envFilePath() -> String { sutandoHomePath() + "/.env" }
 
+/// Touch a sentinel file the voice-agent polls. Voice-agent reads
+/// `geminiMode` once at session start via `resolveVoiceApiKey()`; this
+/// nudges it to self-exit so launchd KeepAlive restarts it with fresh
+/// state. Used after a successful PATCH /api/me geminiMode toggle.
+private func signalVoiceKeyReload() {
+    let dir = sutandoHomePath() + "/state"
+    try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+    let path = dir + "/voice-key-reload.request"
+    FileManager.default.createFile(atPath: path, contents: Data(), attributes: nil)
+}
+
 // Marker for "user has completed initial setup". Created when the user
 // clicks Save with a valid Gemini key. Absence triggers the first-launch
 // auto-open behavior in main.swift.
@@ -194,6 +205,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var tierBarsStack: NSStackView?
     private var tierPanelEmptyLabel: NSTextField?
     private var lastMeFetchTs: TimeInterval = 0
+    // Wave 4.8 — Gemini API mode toggle. Populated from the same /api/me
+    // poll that drives the tier panel; PATCH /api/me on radio change.
+    private var geminiSectionContainer: NSStackView?
+    private var geminiModeBYOKRadio: NSButton?
+    private var geminiModeManagedRadio: NSButton?
+    private var geminiModeStatusLabel: NSTextField?
+    private var geminiCompCardLabel: NSTextField?
+    private var geminiCompCardContainer: NSStackView?
+    // Skills section moved to SkillsViewController.swift (Wave 4.10
+    // refactor — own pane in the unified sidebar).
     private var claudeStatusLabel: NSTextField?
     private var claudeActionButton: NSButton?
     private var claudeSpinner: NSProgressIndicator?
@@ -299,6 +320,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         stack.addArrangedSubview(sectionHeader("Plan & usage"))
         stack.addArrangedSubview(tierUsagePanel())
 
+        // Gemini API — managed (ephemeral tokens via Sutando) vs BYOK
+        // (key entered below in API keys section). Wave 4.8.
+        stack.addArrangedSubview(sectionHeader("Gemini API"))
+        stack.addArrangedSubview(geminiSection())
+
         // API keys
         stack.addArrangedSubview(sectionHeader("API keys"))
         for field in SettingsField.basic {
@@ -359,6 +385,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // Background services
         stack.addArrangedSubview(sectionHeader("Background services"))
         stack.addArrangedSubview(servicesRow())
+
+        // (Skills moved out of Settings into its own sidebar pane —
+        // see SkillsViewController.swift wired into UnifiedMainWindow.)
 
         // Feedback / bug report — natural Settings affordance for ⌃⇧F.
         stack.addArrangedSubview(sectionHeader("Help us improve"))
@@ -583,6 +612,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             auto.state = .off
             auto.isEnabled = false
             empty.isHidden = false
+            applyGeminiSection(snapshot: nil)
             return
         }
 
@@ -604,6 +634,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 bars.addArrangedSubview(makeUsageBar(row: row))
             }
         }
+
+        // Wave 4.8 — drive the Gemini section from the same snapshot.
+        applyGeminiSection(snapshot: s)
     }
 
     private func makeUsageBar(row: CloudUsagePanelRow) -> NSView {
@@ -702,6 +735,185 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         // Force a refresh on next poll tick.
         lastMeFetchTs = 0
     }
+
+    // MARK: - Gemini API (Wave 4.8)
+
+    private func geminiSection() -> NSView {
+        let outer = NSStackView()
+        outer.orientation = .vertical
+        outer.alignment = .leading
+        outer.spacing = 8
+        outer.translatesAutoresizingMaskIntoConstraints = false
+
+        // Comp card. Hidden by default; populated by applyGeminiSection
+        // when /api/me reports an active comp.
+        let compCard = NSStackView()
+        compCard.orientation = .horizontal
+        compCard.alignment = .firstBaseline
+        compCard.spacing = 8
+        compCard.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        compCard.translatesAutoresizingMaskIntoConstraints = false
+        compCard.wantsLayer = true
+        compCard.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.10).cgColor
+        compCard.layer?.cornerRadius = 8
+        compCard.isHidden = true
+        let compLabel = NSTextField(labelWithString: "")
+        compLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        compLabel.lineBreakMode = .byWordWrapping
+        compLabel.maximumNumberOfLines = 3
+        compLabel.preferredMaxLayoutWidth = 480
+        geminiCompCardLabel = compLabel
+        compCard.addArrangedSubview(compLabel)
+        geminiCompCardContainer = compCard
+        outer.addArrangedSubview(compCard)
+
+        // Two radio buttons, BYOK vs Managed. radio buttons that share
+        // the same `action:` and parent are auto-grouped on macOS.
+        let byok = NSButton(
+            radioButtonWithTitle: "Use my own Gemini key  (Free tier or developer mode)",
+            target: self,
+            action: #selector(setGeminiMode(_:))
+        )
+        byok.font = .systemFont(ofSize: 12)
+        byok.tag = 0
+        byok.state = .on
+        geminiModeBYOKRadio = byok
+        outer.addArrangedSubview(byok)
+
+        let byokHint = NSTextField(labelWithString: "Key entered below in API keys; stays on this Mac. Voice connects direct to Google.")
+        byokHint.font = .systemFont(ofSize: 11)
+        byokHint.textColor = .secondaryLabelColor
+        byokHint.preferredMaxLayoutWidth = 480
+        byokHint.maximumNumberOfLines = 2
+        byokHint.translatesAutoresizingMaskIntoConstraints = false
+        let byokHintInset = NSStackView()
+        byokHintInset.orientation = .horizontal
+        byokHintInset.alignment = .firstBaseline
+        byokHintInset.edgeInsets = NSEdgeInsets(top: 0, left: 22, bottom: 0, right: 0)
+        byokHintInset.addArrangedSubview(byokHint)
+        outer.addArrangedSubview(byokHintInset)
+
+        let managed = NSButton(
+            radioButtonWithTitle: "Sutando-managed  (Plus / Pro / Max — voice, vision, image, video)",
+            target: self,
+            action: #selector(setGeminiMode(_:))
+        )
+        managed.font = .systemFont(ofSize: 12)
+        managed.tag = 1
+        managed.state = .off
+        managed.isEnabled = false
+        geminiModeManagedRadio = managed
+        outer.addArrangedSubview(managed)
+
+        let managedHint = NSTextField(labelWithString: "We mint per-session Gemini Live tokens (~30 min); your audio still flows direct to Google. No keys to manage.")
+        managedHint.font = .systemFont(ofSize: 11)
+        managedHint.textColor = .secondaryLabelColor
+        managedHint.preferredMaxLayoutWidth = 480
+        managedHint.maximumNumberOfLines = 2
+        managedHint.translatesAutoresizingMaskIntoConstraints = false
+        let managedHintInset = NSStackView()
+        managedHintInset.orientation = .horizontal
+        managedHintInset.alignment = .firstBaseline
+        managedHintInset.edgeInsets = NSEdgeInsets(top: 0, left: 22, bottom: 0, right: 0)
+        managedHintInset.addArrangedSubview(managedHint)
+        outer.addArrangedSubview(managedHintInset)
+
+        // Status line: "Sign in to enable managed mode" / "Active" / etc.
+        let status = NSTextField(labelWithString: "Sign in to Sutando to enable managed Gemini.")
+        status.font = .systemFont(ofSize: 11, weight: .medium)
+        status.textColor = .secondaryLabelColor
+        geminiModeStatusLabel = status
+        outer.addArrangedSubview(status)
+
+        geminiSectionContainer = outer
+        return outer
+    }
+
+    private func applyGeminiSection(snapshot: CloudMeSnapshot?) {
+        guard let byok = geminiModeBYOKRadio,
+              let managed = geminiModeManagedRadio,
+              let status = geminiModeStatusLabel,
+              let compCard = geminiCompCardContainer,
+              let compLabel = geminiCompCardLabel else { return }
+
+        guard let s = snapshot else {
+            byok.state = .on
+            managed.state = .off
+            managed.isEnabled = false
+            status.stringValue = "Sign in to Sutando to enable managed Gemini."
+            status.textColor = .secondaryLabelColor
+            compCard.isHidden = true
+            return
+        }
+
+        // Active comp card — show whenever a comp is active, regardless of mode.
+        if let comp = s.comp, comp.active {
+            let endsAt = String(comp.endsAt.prefix(10))
+            compLabel.stringValue = String(
+                format: "🎁 Beta gift active — %@ tier through %@ (%d days left). %d cr/mo grant.",
+                comp.plan.capitalized,
+                endsAt,
+                comp.daysRemaining,
+                comp.monthlyCreditGrant
+            )
+            compCard.isHidden = false
+        } else {
+            compCard.isHidden = true
+        }
+
+        // Managed radio is enabled iff effective plan is paid.
+        let effective = (s.effectivePlan ?? s.plan).lowercased()
+        let isPaid = effective != "free"
+        managed.isEnabled = isPaid
+
+        let currentMode = (s.geminiMode ?? "byok").lowercased()
+        byok.state = (currentMode == "managed") ? .off : .on
+        managed.state = (currentMode == "managed") ? .on : .off
+
+        if currentMode == "managed" {
+            status.stringValue = "✓ Managed mode active — ephemeral tokens for voice; gateway for vision / image / video."
+            status.textColor = .systemGreen
+        } else if !isPaid {
+            status.stringValue = "Upgrade to Plus, Pro, or Max — or get a 2-month Max comp on beta approval — to enable managed mode."
+            status.textColor = .secondaryLabelColor
+        } else {
+            status.stringValue = "BYOK active. Switch to managed to hand Gemini key management to Sutando."
+            status.textColor = .secondaryLabelColor
+        }
+    }
+
+    @objc private func setGeminiMode(_ sender: NSButton) {
+        let mode = sender.tag == 1 ? "managed" : "byok"
+        // Optimistic UI: flip immediately, revert on server reject.
+        let previousByok = geminiModeBYOKRadio?.state ?? .on
+        let previousManaged = geminiModeManagedRadio?.state ?? .off
+        CloudClient.setGeminiMode(mode) { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch result {
+                case .ok:
+                    // Next poll will confirm; force refresh sooner so the
+                    // status line + comp card reflect the new state.
+                    self.lastMeFetchTs = 0
+                    // Bounce voice-agent so resolveVoiceApiKey() re-runs with
+                    // the new mode on its next session — otherwise the toggle
+                    // would only take effect after a manual app restart.
+                    signalVoiceKeyReload()
+                case .requiresPaid:
+                    self.geminiModeBYOKRadio?.state = previousByok
+                    self.geminiModeManagedRadio?.state = previousManaged
+                    self.geminiModeStatusLabel?.stringValue = "Managed mode requires Plus, Pro, or Max."
+                    self.geminiModeStatusLabel?.textColor = .systemOrange
+                case .failure(let detail):
+                    self.geminiModeBYOKRadio?.state = previousByok
+                    self.geminiModeManagedRadio?.state = previousManaged
+                    self.geminiModeStatusLabel?.stringValue = "Failed to update mode: \(detail)"
+                    self.geminiModeStatusLabel?.textColor = .systemRed
+                }
+            }
+        }
+    }
+
 
     private func fieldRow(_ field: SettingsField) -> NSView {
         let row = NSStackView()

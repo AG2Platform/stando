@@ -209,6 +209,100 @@ export function gatewayBaseUrl(kind: 'llm' | 'tts'): { url: string; token: strin
 	return { url: `${base}/api/gateway/${kind}/`, token: auth.token };
 }
 
+// =============================================================================
+// Managed-Gemini helpers (Wave 4 — supersedes 24h-keychain-sub-key design)
+// =============================================================================
+
+export interface MeSnapshot {
+	id: string;
+	email: string;
+	plan: string;
+	paidPlan?: string;
+	effectivePlan?: string;
+	walletCredits: number;
+	geminiMode?: 'byok' | 'managed';
+	comp?: null | {
+		active: boolean;
+		plan: string;
+		reason: string;
+		startsAt: string;
+		endsAt: string;
+		monthlyCreditGrant: number;
+		daysRemaining: number;
+	};
+	autoTopupEnabled?: boolean;
+	hasSavedPaymentMethod?: boolean;
+}
+
+let _meCache: { snapshot: MeSnapshot; fetchedAt: number } | null = null;
+const ME_CACHE_TTL_MS = 60 * 1000;
+
+/**
+ * Fetch a fresh /api/me snapshot. 60-second in-process cache. Returns
+ * null when the user is signed out or the cloud call fails.
+ *
+ * Callers that need a guaranteed-fresh value (e.g., right after a
+ * mode-flip in Settings) should call invalidateMeCache() first.
+ */
+export async function fetchMeSnapshot(force = false): Promise<MeSnapshot | null> {
+	if (!force && _meCache && Date.now() - _meCache.fetchedAt < ME_CACHE_TTL_MS) {
+		return _meCache.snapshot;
+	}
+	try {
+		const res = await cloudFetch('/api/me');
+		if (!res || !res.ok) return _meCache?.snapshot ?? null;
+		const snapshot = (await res.json()) as MeSnapshot;
+		_meCache = { snapshot, fetchedAt: Date.now() };
+		return snapshot;
+	} catch {
+		return _meCache?.snapshot ?? null;
+	}
+}
+
+export function invalidateMeCache(): void {
+	_meCache = null;
+}
+
+export interface VoiceKeyMint {
+	token: string;
+	expireTime: string;
+	newSessionExpireTime: string;
+	model: string;
+	apiVersion: string;
+}
+
+/**
+ * Mint a Gemini Live ephemeral token via /api/gateway/voice-key.
+ *
+ * Returns null when:
+ *   - not signed in
+ *   - effective plan is free (402 from server)
+ *   - cap exhausted / fair-use burst (429 from server)
+ *   - upstream mint failed (502)
+ *
+ * Callers should fall back to BYOK on null. The token's `expireTime`
+ * is the server-truth UTC ISO string — desktop schedules refresh from
+ * it directly rather than re-computing locally.
+ */
+export async function mintVoiceKey(opts: { model?: string; ttlSeconds?: number } = {}): Promise<VoiceKeyMint | null> {
+	try {
+		const res = await cloudFetch('/api/gateway/voice-key', {
+			method: 'POST',
+			body: JSON.stringify(opts),
+		});
+		if (!res) return null;
+		if (!res.ok) {
+			const detail = await res.text().catch(() => '');
+			console.warn(`[mintVoiceKey] ${res.status} — ${detail.slice(0, 200)}`);
+			return null;
+		}
+		return (await res.json()) as VoiceKeyMint;
+	} catch (err) {
+		console.warn('[mintVoiceKey] fetch failed', err instanceof Error ? err.message : err);
+		return null;
+	}
+}
+
 /** Authenticated fetch. Returns null when not signed in (caller should
  * skip rather than throw — most cloud features are best-effort). */
 export async function cloudFetch(path: string, init: RequestInit = {}): Promise<Response | null> {

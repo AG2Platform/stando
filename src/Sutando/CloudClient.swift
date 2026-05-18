@@ -93,11 +93,29 @@ struct CloudUsagePanelRow: Decodable {
     let managedInCurrentRelease: Bool
 }
 
+/// Active plan comp (Wave 4.2) returned inside CloudMeSnapshot.
+struct CloudCompInfo: Decodable {
+    let active: Bool
+    let plan: String                 // 'plus' | 'pro' | 'max'
+    let reason: String               // 'beta_admission' | 'influencer' | ...
+    let startsAt: String             // ISO date
+    let endsAt: String               // ISO date
+    let monthlyCreditGrant: Int
+    let daysRemaining: Int
+}
+
 /// Current-user snapshot returned by GET /api/me.
 struct CloudMeSnapshot: Decodable {
     let id: String
     let email: String
     let plan: String
+    // paidPlan + effectivePlan land in Wave 4.2; older builds will see them
+    // absent and fall back to the legacy `plan` field. Decodable handles
+    // missing-field by leaving the optional nil.
+    let paidPlan: String?
+    let effectivePlan: String?
+    let geminiMode: String?          // 'byok' | 'managed'
+    let comp: CloudCompInfo?
     let walletCredits: Int
     let autoTopupEnabled: Bool
     let autoTopupThresholdCredits: Int
@@ -179,5 +197,129 @@ enum CloudClient {
         req.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
         req.httpBody = payload
         URLSession.shared.dataTask(with: req).resume()
+    }
+
+    // MARK: - Skills inventory (Wave 4.10)
+
+    /// One installed skill row from /api/me/inventory.
+    struct CloudInstalledSkill: Decodable {
+        let skillId: String
+        let slug: String
+        let name: String
+        let description: String?
+        let version: String
+        let tierRequired: String
+        let priceCredits: Int
+        let installedAt: String
+        let userRating: Int?
+    }
+
+    /// One activated cloud tool row from /api/me/inventory.
+    struct CloudActivatedTool: Decodable {
+        let skillId: String
+        let slug: String
+        let name: String
+        let description: String?
+        let version: String
+        let tierRequired: String
+        let unitPriceCredits: Double?
+        let unitLabel: String?
+        let callsThisPeriod: Int
+        let creditsDebitedThisPeriod: Double
+        let lastCallAt: String?
+        let userRating: Int?
+    }
+
+    /// Combined response shape from GET /api/me/inventory.
+    struct CloudInventory: Decodable {
+        let installed: [CloudInstalledSkill]
+        let cloudTools: [CloudActivatedTool]
+    }
+
+    /// Fetch the user's installed skills + activated cloud tools.
+    /// Returns nil when signed out or on network errors. Caller MUST
+    /// hop to the main thread before touching UI.
+    static func fetchInventory(completion: @escaping (CloudInventory?) -> Void) {
+        guard let auth = _loadCloudAuth() else { completion(nil); return }
+        guard let url = URL(string: auth.apiBase + "/api/me/inventory") else { completion(nil); return }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "GET"
+        req.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.dataTask(with: req) { data, response, error in
+            if error != nil { completion(nil); return }
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+                  let data = data else { completion(nil); return }
+            do {
+                let inv = try JSONDecoder().decode(CloudInventory.self, from: data)
+                completion(inv)
+            } catch {
+                NSLog("CloudClient: /api/me/inventory decode failed: \(error)")
+                completion(nil)
+            }
+        }.resume()
+    }
+
+    enum UninstallResult {
+        case ok
+        case notFound
+        case failure(String)
+    }
+
+    /// Uninstall a skill or deactivate a cloud tool. `slugOrId` accepts
+    /// either the skill slug (recommended) or its UUID. For paid
+    /// skills, reinstall via the Station re-charges price_credits —
+    /// surface that in the caller's confirmation copy.
+    static func uninstallSkill(_ slugOrId: String, completion: @escaping (UninstallResult) -> Void) {
+        guard let auth = _loadCloudAuth(),
+              let encoded = slugOrId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: auth.apiBase + "/api/skills/\(encoded)/uninstall") else {
+            completion(.failure("not signed in")); return
+        }
+        var req = URLRequest(url: url, timeoutInterval: 6)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.dataTask(with: req) { _, response, error in
+            if let error = error { completion(.failure(error.localizedDescription)); return }
+            guard let http = response as? HTTPURLResponse else { completion(.failure("no response")); return }
+            if http.statusCode == 404 { completion(.notFound); return }
+            if (200..<300).contains(http.statusCode) { completion(.ok); return }
+            completion(.failure("HTTP \(http.statusCode)"))
+        }.resume()
+    }
+
+    /// Set the user's Gemini mode (Wave 4.8). Server rejects 'managed'
+    /// for free effectivePlan with HTTP 402; completion fires with
+    /// `.requiresPaid` so the UI can surface "upgrade to use managed
+    /// Gemini". Network errors complete `.failure` — caller may retry.
+    enum GeminiModeResult {
+        case ok
+        case requiresPaid
+        case failure(String)
+    }
+
+    static func setGeminiMode(_ mode: String, completion: @escaping (GeminiModeResult) -> Void) {
+        guard let auth = _loadCloudAuth(),
+              let url = URL(string: auth.apiBase + "/api/me"),
+              let payload = try? JSONSerialization.data(withJSONObject: ["geminiMode": mode]) else {
+            completion(.failure("not signed in")); return
+        }
+        var req = URLRequest(url: url, timeoutInterval: 5)
+        req.httpMethod = "PATCH"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("Bearer \(auth.token)", forHTTPHeaderField: "Authorization")
+        req.httpBody = payload
+        URLSession.shared.dataTask(with: req) { _, response, error in
+            if let error = error {
+                completion(.failure(error.localizedDescription))
+                return
+            }
+            guard let http = response as? HTTPURLResponse else {
+                completion(.failure("no response"))
+                return
+            }
+            if http.statusCode == 402 { completion(.requiresPaid); return }
+            if (200..<300).contains(http.statusCode) { completion(.ok); return }
+            completion(.failure("HTTP \(http.statusCode)"))
+        }.resume()
     }
 }

@@ -1,0 +1,8 @@
+{
+	"name": "morning-briefing-pro",
+	"description": "Premium morning briefing: calendar + email + reminders + weather + overnight messages, delivered as conversational narrative tuned for voice.",
+	"enabled": true,
+	"access_tier": "owner",
+	"documented_for_core": true,
+	"core_description": "User-invocable: 'morning briefing', 'morning rundown', 'kick off my morning'. Delegate to core via `work`; the skill's SKILL.md drives a multi-step gather + synthesize flow. Output is conversational narrative written to results/proactive-<ts>.txt. Optional `depth` arg: brief / standard / detailed."
+}

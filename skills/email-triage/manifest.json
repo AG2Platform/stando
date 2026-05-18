@@ -1,0 +1,8 @@
+{
+	"name": "email-triage",
+	"description": "Inbox triage + draft generation. Voice-callable: 'triage my inbox', 'what's urgent', 'draft a reply to X', 'send it'. Requires gws gmail (OAuth) to be authenticated.",
+	"enabled": true,
+	"access_tier": "owner",
+	"documented_for_core": true,
+	"core_description": "User-invocable: 'triage my inbox', 'what's urgent', 'draft a reply to X', 'send the draft'. Delegate to core via `work`. Mode determined by user verb (triage / read / draft / send). Drafts are written to tasks/email-draft-<ts>.txt and never auto-sent — only fire `gws gmail +send` on explicit confirmation."
+}

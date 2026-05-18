@@ -22,6 +22,7 @@ enum UnifiedPane: String, CaseIterable {
     case conversation
     case cli
     case dashboard
+    case skills
     case settings
 
     var label: String {
@@ -29,6 +30,7 @@ enum UnifiedPane: String, CaseIterable {
         case .conversation: return "Conversation"
         case .cli:          return "Core CLI"
         case .dashboard:    return "Dashboard"
+        case .skills:       return "Skills"
         case .settings:     return "Settings"
         }
     }
@@ -38,6 +40,7 @@ enum UnifiedPane: String, CaseIterable {
         case .conversation: return "waveform"
         case .cli:          return "terminal"
         case .dashboard:    return "chart.bar.fill"
+        case .skills:       return "square.grid.2x2"
         case .settings:     return "slider.horizontal.3"
         }
     }
@@ -59,6 +62,7 @@ final class UnifiedMainWindowController: NSWindowController, NSWindowDelegate, W
     private var dashboardRetry = 0
 
     private var settingsController: SettingsWindowController?
+    private var skillsController: SkillsViewController?
 
     private var currentPane: UnifiedPane = .conversation
     private let maxRetries = 30
@@ -112,6 +116,10 @@ final class UnifiedMainWindowController: NSWindowController, NSWindowDelegate, W
         case .dashboard:
             dashboardRetry = 0
             dashboardWebView?.reloadFromOrigin()
+        case .skills:
+            // SkillsViewController's poll runs on viewDidAppear; force a
+            // refresh by re-selecting which calls viewDidAppear again.
+            selectPane(.skills, fromUserAction: true)
         case .settings:
             break
         }
@@ -268,6 +276,7 @@ final class UnifiedMainWindowController: NSWindowController, NSWindowDelegate, W
         case .conversation: return conversationPaneView()
         case .cli:          return cliPaneView()
         case .dashboard:    return dashboardPaneView()
+        case .skills:       return skillsPaneView()
         case .settings:     return settingsPaneView()
         }
     }
@@ -320,6 +329,13 @@ final class UnifiedMainWindowController: NSWindowController, NSWindowDelegate, W
         }
         guard let c = settingsController else { return NSView() }
         return c.adoptedContentView()
+    }
+
+    private func skillsPaneView() -> NSView {
+        if skillsController == nil {
+            skillsController = SkillsViewController()
+        }
+        return skillsController!.view
     }
 
     // MARK: - Cloud footer

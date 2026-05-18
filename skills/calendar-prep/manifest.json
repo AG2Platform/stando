@@ -1,0 +1,8 @@
+{
+	"name": "calendar-prep",
+	"description": "Pre-meeting context: attendees + last email thread + prior notes + talking points. Voice-callable: 'prep my next meeting', 'who am I meeting with at 3'.",
+	"enabled": true,
+	"access_tier": "owner",
+	"documented_for_core": true,
+	"core_description": "User-invocable: 'prep my next meeting', 'who am I meeting at 3', 'help me prep for [name/topic]'. Delegate to core via `work`. Reads gws calendar + gws gmail + notes/ to assemble a one-page meeting brief written to notes/prep-<eventId>-<ts>.md and spoken via results/proactive-<ts>.txt. Read-only except for the notes write. NO LinkedIn lookup — Proxycurl shut down July 2025, the surviving alternatives carry legal risk."
+}

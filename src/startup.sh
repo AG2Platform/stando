@@ -289,6 +289,16 @@ else
   echo "  ✓ cloud-skill sync loop (already running)"
 fi
 
+# 7.7 Superpower Station MCP registration — writes the Sutando MCP server
+# entry into ~/.claude.json so Claude Code (in tmux core-agent or
+# elsewhere) can talk to the gateway. No-op when signed out. Disable with
+# SKIP_STATION_MCP=1.
+if [ "${SKIP_STATION_MCP:-}" = "1" ]; then
+  echo "  ~ station MCP register (skipped via SKIP_STATION_MCP)"
+else
+  python3 src/register-station-mcp.py 2>&1 | sed 's/^/  /' || true
+fi
+
 # 8. Phone conversation server + ngrok (optional — needs Twilio creds, skip with SKIP_PHONE=1)
 if [ "${SKIP_PHONE:-}" = "1" ]; then
   echo "  ~ conversation server (skipped via SKIP_PHONE)"
