@@ -37,16 +37,16 @@ def _signal_seeing_blocking():
         req = urllib.request.Request(WEB_CLIENT_STATE_URL, method="GET")
         urllib.request.urlopen(req, timeout=0.3)
     except Exception:
-        pass  # Web-client may not be running; that's fine.
+        pass  # voice-agent HTTP server may not be running; that's fine.
 
 
 def _signal_seeing():
-    """True fire-and-forget POST to web-client signaling agent is looking
-    at the screen. Spawns a daemon thread so the capture handler isn't
-    blocked by web-client latency. Silent on any failure — this is a UI
-    signal, not a critical path. Without threading, urllib.request.urlopen
-    is synchronous and can block the caller up to the 300ms timeout if the
-    web-client is slow (flagged in #428 cold-review)."""
+    """True fire-and-forget POST to voice-agent's HTTP server signaling
+    that the agent is looking at the screen. Spawns a daemon thread so
+    the capture handler isn't blocked by HTTP latency. Silent on any
+    failure — this is a UI signal, not a critical path. Without threading,
+    urllib.request.urlopen is synchronous and can block the caller up to
+    the 300ms timeout if the HTTP server is slow (flagged in #428 cold-review)."""
     threading.Thread(target=_signal_seeing_blocking, daemon=True).start()
 
 

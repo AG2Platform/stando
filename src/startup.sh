@@ -135,25 +135,18 @@ else
   export ANTHROPIC_BASE_URL=http://localhost:7846
 fi
 
-# 1. Voice agent (Gemini Live on port 9900)
+# 1. Voice agent (Gemini Live on port 9900 + conversation HTTP on port 8080).
+# PR-A folded the standalone web-client HTTP server into this process via
+# src/web-server.ts, so one Node process owns both ports.
 if ! lsof -i :9900 > /dev/null 2>&1; then
-  echo "  Starting voice agent (port 9900)..."
+  echo "  Starting voice agent (ports 9900 + 8080)..."
   npx tsx src/voice-agent.ts > "$LOGS_DIR/voice-agent.log" 2>&1 &
   echo "  ✓ voice agent"
 else
   echo "  ✓ voice agent (already running)"
 fi
 
-# 2. Web client (port 8080)
-if ! lsof -i :8080 > /dev/null 2>&1; then
-  echo "  Starting web client (port 8080)..."
-  npx tsx src/web-client.ts > "$LOGS_DIR/web-client.log" 2>&1 &
-  echo "  ✓ web client"
-else
-  echo "  ✓ web client (already running)"
-fi
-
-# 3. Dashboard (port 7844)
+# 2. Dashboard (port 7844)
 if ! lsof -i :7844 > /dev/null 2>&1; then
   echo "  Starting dashboard (port 7844)..."
   python3 src/dashboard.py > "$LOGS_DIR/dashboard.log" 2>&1 &
@@ -162,7 +155,7 @@ else
   echo "  ✓ dashboard (already running)"
 fi
 
-# 4. Agent API (port 7843)
+# 3. Agent API (port 7843)
 if ! lsof -i :7843 > /dev/null 2>&1; then
   echo "  Starting agent API (port 7843)..."
   python3 src/agent-api.py > "$LOGS_DIR/agent-api.log" 2>&1 &
@@ -171,7 +164,7 @@ else
   echo "  ✓ agent API (already running)"
 fi
 
-# 5. Screen capture server (port 7845)
+# 4. Screen capture server (port 7845)
 if ! lsof -i :7845 > /dev/null 2>&1; then
   echo "  Starting screen capture (port 7845)..."
   python3 src/screen-capture-server.py > "$LOGS_DIR/screen-capture.log" 2>&1 &
@@ -180,7 +173,7 @@ else
   echo "  ✓ screen capture (already running)"
 fi
 
-# 5a. Terminal server (port 7847) — bridges xterm.js in the unified UI
+# 4a. Terminal server (port 7847) — bridges xterm.js in the unified UI
 # CLI pane to the sutando-core tmux session.
 if ! lsof -i :7847 > /dev/null 2>&1; then
   echo "  Starting terminal server (port 7847)..."
@@ -193,7 +186,7 @@ fi
 # 5b. Sutando context drop app (global hotkey ⌃C)
 SUT_SRC_DIR="$REPO/src/Sutando"
 SUT_BIN="$SUT_SRC_DIR/Sutando"
-SUT_SRC_FILES=("$SUT_SRC_DIR/main.swift" "$SUT_SRC_DIR/LaunchAgentInstaller.swift" "$SUT_SRC_DIR/SparkleUpdater.swift" "$SUT_SRC_DIR/CloudAuth.swift" "$SUT_SRC_DIR/CloudClient.swift" "$SUT_SRC_DIR/EnvFile.swift" "$SUT_SRC_DIR/FeedbackWindow.swift" "$SUT_SRC_DIR/Permissions.swift" "$SUT_SRC_DIR/SettingsWindow.swift" "$SUT_SRC_DIR/UnifiedMainWindow.swift" "$SUT_SRC_DIR/Uninstaller.swift" "$SUT_SRC_DIR/WebWindow.swift")
+SUT_SRC_FILES=("$SUT_SRC_DIR/main.swift" "$SUT_SRC_DIR/LaunchAgentInstaller.swift" "$SUT_SRC_DIR/SparkleUpdater.swift" "$SUT_SRC_DIR/CloudAuth.swift" "$SUT_SRC_DIR/CloudClient.swift" "$SUT_SRC_DIR/EnvFile.swift" "$SUT_SRC_DIR/FeedbackWindow.swift" "$SUT_SRC_DIR/OnboardingWindow.swift" "$SUT_SRC_DIR/Permissions.swift" "$SUT_SRC_DIR/ScreenCaptureSupervisor.swift" "$SUT_SRC_DIR/SettingsWindow.swift" "$SUT_SRC_DIR/UnifiedMainWindow.swift" "$SUT_SRC_DIR/Uninstaller.swift" "$SUT_SRC_DIR/WebWindow.swift")
 
 # Rebuild if any source file is newer than binary, or binary is missing.
 sut_needs_build=0
@@ -362,7 +355,7 @@ echo ""
 # Verify services actually started (wait a moment, then check ports)
 sleep 3
 echo "Verifying services..."
-VERIFY_PORTS="9900:voice-agent 8080:web-client 7844:dashboard 7843:agent-api 7845:screen-capture"
+VERIFY_PORTS="9900:voice-agent 8080:voice-agent-http 7844:dashboard 7843:agent-api 7845:screen-capture"
 if [ "${SKIP_PHONE:-}" != "1" ] && grep -q "TWILIO_ACCOUNT_SID=" .env 2>/dev/null; then
   VERIFY_PORTS="$VERIFY_PORTS 3100:conversation-server"
 fi

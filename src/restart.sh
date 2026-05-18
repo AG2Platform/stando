@@ -8,7 +8,6 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "Stopping Sutando services..."
 pkill -f "voice-agent" 2>/dev/null
-pkill -f "web-client.ts" 2>/dev/null
 pkill -f "dashboard.py" 2>/dev/null
 pkill -f "agent-api.py" 2>/dev/null
 pkill -f "screen-capture-server" 2>/dev/null
@@ -33,7 +32,7 @@ fi
 # See feedback_pkill_then_open_race.md and PR #499 for the same class on
 # startup.sh's recompile-replace path.
 STOP_PATTERNS=(
-    "voice-agent" "web-client.ts" "dashboard.py" "agent-api.py"
+    "voice-agent" "dashboard.py" "agent-api.py"
     "screen-capture-server" "telegram-bridge" "discord-bridge" "watch-tasks"
     "conversation-server" "ngrok" "credential-proxy" "src/Sutando/Sutando"
 )

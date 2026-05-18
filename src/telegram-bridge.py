@@ -15,13 +15,15 @@ import urllib.error
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-TASKS_DIR = REPO / "tasks"
-RESULTS_DIR = REPO / "results"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from util_paths import state_dir, state_path  # noqa: E402
+
+TASKS_DIR = state_dir("tasks")
+RESULTS_DIR = state_dir("results")
 
 # Lazy import for cloud telemetry — keeps the bridge bootable even if
 # src/cloud_metrics.py is missing in some installs. Helper below silently
 # no-ops on any failure; telemetry must never break the bridge.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     from cloud_metrics import (
         record_event as _cloud_record_event,
@@ -73,7 +75,7 @@ def _cap_hit_reply_text(reason: str | None) -> str:
 # Allowlist for paths that may be sent via Telegram [file: /path] markers.
 # Mirrors _is_path_sendable() in discord-bridge.py.
 SEND_ALLOWED_ROOTS = (
-    str(REPO / "results"),
+    str(RESULTS_DIR),
     str(REPO / "notes"),
     str(REPO / "docs"),
 )
@@ -107,7 +109,7 @@ def _is_path_sendable(fpath: str) -> bool:
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(REPO / ".env")
+    load_dotenv(state_path(".env"))
 except ImportError:
     pass  # python-dotenv not installed — token loaded from channels config below
 
@@ -127,14 +129,10 @@ if not TOKEN:
     print("TELEGRAM_BOT_TOKEN not set")
     exit(1)
 
-TASKS_DIR = REPO / "tasks"
-RESULTS_DIR = REPO / "results"
-STATE_DIR = REPO / "state"
-ARCHIVE_TASKS_DIR = REPO / "tasks" / "archive"
-ARCHIVE_RESULTS_DIR = REPO / "results" / "archive"
+STATE_DIR = state_dir("state")
+ARCHIVE_TASKS_DIR = TASKS_DIR / "archive"
+ARCHIVE_RESULTS_DIR = RESULTS_DIR / "archive"
 OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
-TASKS_DIR.mkdir(exist_ok=True)
-RESULTS_DIR.mkdir(exist_ok=True)
 
 
 def write_owner_activity(channel: str, summary: str) -> None:
@@ -177,7 +175,7 @@ def archive_file(src: "Path", kind: str, task_id: str) -> None:
 # Presenter mode: silence proactive DMs during ICLR/talk windows. Sentinel
 # is written by scripts/presenter-mode.sh with an ISO-8601 expiry. Matches
 # the check in src/check-pending-questions.py and src/discord-bridge.py.
-PRESENTER_SENTINEL = REPO / "state" / "presenter-mode.sentinel"
+PRESENTER_SENTINEL = STATE_DIR / "presenter-mode.sentinel"
 
 
 def presenter_mode_active():
@@ -322,7 +320,7 @@ def main():
     allowed = load_allowed()
     pending_replies = {}  # task_id -> chat_id
 
-    heartbeat_file = REPO / "state" / "telegram-bridge.heartbeat"
+    heartbeat_file = STATE_DIR / "telegram-bridge.heartbeat"
     last_heartbeat = 0
     while True:
         # Poll for new messages

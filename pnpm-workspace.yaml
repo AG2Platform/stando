@@ -1,2 +1,6 @@
+packages:
+  - '.'
+  - 'client'
+
 onlyBuiltDependencies:
   - "bodhi-realtime-agent"

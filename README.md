@@ -106,9 +106,8 @@ We're looking for contributors to help test and harden these capabilities. If yo
         item autonomously.
 ```
 
-Four processes work together:
-- **Voice agent** (Gemini Live, WebSocket on :9900) — listens and talks in real time for browser voice.
-- **Web client** (`com.sutando.web-client.plist`, HTTP on :8080) — separate launchd service that serves the browser UI. The browser then connects directly to the voice agent's WebSocket on :9900 — the web client is not in the WebSocket data path.
+Three processes work together:
+- **Voice agent** (Gemini Live, WebSocket on :9900 + HTTP on :8080) — listens and talks in real time for browser voice. Co-hosts the conversation HTML, SSE, and control endpoints via `src/web-server.ts` so one Node process owns both ports.
 - **Conversation server** (Gemini Live, Twilio WebSocket on :3100) — same role as the voice agent for inbound and outbound phone calls.
 - **Core agent** (Claude Code CLI) — executes tasks with full system access. We use the CLI because it provides cron scheduling, plugins, and an interactive terminal that the SDK doesn't offer out of the box.
 

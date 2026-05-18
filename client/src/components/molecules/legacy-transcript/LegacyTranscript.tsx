@@ -1,0 +1,116 @@
+import { useEffect, useRef, useState } from 'react';
+import { useConversation } from '@/hooks/useConversation';
+import type { TranscriptEntry } from '@/types/conversation';
+
+/**
+ * Transcript styled to match src/web-client-html.ts — `.transcript` container
+ * with `.t-user` / `.t-assistant` / `.t-system` entries. The "You:" /
+ * "Sutando:" prefixes come from legacy.css `::before` pseudo-elements,
+ * not from this component.
+ *
+ * Auto-stick to bottom when the user is already near the bottom (the legacy
+ * behavior). When the user scrolls up to read history, we stop auto-pinning
+ * until they scroll back near the bottom.
+ */
+
+const STICK_THRESHOLD_PX = 64;
+
+function entryClass(entry: TranscriptEntry): string {
+	if (entry.role === 'system') return 't-entry t-system';
+	if (entry.interim && entry.role === 'user') return 't-entry t-interim';
+	if (entry.role === 'user') return 't-entry t-user';
+	return 't-entry t-assistant';
+}
+
+/**
+ * Hover copy pill — appears in the top-right of any finalized t-user or
+ * t-assistant entry (visibility driven by the legacy.css :hover rule).
+ * Skips system entries and in-flight interim entries to match the legacy
+ * `addCopyBtn` call sites in handleTranscript.
+ */
+function CopyButton({ text }: { text: string }) {
+	const [copied, setCopied] = useState(false);
+	const timerRef = useRef<number | null>(null);
+	useEffect(
+		() => () => {
+			if (timerRef.current != null) window.clearTimeout(timerRef.current);
+		},
+		[]
+	);
+	const onClick = (ev: React.MouseEvent) => {
+		ev.stopPropagation();
+		void navigator.clipboard.writeText(text).then(() => {
+			setCopied(true);
+			if (timerRef.current != null) window.clearTimeout(timerRef.current);
+			timerRef.current = window.setTimeout(() => setCopied(false), 1500);
+		});
+	};
+	return (
+		<span className="copy-btn" onClick={onClick} role="button">
+			{copied ? 'Copied' : 'Copy'}
+		</span>
+	);
+}
+
+function renderMedia(entry: TranscriptEntry) {
+	if (!entry.media) return null;
+	const mimeType = entry.media.mimeType ?? (entry.media.type === 'video' ? 'video/mp4' : 'image/png');
+	const src = `data:${mimeType};base64,${entry.media.base64}`;
+	const caption = entry.media.description;
+	if (entry.media.type === 'video') {
+		return (
+			<div style={{ marginTop: 6 }}>
+				<video src={src} controls style={{ maxWidth: '100%', borderRadius: 8 }} />
+				{caption ? <div style={{ fontSize: 11, color: '#666', marginTop: 4 }}>{caption}</div> : null}
+			</div>
+		);
+	}
+	return (
+		<div style={{ marginTop: 6 }}>
+			<img src={src} alt={caption ?? 'inline image'} style={{ maxWidth: '100%', borderRadius: 8 }} />
+			{caption ? <div style={{ fontSize: 11, color: '#666', marginTop: 4 }}>{caption}</div> : null}
+		</div>
+	);
+}
+
+export default function LegacyTranscript() {
+	const { entries } = useConversation();
+	const scrollerRef = useRef<HTMLDivElement | null>(null);
+	const stickyRef = useRef(true);
+
+	useEffect(() => {
+		const el = scrollerRef.current;
+		if (!el) return;
+		const onScroll = () => {
+			const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+			stickyRef.current = distance < STICK_THRESHOLD_PX;
+		};
+		el.addEventListener('scroll', onScroll, { passive: true });
+		return () => el.removeEventListener('scroll', onScroll);
+	}, []);
+
+	useEffect(() => {
+		const el = scrollerRef.current;
+		if (!el || !stickyRef.current) return;
+		el.scrollTop = el.scrollHeight;
+	}, [entries.length, entries[entries.length - 1]?.text]);
+
+	return (
+		<div ref={scrollerRef} className="transcript">
+			{entries.length === 0 ? (
+				<div className="t-entry t-system">Ask Sutando anything.</div>
+			) : (
+				entries.map((entry) => {
+					const showCopy = !entry.interim && entry.role !== 'system' && entry.text.length > 0;
+					return (
+						<div key={entry.id} className={entryClass(entry)}>
+							{entry.text}
+							{renderMedia(entry)}
+							{showCopy ? <CopyButton text={entry.text} /> : null}
+						</div>
+					);
+				})
+			)}
+		</div>
+	);
+}

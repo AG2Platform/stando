@@ -155,8 +155,8 @@ Findings from the audit (2026-05-04) that constrain the design:
    doesn't care about the source URL, so the pin is safe.
 5. **Convert inline launches to launchd** [DONE]. LaunchAgent templates ship
    in `app/LaunchAgents/`. Current launchd-managed set:
-   - `com.sutando.voice-agent`
-   - `com.sutando.web-client`
+   - `com.sutando.voice-agent` (also serves the conversation page on :8080
+     via `src/web-server.ts`, folded in by PR-A)
    - `com.sutando.dashboard`
    - `com.sutando.agent-api`
    - `com.sutando.credential-proxy`

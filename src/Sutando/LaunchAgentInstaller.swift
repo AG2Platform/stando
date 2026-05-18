@@ -224,6 +224,28 @@ class LaunchAgentInstaller {
         // because TCC's responsible-process attribution made the
         // launchd path unworkable. See ScreenCaptureSupervisor.swift.
         let skipLabels: Set<String> = ["com.sutando.screen-capture"]
+        // Retired labels: services whose template was removed (folded into
+        // another process). Iterate up front, on every install, to bootout
+        // + delete any stale plist a previous install left behind. Without
+        // this, the old launchd job KeepAlive-loops against a missing entry
+        // point and eats CPU.
+        //
+        //   com.sutando.web-client: folded into com.sutando.voice-agent via
+        //     PR-A (src/web-server.ts now lives in the voice-agent process).
+        //     Removed plist template + src/web-client.ts.
+        let retiredLabels: [String] = ["com.sutando.web-client"]
+        for label in retiredLabels {
+            let uid = getuid()
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            proc.arguments = ["bootout", "gui/\(uid)/\(label)"]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            _ = try? proc.run()
+            proc.waitUntilExit()
+            let stalePlist = paths.sutandoHome + "/LaunchAgents/\(label).plist"
+            try? FileManager.default.removeItem(atPath: stalePlist)
+        }
         for file in files where file.hasSuffix(".plist.template") {
             let label = String(file.dropLast(".plist.template".count))
             if skipLabels.contains(label) {
@@ -376,7 +398,7 @@ class LaunchAgentInstaller {
     /// launchd accepts the request, NOT when the service finishes
     /// tearing down. A subsequent `bootstrap` racing against a still-
     /// terminating service hits "Bootstrap failed: 37" (service in flux)
-    /// for the slowest services — voice-agent + web-client (network
+    /// for the slowest services — voice-agent (network
     /// teardown in their shutdown hooks). `waitUntilLabelStopped()` is
     /// called between the two to drain the bootout before bootstrap.
     private func bootstrap(label: String, plistPath: String) throws {

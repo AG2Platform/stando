@@ -1,0 +1,795 @@
+/*
+ * Legacy conversation-page styles, ported verbatim from
+ * src/web-client-html.ts so the React refactor preserves the original look.
+ *
+ * Scoped via .legacy-shell on the conversation page root so it doesn't bleed
+ * into other (future) pages still using the Tailwind palette in index.css.
+ * The reset (`* { box-sizing... }`) lives under .legacy-shell rather than
+ * globally so React-rendered Notes/Settings/etc. keep their existing styles.
+ *
+ * Keep this file in sync with web-client-html.ts CSS until PR-C step 6
+ * deletes web-client-html.ts. After that, this file is the canonical source.
+ */
+
+/* Cloud-matching palette — light-first, dark via prefers-color-scheme.
+   Mirrors agent-universe/app/globals.css so the desktop voice client
+   and the cloud dashboard read as the same product. */
+.legacy-shell {
+	--bg:           #fafafa;
+	--surface:      #ffffff;
+	--surface-elev: #f5f5f5;
+	--border:       #e5e5e5;
+	--text:         #171717;
+	--text-muted:   #525252;
+	--text-faint:   #a3a3a3;
+
+	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+	background: var(--bg);
+	color: var(--text);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	min-height: 100vh;
+	padding: 0 0 60px 0;
+}
+
+@media (prefers-color-scheme: dark) {
+	.legacy-shell {
+		--bg:           #0a0a0a;
+		--surface:      #171717;
+		--surface-elev: #1f1f1f;
+		--border:       #262626;
+		--text:         #f5f5f5;
+		--text-muted:   #a3a3a3;
+		--text-faint:   #525252;
+	}
+}
+
+.legacy-shell *,
+.legacy-shell *::before,
+.legacy-shell *::after {
+	box-sizing: border-box;
+	margin: 0;
+	padding: 0;
+	-webkit-user-select: text;
+	user-select: text;
+}
+
+/* Header */
+.legacy-shell .header {
+	width: 100%;
+	padding: 16px 20px;
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	background: var(--surface);
+	border-bottom: 1px solid var(--border);
+}
+.legacy-shell .header .avatar-wrap {
+	position: relative;
+	width: 60px;
+	height: 60px;
+	flex-shrink: 0;
+}
+.legacy-shell .header .avatar-wrap canvas {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 60px;
+	height: 60px;
+	pointer-events: none;
+}
+.legacy-shell .header .avatar {
+	position: absolute;
+	top: 8px;
+	left: 8px;
+	width: 44px;
+	height: 44px;
+	border-radius: 50%;
+	border: 2px solid #4ecca3;
+	object-fit: cover;
+	display: none;
+	transition: box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.legacy-shell .header .avatar.speaking { border-color: #6ee7b7; }
+.legacy-shell .header .avatar.working:not(.speaking) {
+	border-color: #60a5fa;
+	box-shadow: 0 0 10px rgba(96,165,250,0.4);
+	animation: avatar-work 2s linear infinite;
+}
+.legacy-shell .header .avatar.seeing:not(.speaking) {
+	border-color: #fbbf24;
+	box-shadow: 0 0 12px rgba(251,191,36,0.55);
+	animation: avatar-see 1.2s ease-in-out infinite;
+}
+@keyframes avatar-work {
+	0% { box-shadow: 0 0 8px rgba(96,165,250,0.3), 0 0 0 2px rgba(96,165,250,0.1); }
+	50% { box-shadow: 0 0 16px rgba(96,165,250,0.5), 0 0 0 4px rgba(96,165,250,0.2); }
+	100% { box-shadow: 0 0 8px rgba(96,165,250,0.3), 0 0 0 2px rgba(96,165,250,0.1); }
+}
+@keyframes avatar-see {
+	0% { box-shadow: 0 0 10px rgba(251,191,36,0.45), inset 0 0 0 0 rgba(251,191,36,0.0); }
+	50% { box-shadow: 0 0 20px rgba(251,191,36,0.8), inset 0 0 14px 2px rgba(251,191,36,0.35); }
+	100% { box-shadow: 0 0 10px rgba(251,191,36,0.45), inset 0 0 0 0 rgba(251,191,36,0.0); }
+}
+
+/* Halo animations for the PNG avatar (state ring around custom avatar img). */
+@keyframes avatar-idle {
+	0%,100% { box-shadow: 0 0 0 0 rgba(124,131,255,0.5); }
+	50%     { box-shadow: 0 0 0 6px rgba(124,131,255,0); }
+}
+@keyframes avatar-listen {
+	0%   { box-shadow: 0 0 0 0 rgba(167,139,250,0.7); }
+	100% { box-shadow: 0 0 0 10px rgba(167,139,250,0); }
+}
+@keyframes avatar-speak {
+	0%   { box-shadow: 0 0 0 0 rgba(78,204,163,0.75); }
+	100% { box-shadow: 0 0 0 9px rgba(78,204,163,0); }
+}
+.legacy-shell .avatar-wrap.s-idle > .avatar,
+.legacy-shell .hero-svg-wrap.s-idle > .avatar {
+	border-color: #7c83ff;
+	animation: avatar-idle 3.2s ease-in-out infinite;
+}
+.legacy-shell .avatar-wrap.s-listening > .avatar,
+.legacy-shell .hero-svg-wrap.s-listening > .avatar {
+	border-color: #a78bfa;
+	animation: avatar-listen 1.4s ease-out infinite;
+}
+.legacy-shell .avatar-wrap.s-speaking > .avatar,
+.legacy-shell .hero-svg-wrap.s-speaking > .avatar {
+	border-color: #6ee7b7;
+	animation: avatar-speak 0.9s ease-out infinite;
+}
+.legacy-shell .avatar-wrap.s-working > .avatar,
+.legacy-shell .hero-svg-wrap.s-working > .avatar {
+	border-color: #60a5fa;
+	animation: avatar-work 2s linear infinite;
+}
+.legacy-shell .avatar-wrap.s-seeing > .avatar,
+.legacy-shell .hero-svg-wrap.s-seeing > .avatar {
+	border-color: #fbbf24;
+	animation: avatar-see 1.2s ease-in-out infinite;
+}
+
+/* Default inline-SVG avatar — shown when no custom avatar generated. */
+.legacy-shell .avatar-svg-default {
+	width: 100%;
+	height: 100%;
+	overflow: visible;
+	display: block;
+}
+.legacy-shell .avatar-svg-default .stand-body,
+.legacy-shell .avatar-svg-default .stand-head,
+.legacy-shell .avatar-svg-default .stand-glyph {
+	fill: var(--accent, #7c83ff);
+	transition: fill 0.4s ease;
+}
+.legacy-shell .avatar-svg-default .stand-glyph {
+	paint-order: stroke fill;
+	letter-spacing: -2;
+}
+.legacy-shell .avatar-svg-default .stand-visor { fill: #0f1117; }
+.legacy-shell .avatar-svg-default .stand-arm {
+	stroke: var(--accent, #7c83ff);
+	stroke-width: 1.5;
+	fill: none;
+	opacity: 0.45;
+	transition: stroke 0.4s ease;
+}
+.legacy-shell .avatar-svg-default .halo {
+	fill: none;
+	stroke: var(--accent, #7c83ff);
+	stroke-width: 1.5;
+	opacity: 0;
+	transform-origin: center;
+}
+.legacy-shell .avatar-svg-default .orbit-dot { fill: var(--accent, #60a5fa); opacity: 0; }
+.legacy-shell .avatar-svg-default .scan-beam { fill: var(--accent, #fbbf24); opacity: 0; }
+.legacy-shell .avatar-svg-default .constellation { stroke: #3a3f5c; stroke-width: 0.5; opacity: 0.3; }
+.legacy-shell .avatar-svg-default .constellation-node { fill: #3a3f5c; opacity: 0.35; }
+
+/* idle — indigo, faint breathe */
+.legacy-shell .s-idle .avatar-svg-default { --accent: #7c83ff; }
+.legacy-shell .s-idle .avatar-svg-default .stand-body,
+.legacy-shell .s-idle .avatar-svg-default .stand-head,
+.legacy-shell .s-idle .avatar-svg-default .stand-glyph {
+	animation: svg-breathe 4s ease-in-out infinite;
+	transform-origin: 50% 55%;
+}
+@keyframes svg-breathe {
+	0%, 100% { transform: scale(1); }
+	50% { transform: scale(1.02); }
+}
+/* listening — violet, concentric wave rings */
+.legacy-shell .s-listening .avatar-svg-default { --accent: #a78bfa; }
+.legacy-shell .s-listening .avatar-svg-default .halo { animation: svg-halo-pulse 1.6s ease-out infinite; }
+.legacy-shell .s-listening .avatar-svg-default .halo:nth-of-type(2) { animation-delay: 0.4s; }
+.legacy-shell .s-listening .avatar-svg-default .halo:nth-of-type(3) { animation-delay: 0.8s; }
+@keyframes svg-halo-pulse {
+	0% { r: 26; opacity: 0.7; stroke-width: 2; }
+	100% { r: 46; opacity: 0; stroke-width: 0.5; }
+}
+/* speaking — green, visor sweep + glow */
+.legacy-shell .s-speaking .avatar-svg-default { --accent: #4ecca3; }
+.legacy-shell .s-speaking .avatar-svg-default .stand-visor { fill: url(#visorSweep); }
+.legacy-shell .s-speaking .avatar-svg-default .halo:nth-of-type(1) {
+	animation: svg-glow 0.8s ease-in-out infinite alternate;
+}
+@keyframes svg-glow {
+	0% { r: 32; opacity: 0.25; stroke-width: 2; }
+	100% { r: 36; opacity: 0.5; stroke-width: 3; }
+}
+/* working — blue, orbiting dots + swell */
+.legacy-shell .s-working .avatar-svg-default { --accent: #60a5fa; }
+.legacy-shell .s-working .avatar-svg-default .orbit-dot {
+	opacity: 1;
+	animation: svg-orbit 1.2s linear infinite;
+}
+.legacy-shell .s-working .avatar-svg-default .orbit-dot:nth-of-type(2) {
+	animation-delay: -0.6s;
+	opacity: 0.55;
+}
+@keyframes svg-orbit {
+	0%   { transform: rotate(0deg) translateX(28px) rotate(0deg); }
+	100% { transform: rotate(360deg) translateX(28px) rotate(-360deg); }
+}
+.legacy-shell .s-working .avatar-svg-default .halo:nth-of-type(1) {
+	animation: svg-work-swell 1.2s ease-in-out infinite;
+}
+@keyframes svg-work-swell {
+	0%, 100% { r: 28; opacity: 0.25; }
+	50% { r: 32; opacity: 0.55; }
+}
+/* seeing — amber, visor scan */
+.legacy-shell .s-seeing .avatar-svg-default { --accent: #fbbf24; }
+.legacy-shell .s-seeing .avatar-svg-default .scan-beam {
+	animation: svg-scan 0.7s ease-in-out infinite;
+}
+@keyframes svg-scan {
+	0%   { transform: translateX(-22px); opacity: 0; }
+	25%  { opacity: 0.9; }
+	75%  { opacity: 0.9; }
+	100% { transform: translateX(22px); opacity: 0; }
+}
+.legacy-shell .s-seeing .avatar-svg-default .halo:nth-of-type(1) {
+	animation: svg-see-ring 0.7s ease-out infinite;
+}
+@keyframes svg-see-ring {
+	0%   { r: 28; opacity: 0.6; stroke-width: 2; }
+	100% { r: 38; opacity: 0; stroke-width: 0.5; }
+}
+
+.legacy-shell .avatar-svg-wrap {
+	position: absolute;
+	top: 8px;
+	left: 8px;
+	width: 44px;
+	height: 44px;
+}
+.legacy-shell .hero-svg-wrap {
+	width: 80px;
+	height: 80px;
+	margin-bottom: 16px;
+}
+
+.legacy-shell .header .info { flex: 1; }
+.legacy-shell .header h1 { color: var(--text); font-size: 1.15em; font-weight: 500; }
+.legacy-shell .header .meta {
+	font-size: 16px;
+	color: #888;
+	display: flex;
+	gap: 14px;
+	align-items: center;
+	margin-top: 4px;
+}
+.legacy-shell .header .meta a {
+	color: #999;
+	text-decoration: none;
+	border-bottom: 1px dotted #555;
+}
+.legacy-shell .header .meta a:hover { color: #bbb; }
+.legacy-shell .status-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 4px 12px;
+	border-radius: 12px;
+	font-size: 16px;
+	font-weight: 500;
+}
+.legacy-shell .status-pill.voice-on { background: #1a2e24; color: #4ecca3; }
+.legacy-shell .status-pill.voice-off { background: var(--border); color: #666; }
+.legacy-shell .status-pill .dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: #333;
+}
+.legacy-shell .status-pill.voice-on .dot {
+	background: #4ecca3;
+	box-shadow: 0 0 4px #4ecca3;
+}
+.legacy-shell .header .controls { display: flex; gap: 6px; }
+.legacy-shell button {
+	padding: 7px 14px;
+	border-radius: 8px;
+	border: none;
+	font-size: 12px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 0.15s;
+	white-space: nowrap;
+}
+.legacy-shell .btn-voice {
+	background: #1e5128;
+	color: #fff;
+	padding: 9px 20px;
+	font-size: 13px;
+	border: 1px solid #2a7a3a;
+	border-radius: 10px;
+	box-shadow: 0 0 12px rgba(78, 204, 163, 0.15);
+}
+.legacy-shell .btn-voice:hover {
+	background: #277334;
+	box-shadow: 0 0 16px rgba(78, 204, 163, 0.25);
+}
+.legacy-shell .btn-voice.active {
+	background: #8b1a1a;
+	border-color: #a52222;
+	box-shadow: none;
+}
+.legacy-shell .btn-voice.active:hover { background: #a52222; }
+.legacy-shell .btn-mute { background: var(--border); color: #888; }
+.legacy-shell .btn-mute:hover { background: #3a3a4e; color: #fff; }
+.legacy-shell .btn-mute.muted { background: #4a1a1a; color: #e94560; }
+.legacy-shell .btn-subtle {
+	background: transparent;
+	color: #444;
+	font-size: 11px;
+	padding: 5px 8px;
+}
+.legacy-shell .btn-subtle:hover { color: #888; }
+
+/* Main content */
+.legacy-shell .main {
+	width: 100%;
+	max-width: 960px;
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	padding: 12px 24px 80px;
+	margin: 0 auto;
+}
+
+/* Conversation */
+.legacy-shell .transcript {
+	min-height: 80px;
+	max-height: 30vh;
+	background: var(--surface);
+	border-radius: 12px;
+	padding: 10px 14px;
+	overflow-y: auto;
+	font-size: 16px;
+	line-height: 1.6;
+	margin-bottom: 6px;
+}
+.legacy-shell .t-entry { margin-bottom: 8px; position: relative; user-select: text; }
+.legacy-shell .t-entry .copy-btn {
+	display: none;
+	position: absolute;
+	right: 0;
+	top: 0;
+	background: var(--border);
+	border: 1px solid var(--border);
+	color: #666;
+	font-size: 10px;
+	padding: 2px 6px;
+	border-radius: 4px;
+	cursor: pointer;
+}
+.legacy-shell .t-entry:hover .copy-btn { display: inline-block; }
+.legacy-shell .t-entry .copy-btn:hover { color: #4ecca3; border-color: #4ecca3; }
+.legacy-shell .t-user { color: #5a9fd4; }
+.legacy-shell .t-user::before { content: 'You: '; font-weight: 600; color: #5a9fd4; }
+.legacy-shell .t-assistant { color: #6dbe82; }
+.legacy-shell .t-assistant::before { content: 'Sutando: '; font-weight: 600; color: #6dbe82; }
+.legacy-shell .t-system { color: #888; font-size: 14px; }
+.legacy-shell .t-interim { color: #7fb3e0; opacity: 0.5; font-size: 16px; }
+.legacy-shell .t-interim::before { content: 'You: '; font-weight: 600; }
+@media (prefers-color-scheme: dark) {
+	.legacy-shell .t-user { color: #7fb3e0; }
+	.legacy-shell .t-assistant { color: #a8d8b0; }
+}
+
+/* Input bar */
+.legacy-shell .bottom-panel {
+	position: fixed;
+	bottom: 0;
+	left: 0;
+	right: 0;
+	max-width: 960px;
+	margin: 0 auto;
+	background: var(--surface);
+	z-index: 10;
+	border-top: 1px solid var(--border);
+	padding: 8px 16px 12px;
+}
+.legacy-shell .input-bar { display: flex; gap: 8px; }
+.legacy-shell .input-bar input {
+	flex: 1;
+	padding: 12px 16px;
+	border-radius: 10px;
+	border: 1px solid var(--border);
+	background: var(--surface);
+	color: var(--text);
+	font-size: 16px;
+	outline: none;
+}
+.legacy-shell .input-bar input:focus { border-color: #4ecca3; }
+.legacy-shell .input-bar input::placeholder { color: var(--text-faint); }
+.legacy-shell .btn-send {
+	background: #1a2e24;
+	color: #4ecca3;
+	border: 1px solid #2a4a36;
+}
+.legacy-shell .btn-send:hover { background: #243e30; }
+
+/* Tasks */
+.legacy-shell .tasks {
+	background: var(--surface);
+	border-radius: 10px;
+	padding: 8px 14px;
+	margin-bottom: 10px;
+	font-size: 12px;
+}
+.legacy-shell .task-item {
+	display: flex;
+	align-items: center;
+	gap: 13px;
+	padding: 15px 10px;
+	margin: 0 -10px;
+	border-bottom: 1px solid var(--border);
+	transition: background 0.12s;
+	border-radius: 6px;
+}
+.legacy-shell .task-item:last-child { border-bottom: none; }
+.legacy-shell .task-item:hover { background: var(--surface-elev); cursor: pointer; }
+.legacy-shell .task-status {
+	width: 22px;
+	height: 22px;
+	border-radius: 50%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 12px;
+	flex-shrink: 0;
+}
+.legacy-shell .task-status.working {
+	background: #1e3a5f;
+	color: #60a5fa;
+	animation: pulse 1.5s infinite;
+}
+.legacy-shell .task-status.done { background: #1e4028; color: #4ecca3; }
+.legacy-shell .task-status.error { background: #3a1520; color: #e94560; }
+.legacy-shell .task-status.pending { background: var(--border); color: var(--text-muted); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.legacy-shell .task-text {
+	color: var(--text);
+	flex: 1;
+	word-break: break-word;
+	font-size: 16px;
+	line-height: 1.6;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.legacy-shell .task-text.expanded { white-space: normal; }
+.legacy-shell .task-time {
+	color: var(--text-muted);
+	font-size: 13px;
+	flex-shrink: 0;
+}
+.legacy-shell .task-expand {
+	flex-shrink: 0;
+	padding: 5px 12px;
+	border-radius: 12px;
+	background: #2a4060;
+	color: #d8e8f8;
+	font-size: 13px;
+	font-weight: 500;
+	cursor: pointer;
+	border: 1px solid #3a5075;
+	user-select: none;
+}
+.legacy-shell .task-expand:hover { background: #3a5075; color: #ffffff; }
+.legacy-shell .task-actions {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	align-items: center;
+	margin: -2px 0 10px 30px;
+	padding: 0;
+	user-select: text;
+}
+.legacy-shell .task-action-btn {
+	background: #1e3a5f;
+	color: #d8e8f8;
+	border: 1px solid #2a4a7a;
+	padding: 5px 12px;
+	border-radius: 14px;
+	font-size: 12px;
+	font-weight: 600;
+	cursor: pointer;
+	user-select: none;
+}
+.legacy-shell .task-action-btn:hover {
+	background: #2a4a7a;
+	color: #ffffff;
+	border-color: #3a5a9a;
+}
+.legacy-shell .task-action-btn:active { background: #3a5a9a; }
+.legacy-shell .task-action-input {
+	flex: 1;
+	min-width: 140px;
+	background: var(--surface);
+	border: 1px solid var(--border);
+	color: var(--text);
+	padding: 5px 12px;
+	border-radius: 14px;
+	font-size: 12px;
+	outline: none;
+}
+.legacy-shell .task-action-input:focus { border-color: #4ecca3; }
+.legacy-shell .task-action-sent {
+	color: #4ecca3;
+	font-size: 12px;
+	font-style: italic;
+	margin: 4px 0 10px 30px;
+}
+
+/* Dynamic region — spans the full body width (no max-width), matching the
+   legacy. Constraining to 960px causes the tabs row to look narrow and the
+   starter chips to wrap to two lines. */
+.legacy-shell .dynamic-region {
+	padding: 26px 16px 8px;
+	width: 100%;
+	box-sizing: border-box;
+	user-select: text;
+	-webkit-user-select: text;
+}
+.legacy-shell .dr-questions {
+	background: linear-gradient(135deg, #1e1a12, #2a2218);
+	border: 1px solid #f0ad4e44;
+	border-radius: 10px;
+	padding: 14px 18px;
+	font-size: 16px;
+	box-shadow: 0 0 12px #f0ad4e22;
+}
+.legacy-shell .dr-questions .q-title {
+	color: #f0ad4e;
+	font-size: 13px;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	margin-bottom: 8px;
+}
+.legacy-shell .dr-questions .q-item {
+	color: #ddd;
+	padding: 10px 0;
+	border-bottom: 1px solid #2e281844;
+}
+.legacy-shell .dr-questions .q-item:last-child { border-bottom: none; }
+.legacy-shell .q-actions {
+	margin-top: 10px;
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	flex-wrap: wrap;
+}
+.legacy-shell .q-btn {
+	padding: 6px 16px;
+	border-radius: 14px;
+	font-size: 15px;
+	cursor: pointer;
+	border: 1px solid #2e2818;
+	background: #1e1a12;
+	color: #ccc;
+	transition: all 0.15s;
+}
+.legacy-shell .q-btn:hover { background: #2e2818; border-color: #f0ad4e66; }
+.legacy-shell .q-btn.q-yes { border-color: #4ecca366; color: #4ecca3; }
+.legacy-shell .q-btn.q-yes:hover { background: #1e4028; }
+.legacy-shell .q-btn.q-no { border-color: #e9456066; color: #e94560; }
+.legacy-shell .q-btn.q-no:hover { background: #3a1520; }
+.legacy-shell .q-input {
+	flex: 1;
+	min-width: 120px;
+	padding: 6px 12px;
+	border-radius: 14px;
+	font-size: 15px;
+	border: 1px solid #2e2818;
+	background: #12100a;
+	color: #ccc;
+	outline: none;
+}
+.legacy-shell .q-input:focus { border-color: #f0ad4e66; }
+
+/* Suggestion chips */
+.legacy-shell .dr-chips { text-align: center; }
+.legacy-shell .dr-chips .suggestions-label {
+	margin-bottom: 8px;
+	font-size: 14px;
+	color: var(--text-muted);
+}
+.legacy-shell .dr-chips .suggestion {
+	display: inline-block;
+	background: var(--surface-elev);
+	border: 1px solid var(--border);
+	border-radius: 16px;
+	padding: 7px 15px;
+	margin: 4px;
+	font-size: 15px;
+	color: var(--text-muted);
+	cursor: pointer;
+	transition: all 0.2s;
+}
+.legacy-shell .dr-chips .suggestion:hover {
+	background: var(--border);
+	color: var(--text);
+	border-color: var(--text-faint);
+}
+
+/* Sub-tab bar (Starter / Tasks / Notes / Questions / Activity).
+   Active tab uses the same dark-blue accent as the legacy
+   (renderDRTabs() inlines bg='#2a2a4e'; color='#ccc'; border='#4a4a6e').
+   In light mode, swap to a deeper neutral so the active state still
+   reads on a white background. */
+.legacy-shell .dr-tabs {
+	display: flex;
+	gap: 2px;
+	margin-bottom: 12px;
+}
+.legacy-shell .dr-tabs .dr-tab {
+	cursor: pointer;
+	padding: 6px 0;
+	border-radius: 12px;
+	font-size: 14px;
+	border: 1px solid var(--border);
+	background: transparent;
+	color: var(--text-muted);
+	flex: 1;
+	text-align: center;
+}
+.legacy-shell .dr-tabs .dr-tab.active {
+	background: #2a2a4e;
+	color: #fff;
+	border-color: #4a4a6e;
+}
+.legacy-shell .dr-tabs .dr-tab.unseen-questions { color: #f0ad4e; }
+.legacy-shell .dr-tabs .dr-tab.unseen-tasks { color: #4ecca3; }
+
+/* Keyboard shortcuts bar */
+.legacy-shell .status-bar {
+	text-align: center;
+	font-size: 16px;
+	color: var(--text-muted);
+	letter-spacing: 0.3px;
+	padding: 12px 16px;
+}
+.legacy-shell .status-bar kbd {
+	background: var(--surface-elev);
+	padding: 3px 8px;
+	border-radius: 4px;
+	border: 1px solid var(--border);
+	font-family: monospace;
+	color: #5a8ad6;
+	font-size: 14px;
+}
+.legacy-shell .status-bar .sep {
+	margin: 0 8px;
+	color: var(--text-faint);
+}
+
+/* Section labels */
+.legacy-shell .section-label {
+	font-size: 10px;
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	margin-bottom: 4px;
+	margin-top: 4px;
+}
+
+/* Hidden URL input */
+.legacy-shell .ws-url-input { display: none; }
+.legacy-shell .stats { font-size: 14px; color: var(--text-muted); }
+
+
+/* Hero connect screen — shown when voice is disconnected */
+.legacy-shell .hero {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 48px 20px 24px;
+}
+.legacy-shell .hero .avatar-hero {
+	width: 80px;
+	height: 80px;
+	border-radius: 50%;
+	border: 3px solid #4ecca3;
+	object-fit: cover;
+	margin-bottom: 16px;
+	display: none;
+	transition: all 0.8s ease;
+}
+.legacy-shell .hero .avatar-hero.speaking { border-color: #6ee7b7; }
+.legacy-shell .hero .avatar-hero.working:not(.speaking) {
+	border-color: #60a5fa;
+	box-shadow: 0 0 14px rgba(96,165,250,0.4);
+	animation: avatar-work 2s linear infinite;
+}
+.legacy-shell .hero .avatar-hero.seeing:not(.speaking) {
+	border-color: #fbbf24;
+	box-shadow: 0 0 16px rgba(251,191,36,0.55);
+	animation: avatar-see 1.2s ease-in-out infinite;
+}
+.legacy-shell .hero h2 {
+	color: var(--text);
+	font-size: 1.3em;
+	font-weight: 500;
+	margin-bottom: 4px;
+	transition: all 0.6s ease;
+}
+.legacy-shell .hero .tagline {
+	color: var(--text-muted);
+	font-size: 13px;
+	margin-bottom: 24px;
+	transition: all 0.6s ease;
+}
+.legacy-shell .btn-hero {
+	background: #1e5128;
+	color: #fff;
+	padding: 14px 36px;
+	font-size: 15px;
+	font-weight: 600;
+	border: 1px solid #2a7a3a;
+	border-radius: 14px;
+	box-shadow: 0 0 20px rgba(78, 204, 163, 0.2);
+	cursor: pointer;
+	transition: all 0.2s;
+}
+.legacy-shell .btn-hero:hover {
+	background: #277334;
+	box-shadow: 0 0 28px rgba(78, 204, 163, 0.35);
+	transform: scale(1.02);
+}
+.legacy-shell.voice-active .hero { display: none; }
+
+/* Toast notifications */
+.legacy-shell .toast-container {
+	position: fixed;
+	bottom: 80px;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 100;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	align-items: center;
+}
+.legacy-shell .toast {
+	background: #1a2e24;
+	border: 1px solid #2a4a36;
+	color: #c0c0d0;
+	padding: 10px 16px;
+	border-radius: 10px;
+	font-size: 12px;
+	box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+	animation: toastIn 0.3s ease, toastOut 0.3s ease 3.7s forwards;
+	max-width: 400px;
+	text-align: center;
+}
+.legacy-shell .toast .toast-label { color: #4ecca3; font-weight: 600; }
+@keyframes toastIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes toastOut { from { opacity: 1; } to { opacity: 0; transform: translateY(-8px); } }

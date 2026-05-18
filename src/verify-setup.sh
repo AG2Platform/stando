@@ -93,7 +93,7 @@ fi
 echo ""
 echo "Key files:"
 
-for f in src/voice-agent.ts src/task-bridge.ts src/web-client.ts src/health-check.py src/agent-api.py src/dashboard.py CLAUDE.md; do
+for f in src/voice-agent.ts src/task-bridge.ts src/web-server.ts src/health-check.py src/agent-api.py src/dashboard.py CLAUDE.md; do
   if [ -f "$f" ]; then
     pass "$f"
   else
@@ -118,7 +118,7 @@ done
 echo ""
 echo "Services (if running):"
 
-for port_name in "9900:voice-agent" "8080:web-client" "7844:dashboard" "7843:agent-api"; do
+for port_name in "9900:voice-agent" "8080:voice-agent-http" "7844:dashboard" "7843:agent-api"; do
   port="${port_name%%:*}"
   name="${port_name##*:}"
   if lsof -i :"$port" &>/dev/null; then

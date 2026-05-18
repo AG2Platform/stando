@@ -27,8 +27,7 @@ Phase 0.5.
 
 | Plist | Port | Required |
 |---|---|---|
-| `com.sutando.voice-agent` | 9900 | yes |
-| `com.sutando.web-client` | 8080 | yes |
+| `com.sutando.voice-agent` | 9900 + 8080 | yes (8080 = HTTP for the conversation page; co-hosted via `src/web-server.ts`) |
 | `com.sutando.dashboard` | 7844 | yes |
 | `com.sutando.agent-api` | 7843 | yes |
 | `com.sutando.screen-capture` | 7845 | yes |
