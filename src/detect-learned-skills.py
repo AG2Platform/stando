@@ -214,12 +214,28 @@ before enabling. When satisfied, set `enabled: true` in manifest.json.
 """
     (skill_dir / "SKILL.md").write_text(skill_md)
 
+    # Emit every string that lands inside the generated JS via
+    # json.dumps so backticks, ${...}, backslashes, etc. in the
+    # underlying task text are encoded as literal JSON strings rather
+    # than executable template-literal syntax. The prior version
+    # f-stringed `prompt_template` straight into a backtick literal,
+    # which let any owner task containing `, ${...}, or \ become
+    # executable JS once the user enabled the generated skill.
+    # `{details}` substitution now happens at runtime via
+    # `String.prototype.split().join()` — split/join avoids regex
+    # escape pitfalls and accepts arbitrary user input verbatim.
+    name_js = json.dumps(slug)
+    description_js = json.dumps(f"Learned workflow: {prompt_template[:80]}")
+    prompt_template_js = json.dumps(prompt_template)
     tools_ts = f'''import {{ work }} from "../../src/inline-tools.js";
+
+const PROMPT_TEMPLATE = {prompt_template_js};
+const DETAILS_PLACEHOLDER = "{{details}}";
 
 export const tools = [
   {{
-    name: "{slug}",
-    description: "Learned workflow: {prompt_template[:80]}",
+    name: {name_js},
+    description: {description_js},
     input_schema: {{
       type: "object",
       properties: {{
@@ -230,7 +246,7 @@ export const tools = [
       }},
     }},
     async execute({{ details }}: {{ details?: string }}) {{
-      const prompt = `{prompt_template.replace("{details}", "${details || ''}")}`;
+      const prompt = PROMPT_TEMPLATE.split(DETAILS_PLACEHOLDER).join(details || "");
       return work.execute({{ task: prompt }}, null);
     }},
   }},

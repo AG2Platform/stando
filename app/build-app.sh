@@ -22,9 +22,25 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${1:-$REPO/app/build}"
 APP="$OUT_DIR/Sutando.app"
-SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 ENABLE_SPARKLE="${ENABLE_SPARKLE:-0}"
 SPARKLE_FRAMEWORK="${SPARKLE_FRAMEWORK:-$REPO/app/vendor/Sparkle.framework}"
+
+# Auto-pick the dev cert if SIGNING_IDENTITY is unset. Falls back to
+# ad-hoc ("-") when no cert exists. Rationale: ad-hoc signing yokes the
+# Designated Requirement to the CDHash, so every rebuild creates a fresh
+# TCC row and the previous one becomes a stale entry in System Settings →
+# Privacy & Security. Using a stable cert keeps the DR (and therefore the
+# TCC grant) constant across rebuilds. See app/dev-cert.sh.
+DEV_CERT_NAME="Sutando Dev"
+if [ -z "${SIGNING_IDENTITY:-}" ]; then
+    if security find-identity -v -p codesigning 2>/dev/null \
+        | grep -q "\"$DEV_CERT_NAME\""; then
+        SIGNING_IDENTITY="$DEV_CERT_NAME"
+        echo "  Using dev cert '$DEV_CERT_NAME' (TCC grants will persist across rebuilds)"
+    else
+        SIGNING_IDENTITY="-"
+    fi
+fi
 
 echo "Building Sutando.app → $APP"
 

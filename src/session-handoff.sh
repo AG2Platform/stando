@@ -6,7 +6,20 @@
 # The incoming session reads this in CLAUDE.md or as part of the proactive loop.
 
 REPO="${SUTANDO_HOME:-$HOME/Library/Application Support/Sutando}"
-DEV_REPO="$HOME/Development/core-prod/stando"
+# Dev clone root resolved from the script's own location so this
+# works for any contributor, not just the original author. Honor
+# $SUTANDO_DEV_REPO when set (e.g. running from a vendored copy
+# where the script's parent isn't the dev clone). The previous
+# `$HOME/Development/core-prod/stando` literal silently turned the
+# "Recent Work", "Pending Questions" and "Quota" sections of the
+# handoff blank for anyone whose checkout didn't sit at that path —
+# every downstream `git -C`, `sys.path.insert`, and `QUOTA_FILE`
+# read had its error swallowed by `2>/dev/null`.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEV_REPO="${SUTANDO_DEV_REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+if [ ! -d "$DEV_REPO/src" ]; then
+  echo "session-handoff: DEV_REPO=$DEV_REPO doesn't look like a Sutando clone (no src/). Set SUTANDO_DEV_REPO or move the script." >&2
+fi
 export PATH="/opt/homebrew/bin:$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
 STATE_FILE="$REPO/session-state.md"
 TRANSCRIPT="$1"  # Passed by PreCompact hook as $TRANSCRIPT_PATH

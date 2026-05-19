@@ -9,6 +9,7 @@ import ConversationStream from '@/components/organisms/conversation-stream';
 import ToastOverlay from '@/components/organisms/toast-overlay';
 import { APP_COPY } from '@/const-values/app-copy';
 import { useAgentSse } from '@/hooks/useAgentSse';
+import { useConversation } from '@/hooks/useConversation';
 import { useMuteStateSync } from '@/hooks/useMuteStateSync';
 import { useStandIdentity } from '@/hooks/useStandIdentity';
 import { useTaskPolling } from '@/hooks/useTaskPolling';
@@ -55,6 +56,15 @@ export default function ConversationPage() {
 	const tagline =
 		identity?.nameOrigin?.split(' — ')[1] ?? identity?.nameOrigin ?? APP_COPY.convTagline;
 	const isLive = voice.status === 'live';
+	// Text-only submissions append to the same conversation store the voice
+	// stream feeds. Without this, hitting Send in idle mode wiped the
+	// composer and surfaced nothing — the user's message + reply went into
+	// `entries` but no component rendered them (ConversationStream used to
+	// be gated on isLive only). We now show the stream whenever there's
+	// transcript content, regardless of voice connection state.
+	const { entries } = useConversation();
+	const hasTranscript = entries.length > 0;
+	const showStream = isLive || hasTranscript;
 
 	const onStartVoice = useCallback(() => connect(), [connect]);
 	const onStopVoice = useCallback(() => disconnect(), [disconnect]);
@@ -88,7 +98,7 @@ export default function ConversationPage() {
 			</div>
 
 			<main className="mx-auto flex w-full max-w-[920px] flex-col gap-9 px-6 pb-10 pt-8">
-				{isLive ? (
+				{showStream ? (
 					<ConversationStream errorMessage={voice.errorMessage ?? null} />
 				) : (
 					<>

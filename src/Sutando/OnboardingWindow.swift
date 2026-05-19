@@ -49,6 +49,16 @@ private func onboardingCompleteMarker() -> String { sutandoHomePathForOnboarding
 /// refreshes on relaunch) drops them back where they were instead of at
 /// step 1. Cleaned up by `completeOnboarding()`.
 private func onboardingStepMarker() -> String { sutandoHomePathForOnboarding() + "/.onboarding-step" }
+/// Force-wizard sentinel. The cold-launch path bypasses the wizard by
+/// default (see `markCompleteSkippingWizard` doc-comment for why), so
+/// even `rm .onboarding-complete` doesn't surface it again — the
+/// bypass re-creates the marker on launch. This sentinel is the
+/// opt-in handshake: when present, AppDelegate shows the wizard
+/// instead of bypassing. Dropped by `app/rebuild.sh --reset-onboarding`
+/// and by anything else that explicitly wants the guided flow.
+/// Cleaned up by `completeOnboarding()` so a successful pass doesn't
+/// loop the wizard on every subsequent launch.
+private func onboardingForceMarker() -> String { sutandoHomePathForOnboarding() + "/.onboarding-force" }
 
 /// Resolve the `claude` binary on PATH or in well-known install locations.
 /// Mirrors `SettingsWindowController.claudeCodePath()` — kept as a free
@@ -82,6 +92,15 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     /// call to decide whether to show the wizard instead of the main UI.
     static var needsOnboarding: Bool {
         !FileManager.default.fileExists(atPath: onboardingCompleteMarker())
+    }
+
+    /// True iff the force-wizard sentinel is present. Set by
+    /// `app/rebuild.sh --reset-onboarding` (and anything else that
+    /// explicitly wants the guided flow). AppDelegate consults this
+    /// at cold-launch to decide whether to override the standard
+    /// "bypass wizard" behavior. Cleared by `completeOnboarding()`.
+    static var forceWizardRequested: Bool {
+        FileManager.default.fileExists(atPath: onboardingForceMarker())
     }
 
     /// Write the completion sentinel(s) without showing the wizard.
@@ -2075,11 +2094,11 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
             //   otherwise            → "Grant" (initial / cleared state).
             //
             // The 4s grace period gives macOS time to push the freshly-
-            // granted permission to our process via
-            // `canReadForeignWindowNames()`, which usually flips well
-            // under that window — so on a clean grant the user sees
-            // ✓ without ever seeing a "Restart" prompt. Restart only
-            // appears for the genuinely-stuck case.
+            // granted permission to our process via the TCC daemon, so
+            // `CGPreflightScreenCaptureAccess()` usually flips well
+            // under that window — on a clean grant the user sees ✓
+            // without ever seeing a "Restart" prompt. Restart only
+            // appears when the per-process TCC cache stays stale.
             let stillStaleAfterGrant = (screen != .granted)
                 && (screenGrantClickedAt.map { Date().timeIntervalSince($0) > 4.0 } ?? false)
             if screen == .granted {
@@ -2281,6 +2300,11 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
         // Resume marker is no longer needed once onboarding is done.
         try? FileManager.default.removeItem(atPath: onboardingStepMarker())
+
+        // Clear the force-wizard sentinel so the next cold launch
+        // takes the standard bypass path rather than re-showing the
+        // wizard the user just finished.
+        try? FileManager.default.removeItem(atPath: onboardingForceMarker())
 
         stopPermissionsPolling()
         stopServicesPolling()

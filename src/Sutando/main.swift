@@ -191,11 +191,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Auto-write the completion sentinel so every downstream
             // `needsOnboarding` check (openUnifiedWindow gate, sign-in
             // observer) flips false consistently.
-            if OnboardingWindowController.needsOnboarding {
-                logToFile("Onboarding gate bypassed — writing sentinel, routing to first-launch Settings flow")
-                OnboardingWindowController.markCompleteSkippingWizard()
+            //
+            // Escape hatch: `app/rebuild.sh --reset-onboarding` drops
+            // a `.onboarding-force` sentinel that flips us into the
+            // guided flow on the next launch. Used in dev when you
+            // explicitly want to walk the wizard again — production
+            // cold launches never see this file.
+            if OnboardingWindowController.forceWizardRequested {
+                logToFile("Onboarding force sentinel present — showing wizard, deferring bootstrap until Done")
+                showOnboardingWindow()
+            } else {
+                if OnboardingWindowController.needsOnboarding {
+                    logToFile("Onboarding gate bypassed — writing sentinel, routing to first-launch Settings flow")
+                    OnboardingWindowController.markCompleteSkippingWizard()
+                }
+                proceedAfterOnboardingOrLaunch()
             }
-            proceedAfterOnboardingOrLaunch()
         }
     }
 

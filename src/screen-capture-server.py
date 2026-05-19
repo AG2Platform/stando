@@ -14,6 +14,8 @@ import os
 import threading
 import urllib.request
 import os as _os
+import ctypes
+import time as _time
 from datetime import datetime
 
 PORT = int(os.environ.get("SCREEN_CAPTURE_PORT", "7845"))
@@ -72,18 +74,71 @@ def _notify_capture():
     global _last_notify_ts
     if not NOTIFY_ENABLED:
         return
-    import time as _time
     now = _time.time()
     if now - _last_notify_ts < NOTIFY_DEBOUNCE_S:
         return
     _last_notify_ts = now
     threading.Thread(target=_notify_capture_blocking, daemon=True).start()
 
+
+# Non-prompting TCC preflight for Screen Recording. Without this gate,
+# every /capture against a process that lacks the grant invokes
+# `screencapture`, which forces macOS to fire the TCC consent dialog
+# ("Sutando would like to record this computer's screen and audio").
+# When the user clicks "Open System Settings", that dialog dismisses
+# correctly — but the next /capture in line (from a voice tool, the
+# context-drop hotkey, dashboard polling, etc.) immediately re-summons
+# it, so it LOOKS like the dialog never went away. Gating here breaks
+# the loop: when permission is missing we return 403 without touching
+# screencapture, and the dismissal sticks.
+#
+# CGPreflightScreenCaptureAccess is the documented no-prompt check;
+# called via ctypes so we don't take a pyobjc dependency. The result
+# is cached briefly to keep request handling cheap and to absorb the
+# rare case where the C call itself is slow under load.
+_CORE_GRAPHICS_PATH = "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+_preflight_cache_value = None
+_preflight_cache_at = 0.0
+_PREFLIGHT_CACHE_TTL_S = 2.0
+
+
+def _has_screen_recording_permission():
+    global _preflight_cache_value, _preflight_cache_at
+    now = _time.time()
+    if _preflight_cache_value is not None and now - _preflight_cache_at < _PREFLIGHT_CACHE_TTL_S:
+        return _preflight_cache_value
+    granted = True
+    try:
+        cg = ctypes.CDLL(_CORE_GRAPHICS_PATH)
+        cg.CGPreflightScreenCaptureAccess.restype = ctypes.c_bool
+        granted = bool(cg.CGPreflightScreenCaptureAccess())
+    except Exception:
+        granted = True
+    _preflight_cache_value = granted
+    _preflight_cache_at = now
+    return granted
+
 class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass
 
     def do_GET(self):
         if self.path.startswith("/capture"):
+            # Permission gate FIRST — before _signal_seeing / _notify /
+            # screencapture, all of which would either trigger a TCC
+            # prompt or fire side effects under a missing grant. See
+            # the _has_screen_recording_permission doc-comment above
+            # for why this matters (kills the "dialog won't dismiss"
+            # loop on rebuilt / freshly-installed Sutando.app).
+            if not _has_screen_recording_permission():
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "status": "error",
+                    "error": "Screen Recording permission not granted for Sutando. Enable it in System Settings → Privacy & Security → Screen Recording.",
+                    "code": "permission_denied",
+                }).encode())
+                return
             # Flash agent-state=seeing on the menu-bar avatar for ~1.5s.
             # Non-blocking fire-and-forget; capture succeeds regardless.
             _signal_seeing()

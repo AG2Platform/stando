@@ -96,6 +96,7 @@ voice-state.json
 # fresh clone inherits someone else's wizard state.
 .onboarding-step
 .onboarding-complete
+.onboarding-force
 .firstrun-complete
 
 # Xcode-generated state from opening Package.swift in Xcode. SPM build
