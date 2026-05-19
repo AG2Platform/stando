@@ -96,6 +96,15 @@ final class UnifiedMainWindowController: NSWindowController, NSWindowDelegate, W
 
     func showAndFocus(pane: UnifiedPane? = nil) {
         if let p = pane { selectPane(p, fromUserAction: true) }
+        // Promote to .regular so macOS shows our app name in the top-
+        // left menu bar (and a Dock icon) while the main window is up.
+        // The app launches as .accessory (menu-bar-only) — without this
+        // promotion the system menu keeps belonging to whichever
+        // regular app was previously frontmost, even while Sutando is
+        // the key window. windowShouldClose() puts it back.
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         refreshCloudFooter()
@@ -367,6 +376,25 @@ final class UnifiedMainWindowController: NSWindowController, NSWindowDelegate, W
         // re-uses the same window + WebViews (preserves conversation
         // history).
         window?.orderOut(nil)
+        // Drop back to .accessory so the Dock icon disappears and the
+        // top-left menu returns to whichever regular app is frontmost.
+        // Only demote if no other Sutando window is still visible —
+        // Onboarding / Feedback windows would otherwise be stranded
+        // without a menu while they're up.
+        if !Self.anyOtherUserFacingWindowVisible(excluding: window) {
+            NSApp.setActivationPolicy(.accessory)
+        }
+        return false
+    }
+
+    /// Returns true if any user-facing Sutando window other than
+    /// `excluded` is currently on-screen. Used to decide whether it's
+    /// safe to drop back to `.accessory` when the main window hides.
+    private static func anyOtherUserFacingWindowVisible(excluding excluded: NSWindow?) -> Bool {
+        for w in NSApp.windows where w !== excluded {
+            guard w.isVisible, w.canBecomeKey else { continue }
+            return true
+        }
         return false
     }
 

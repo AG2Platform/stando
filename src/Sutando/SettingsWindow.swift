@@ -218,6 +218,26 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private var claudeStatusLabel: NSTextField?
     private var claudeActionButton: NSButton?
     private var claudeSpinner: NSProgressIndicator?
+    /// Live state for the Claude Code row. Drives label/button copy +
+    /// dictates what `claudeCodeAction()` does on click. Refreshed by
+    /// `refreshClaudeCodeUI()` (which kicks off `ClaudeCodeAuth.probeState`).
+    private var claudeState: ClaudeCodeState = .unknown
+    /// Long-lived `claude auth login --claudeai` subprocess driver.
+    /// Allocated on Sign in, torn down on success / cancel / error.
+    private var claudeAuthSession: ClaudeCodeAuthSession?
+    /// Background-polling timer kept alive while the OAuth panel is up.
+    /// Picks up out-of-band sign-ins (e.g. user runs `claude auth login`
+    /// in a Terminal window while our panel is open).
+    private var claudeAuthPollTimer: Timer?
+    // Inline OAuth panel — hidden until the user clicks Sign in, then
+    // hosts the URL field + paste-the-code field + status line so the
+    // whole flow lives inside Settings (no Terminal/tmux hop).
+    private var claudeAuthPanel: NSStackView?
+    private var claudeAuthURLField: NSTextField?
+    private var claudeAuthCodeField: NSTextField?
+    private var claudeAuthSubmitButton: NSButton?
+    private var claudeAuthSpinner: NSProgressIndicator?
+    private var claudeAuthStatusLabel: NSTextField?
     private var codexStatusLabel: NSTextField?
     private var codexActionButton: NSButton?
     private var geminiStatusLabel: NSTextField?
@@ -364,9 +384,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             stack.addArrangedSubview(channelRow(channel))
         }
 
-        // Claude Code (prereq for the core-agent service)
+        // Claude Code (prereq for the core-agent service). Row matches
+        // the onboarding wizard's step 3: 3-state probe (not installed
+        // / installed-but-not-signed-in / signed in) + inline OAuth
+        // panel that drives `claude auth login --claudeai` as a
+        // subprocess so the user never has to touch Terminal.
         stack.addArrangedSubview(sectionHeader("Claude Code"))
         stack.addArrangedSubview(claudeCodeRow())
+        let oauthPanel = makeClaudeAuthPanel()
+        oauthPanel.isHidden = true
+        claudeAuthPanel = oauthPanel
+        stack.addArrangedSubview(oauthPanel)
 
         // Optional CLI delegates (codex / gemini). Used by the
         // claude-codex, claude-gemini, and claude-router skills. Sutando
@@ -1153,125 +1181,402 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         return row
     }
 
-    /// Resolve `claude` on PATH or in well-known install locations.
-    /// Settings inherits a sparse PATH from launchd, so we also look in
-    /// the standard places where `claude.ai/install.sh` and Homebrew
-    /// drop the binary.
+    /// Wrapper around the shared resolver. Retained so other Settings
+    /// code (stepperStatus, etc.) can keep calling `claudeCodePath()`
+    /// without each site needing to know about `ClaudeCodeAuth`.
     private func claudeCodePath() -> String? {
-        var dirs = (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":").map(String.init)
-        dirs.append(contentsOf: [
-            NSHomeDirectory() + "/.local/bin",
-            "/usr/local/bin",
-            "/opt/homebrew/bin",
-            NSHomeDirectory() + "/.npm-global/bin",
-        ])
-        for dir in dirs where !dir.isEmpty {
-            let path = dir + "/claude"
-            if FileManager.default.isExecutableFile(atPath: path) { return path }
-        }
-        return nil
+        return ClaudeCodeAuth.resolveBinary()
     }
 
-    private func refreshClaudeCodeUI() {
-        if let path = claudeCodePath() {
-            let homeRel = path.hasPrefix(NSHomeDirectory())
-                ? "~" + path.dropFirst(NSHomeDirectory().count)
-                : path
-            claudeStatusLabel?.stringValue =
-                "Installed at \(homeRel). If you haven't authenticated, click Sign in."
-            claudeStatusLabel?.textColor = .labelColor
-            claudeActionButton?.title = "Sign in…"
+    /// Apply the latest probe result to the row's label / button. Mirrors
+    /// the onboarding wizard's `applyClaudeState` so both surfaces show
+    /// the same three states (not installed / not signed in / signed in)
+    /// with the same copy and colors.
+    private func applyClaudeCodeState(_ state: ClaudeCodeState) {
+        guard let label = claudeStatusLabel, let button = claudeActionButton else { return }
+        claudeState = state
+        button.isEnabled = true
+        switch state {
+        case .notInstalled:
+            label.stringValue = "Claude Code is not installed yet. Required for the core agent (proactive loop, voice tasks)."
+            label.textColor = .secondaryLabelColor
+            button.title = "Install"
+            stopClaudeAuthPolling()
+        case .notSignedIn:
+            if let path = ClaudeCodeAuth.resolveBinary() {
+                let rel = path.hasPrefix(NSHomeDirectory())
+                    ? "~" + path.dropFirst(NSHomeDirectory().count)
+                    : path
+                label.stringValue = "Installed at \(rel) but not signed in."
+            } else {
+                label.stringValue = "Installed but not signed in."
+            }
+            label.textColor = .systemOrange
+            button.title = "Sign in"
             emitOnboardingOnce("claude_installed")
-        } else {
-            claudeStatusLabel?.stringValue =
-                "Not installed. Required for the core agent (proactive loop, voice tasks)."
-            claudeStatusLabel?.textColor = .secondaryLabelColor
-            claudeActionButton?.title = "Install"
+        case .signedIn:
+            label.stringValue = "✓ Claude Code is installed and signed in."
+            label.textColor = .systemGreen
+            button.title = "Re-check"
+            stopClaudeAuthPolling()
+            emitOnboardingOnce("claude_installed")
+        case .unknown:
+            label.stringValue = "Checking…"
+            label.textColor = .secondaryLabelColor
+            button.title = "Re-check"
+        }
+        // Panel visibility is a pure function of "is a sign-in
+        // subprocess in flight". Centralising here avoids stale-panel
+        // bugs where the row independently flips to ✓ via keychain
+        // auto-detect while the panel is still up.
+        claudeAuthPanel?.isHidden = (claudeAuthSession == nil)
+    }
+
+    /// Kick off a fresh probe and apply the result. Cheap (one short-
+    /// lived `claude auth status` subprocess + a metadata-only keychain
+    /// lookup), so it's safe to call from the 1.5s status-polling tick
+    /// the rest of Settings already uses.
+    private func refreshClaudeCodeUI() {
+        if ClaudeCodeAuth.resolveBinary() == nil {
+            applyClaudeCodeState(.notInstalled)
+            return
+        }
+        ClaudeCodeAuth.probeState { [weak self] state in
+            self?.applyClaudeCodeState(state)
         }
     }
 
     @objc private func claudeCodeAction() {
-        if claudeCodePath() != nil {
-            // Installed → the Core CLI tmux pane already has claude attached.
-            // Send `/login` as a slash-command so the in-process claude opens
-            // its browser auth flow; switch the unified window to the CLI pane
-            // so the user sees the prompt land. Fall back to Terminal only if
-            // the tmux session isn't reachable (cold start, before startup.sh
-            // has booted the core-agent service).
-            let sent = appDelegate?.tmuxSendKeys(session: "sutando-core", keys: "/login") ?? false
-            if sent {
-                appDelegate?.unifiedWindow?.showAndFocus(pane: .cli)
-                showBanner("Sent /login to Core CLI — follow the prompt there.", color: .systemGreen)
-            } else {
-                openTerminalRunning("claude /login")
-            }
-        } else {
+        switch claudeState {
+        case .notInstalled, .unknown:
             runClaudeCodeInstaller()
+        case .notSignedIn:
+            startClaudeSignIn()
+        case .signedIn:
+            // "Re-check" — manual nudge while we re-probe.
+            claudeStatusLabel?.stringValue = "Re-checking…"
+            claudeStatusLabel?.textColor = .secondaryLabelColor
+            refreshClaudeCodeUI()
         }
     }
 
-    /// Open Terminal.app with a one-shot command. Falls back to a
-    /// notification if Terminal automation is denied.
-    private func openTerminalRunning(_ command: String) {
-        let escaped = command.replacingOccurrences(of: "\\", with: "\\\\")
-                             .replacingOccurrences(of: "\"", with: "\\\"")
-        let source = """
-        tell application "Terminal"
-            activate
-            do script "\(escaped)"
-        end tell
-        """
-        var err: NSDictionary?
-        NSAppleScript(source: source)?.executeAndReturnError(&err)
-        if err != nil {
-            showBanner("Open Terminal and run: \(command)", color: .systemOrange)
-        }
-    }
-
-    /// Run `curl -fsSL https://claude.ai/install.sh | bash` via NSTask.
-    /// The official installer lands the binary at ~/.local/bin/claude (no
-    /// sudo needed) and updates the user's shell rc.
+    /// Run `curl -fsSL https://claude.ai/install.sh | bash` via the
+    /// shared installer helper. On success we re-probe and the row
+    /// flips to "not signed in" (which exposes the Sign in button).
     private func runClaudeCodeInstaller() {
         claudeActionButton?.isEnabled = false
         claudeSpinner?.startAnimation(nil)
-        claudeStatusLabel?.stringValue = "Installing Claude Code…"
+        claudeStatusLabel?.stringValue = "Installing Claude Code (this can take ~30s)…"
         claudeStatusLabel?.textColor = .secondaryLabelColor
 
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-            // -l so the installer's PATH lookups (curl, install -d, etc.)
-            // pick up Homebrew + system paths cleanly; -c for the inline
-            // pipeline.
-            proc.arguments = ["-lc", "curl -fsSL https://claude.ai/install.sh | bash"]
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = pipe
-            var output = ""
-            var success = false
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                output = String(data: data, encoding: .utf8) ?? ""
-                success = proc.terminationStatus == 0
-            } catch {
-                output = error.localizedDescription
-            }
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.claudeSpinner?.stopAnimation(nil)
-                self.claudeActionButton?.isEnabled = true
-                self.refreshClaudeCodeUI()
-                if success && self.claudeCodePath() != nil {
-                    self.showBanner("Installed Claude Code. Click Sign in to authenticate.", color: .systemGreen)
-                } else {
-                    let snippet = output.split(separator: "\n").suffix(3).joined(separator: " · ")
-                    self.showBanner("Install failed: \(snippet.prefix(220))", color: .systemRed)
-                }
+        ClaudeCodeAuth.runInstaller { [weak self] success, output in
+            guard let self = self else { return }
+            self.claudeSpinner?.stopAnimation(nil)
+            self.claudeActionButton?.isEnabled = true
+            self.refreshClaudeCodeUI()
+            if success && ClaudeCodeAuth.resolveBinary() != nil {
+                self.showBanner("Installed Claude Code. Click Sign in to authenticate.", color: .systemGreen)
+            } else {
+                let snippet = output.split(separator: "\n").suffix(3).joined(separator: " · ")
+                self.showBanner("Install failed: \(snippet.prefix(220))", color: .systemRed)
             }
         }
+    }
+
+    // MARK: - Inline OAuth panel (mirrors OnboardingWindow step 3)
+
+    /// Build the panel that's revealed when the user clicks Sign in.
+    /// Shows the OAuth URL we opened in the browser + the field where
+    /// the user pastes the authorization code the redirect page hands
+    /// them. The submit button feeds the code to the CLI's stdin.
+    private func makeClaudeAuthPanel() -> NSStackView {
+        let panel = NSStackView()
+        panel.orientation = .vertical
+        panel.alignment = .leading
+        panel.spacing = 10
+        panel.edgeInsets = NSEdgeInsets(top: 12, left: 14, bottom: 12, right: 14)
+        panel.wantsLayer = true
+        panel.layer?.backgroundColor = Theme.cardBackground.cgColor
+        panel.layer?.cornerRadius = 8
+        panel.layer?.borderWidth = 1
+        panel.layer?.borderColor = Theme.separator.cgColor
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.widthAnchor.constraint(equalToConstant: 504).isActive = true
+
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.spacing = 10
+        header.alignment = .centerY
+        let title = NSTextField(labelWithString: "Sign in to Claude Code")
+        title.font = .systemFont(ofSize: 13, weight: .semibold)
+        header.addArrangedSubview(title)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        header.addArrangedSubview(spacer)
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        spinner.widthAnchor.constraint(equalToConstant: 14).isActive = true
+        spinner.heightAnchor.constraint(equalToConstant: 14).isActive = true
+        claudeAuthSpinner = spinner
+        header.addArrangedSubview(spinner)
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelClaudeAuth))
+        cancel.bezelStyle = .recessed
+        cancel.font = .systemFont(ofSize: 11)
+        header.addArrangedSubview(cancel)
+        panel.addArrangedSubview(header)
+
+        let step1 = NSTextField(labelWithString:
+            "1. We've opened claude.com in your browser. Sign in with your Anthropic / Claude account.")
+        step1.font = .systemFont(ofSize: 12)
+        step1.textColor = .secondaryLabelColor
+        step1.maximumNumberOfLines = 2
+        step1.lineBreakMode = .byWordWrapping
+        step1.preferredMaxLayoutWidth = 480
+        panel.addArrangedSubview(step1)
+
+        // Callout — users overwhelmingly miss the copy-code step on
+        // their first OAuth-via-CLI experience. Be loud about it.
+        let calloutBox = NSStackView()
+        calloutBox.orientation = .horizontal
+        calloutBox.spacing = 10
+        calloutBox.alignment = .top
+        calloutBox.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 10, right: 12)
+        calloutBox.wantsLayer = true
+        calloutBox.layer?.backgroundColor = NSColor.systemYellow.withAlphaComponent(0.12).cgColor
+        calloutBox.layer?.cornerRadius = 6
+        let warnIcon = NSTextField(labelWithString: "⚠")
+        warnIcon.font = .systemFont(ofSize: 14, weight: .bold)
+        warnIcon.textColor = .systemOrange
+        calloutBox.addArrangedSubview(warnIcon)
+        let calloutText = NSTextField(labelWithString:
+            "Don't close the browser tab! After you sign in, the page will show you an authorization code. Copy it from there and paste below — Sutando can't see what's on the page.")
+        calloutText.font = .systemFont(ofSize: 12)
+        calloutText.textColor = .labelColor
+        calloutText.maximumNumberOfLines = 4
+        calloutText.lineBreakMode = .byWordWrapping
+        calloutText.preferredMaxLayoutWidth = 440
+        calloutBox.addArrangedSubview(calloutText)
+        panel.addArrangedSubview(calloutBox)
+
+        let urlRow = NSStackView()
+        urlRow.orientation = .horizontal
+        urlRow.spacing = 8
+        urlRow.alignment = .centerY
+        let urlField = NSTextField(string: "")
+        urlField.font = .systemFont(ofSize: 11)
+        urlField.textColor = .secondaryLabelColor
+        urlField.isBordered = false
+        urlField.isEditable = false
+        urlField.isSelectable = true
+        urlField.drawsBackground = false
+        urlField.usesSingleLineMode = true
+        urlField.cell?.lineBreakMode = .byTruncatingTail
+        urlField.translatesAutoresizingMaskIntoConstraints = false
+        urlField.widthAnchor.constraint(equalToConstant: 360).isActive = true
+        claudeAuthURLField = urlField
+        urlRow.addArrangedSubview(urlField)
+        let openAgain = NSButton(title: "Open browser",
+                                 target: self,
+                                 action: #selector(reopenClaudeAuthURL))
+        openAgain.bezelStyle = .recessed
+        openAgain.font = .systemFont(ofSize: 11)
+        urlRow.addArrangedSubview(openAgain)
+        let copyURL = NSButton(title: "Copy",
+                               target: self,
+                               action: #selector(copyClaudeAuthURL))
+        copyURL.bezelStyle = .recessed
+        copyURL.font = .systemFont(ofSize: 11)
+        urlRow.addArrangedSubview(copyURL)
+        panel.addArrangedSubview(urlRow)
+
+        let step2 = NSTextField(labelWithString:
+            "2. After signing in, copy the authorization code the page shows you and paste it here:")
+        step2.font = .systemFont(ofSize: 12)
+        step2.textColor = .secondaryLabelColor
+        step2.maximumNumberOfLines = 2
+        step2.lineBreakMode = .byWordWrapping
+        step2.preferredMaxLayoutWidth = 480
+        panel.addArrangedSubview(step2)
+
+        let codeRow = NSStackView()
+        codeRow.orientation = .horizontal
+        codeRow.spacing = 8
+        codeRow.alignment = .centerY
+        let codeField = NSTextField()
+        codeField.placeholderString = "paste authorization code"
+        codeField.translatesAutoresizingMaskIntoConstraints = false
+        codeField.widthAnchor.constraint(equalToConstant: 360).isActive = true
+        codeField.target = self
+        codeField.action = #selector(submitClaudeAuthCode)
+        claudeAuthCodeField = codeField
+        codeRow.addArrangedSubview(codeField)
+        let submit = NSButton(title: "Submit",
+                              target: self,
+                              action: #selector(submitClaudeAuthCode))
+        submit.bezelStyle = .rounded
+        submit.keyEquivalent = "\r"
+        claudeAuthSubmitButton = submit
+        codeRow.addArrangedSubview(submit)
+        panel.addArrangedSubview(codeRow)
+
+        let statusLine = NSTextField(labelWithString: "")
+        statusLine.font = .systemFont(ofSize: 11)
+        statusLine.textColor = .secondaryLabelColor
+        statusLine.maximumNumberOfLines = 2
+        statusLine.lineBreakMode = .byWordWrapping
+        statusLine.preferredMaxLayoutWidth = 480
+        claudeAuthStatusLabel = statusLine
+        panel.addArrangedSubview(statusLine)
+
+        return panel
+    }
+
+    /// Drive `claude auth login --claudeai` directly from Settings.
+    /// Same flow as the onboarding wizard's step 3 — spawn the CLI as
+    /// a child process, parse the OAuth URL from stdout, open it in
+    /// the browser, then collect the user's pasted code via the panel
+    /// field and pipe it to the CLI's stdin.
+    private func startClaudeSignIn() {
+        guard ClaudeCodeAuth.resolveBinary() != nil else {
+            refreshClaudeCodeUI()
+            return
+        }
+        if claudeAuthSession != nil {
+            claudeAuthPanel?.isHidden = false
+            return
+        }
+        claudeAuthURLField?.stringValue = "Waiting for the CLI to print the sign-in URL…"
+        claudeAuthURLField?.textColor = .secondaryLabelColor
+        claudeAuthCodeField?.stringValue = ""
+        claudeAuthCodeField?.isEnabled = true
+        claudeAuthSubmitButton?.isEnabled = false
+        claudeAuthStatusLabel?.stringValue = ""
+        claudeAuthStatusLabel?.textColor = .secondaryLabelColor
+        claudeAuthPanel?.isHidden = false
+        claudeAuthSpinner?.startAnimation(nil)
+
+        claudeStatusLabel?.stringValue = "Sign-in in progress — follow the prompts below."
+        claudeStatusLabel?.textColor = .secondaryLabelColor
+        claudeActionButton?.isEnabled = false
+
+        let session = ClaudeCodeAuthSession()
+        session.onURL = { [weak self] url in
+            guard let self = self else { return }
+            self.claudeAuthURLField?.stringValue = url
+            self.claudeAuthURLField?.textColor = .labelColor
+            self.claudeAuthSubmitButton?.isEnabled = true
+            self.claudeAuthCodeField?.window?.makeFirstResponder(self.claudeAuthCodeField)
+            if let u = URL(string: url) {
+                NSWorkspace.shared.open(u)
+            }
+        }
+        session.onExit = { [weak self] status in
+            self?.handleClaudeAuthExit(status: status)
+        }
+
+        do {
+            try session.start()
+            claudeAuthSession = session
+            // Backup poll catches out-of-band sign-ins (user runs
+            // `claude auth login` in another window) within ~2s.
+            startClaudeAuthPolling()
+        } catch {
+            claudeAuthSession = nil
+            claudeAuthSpinner?.stopAnimation(nil)
+            claudeAuthPanel?.isHidden = true
+            claudeActionButton?.isEnabled = true
+            showBanner("Failed to launch claude: \(error.localizedDescription)", color: .systemRed)
+        }
+    }
+
+    private func handleClaudeAuthExit(status: Int32) {
+        claudeAuthSession = nil
+        stopClaudeAuthPolling()
+        claudeAuthSpinner?.stopAnimation(nil)
+        claudeActionButton?.isEnabled = true
+        if status == 0 {
+            // Trust the subprocess exit. We just watched `claude auth
+            // login` complete the full OAuth handshake + keychain write
+            // in-process; spending another subprocess round-trip on
+            // `claude auth status` only opens us up to the keychain-ACL
+            // false-negative where the read-side spawn can't see what
+            // the write-side spawn just stored.
+            claudeAuthStatusLabel?.stringValue = "✓ Signed in."
+            claudeAuthStatusLabel?.textColor = .systemGreen
+            claudeAuthPanel?.isHidden = true
+            applyClaudeCodeState(.signedIn)
+            showBanner("Signed in to Claude Code.", color: .systemGreen)
+        } else {
+            claudeAuthStatusLabel?.stringValue =
+                "Sign-in didn't finish (exit \(status)). Click Sign in again, or paste a fresh code."
+            claudeAuthStatusLabel?.textColor = .systemRed
+            claudeAuthCodeField?.isEnabled = true
+            claudeAuthSubmitButton?.isEnabled = false
+        }
+    }
+
+    @objc private func submitClaudeAuthCode() {
+        guard let session = claudeAuthSession else { return }
+        let code = claudeAuthCodeField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !code.isEmpty else {
+            claudeAuthStatusLabel?.stringValue = "Paste the authorization code first."
+            claudeAuthStatusLabel?.textColor = .systemOrange
+            return
+        }
+        claudeAuthCodeField?.isEnabled = false
+        claudeAuthSubmitButton?.isEnabled = false
+        claudeAuthStatusLabel?.stringValue = "Exchanging code…"
+        claudeAuthStatusLabel?.textColor = .secondaryLabelColor
+        session.submitCode(code)
+    }
+
+    @objc private func cancelClaudeAuth() {
+        claudeAuthSession?.cancel()
+        claudeAuthSession = nil
+        stopClaudeAuthPolling()
+        claudeAuthSpinner?.stopAnimation(nil)
+        claudeAuthPanel?.isHidden = true
+        refreshClaudeCodeUI()
+    }
+
+    @objc private func reopenClaudeAuthURL() {
+        guard let urlString = claudeAuthSession?.url, let url = URL(string: urlString) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func copyClaudeAuthURL() {
+        guard let urlString = claudeAuthSession?.url else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(urlString, forType: .string)
+        claudeAuthStatusLabel?.stringValue = "URL copied to clipboard."
+        claudeAuthStatusLabel?.textColor = .secondaryLabelColor
+    }
+
+    private func startClaudeAuthPolling() {
+        stopClaudeAuthPolling()
+        claudeAuthPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            ClaudeCodeAuth.probeState { state in
+                guard state == .signedIn else { return }
+                // Out-of-band success — tear down the hung subprocess
+                // so it doesn't outlive Settings.
+                if let session = self.claudeAuthSession {
+                    session.cancel()
+                    self.claudeAuthSession = nil
+                }
+                self.applyClaudeCodeState(state)
+                self.showBanner("Signed in to Claude Code.", color: .systemGreen)
+            }
+        }
+    }
+
+    private func stopClaudeAuthPolling() {
+        claudeAuthPollTimer?.invalidate()
+        claudeAuthPollTimer = nil
     }
 
     private enum CLIDelegate {
@@ -1531,6 +1836,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func closeWindow() { window?.close() }
+
+    /// NSWindowDelegate hook. Tear down any in-flight `claude auth login`
+    /// subprocess so we don't leak a child process when the user closes
+    /// Settings mid-sign-in.
+    func windowWillClose(_ notification: Notification) {
+        claudeAuthSession?.cancel()
+        claudeAuthSession = nil
+        stopClaudeAuthPolling()
+    }
 
     @objc private func toggleAdvanced() {
         guard let advancedContainer = advancedContainer else { return }

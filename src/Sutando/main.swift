@@ -711,11 +711,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // glyph if neither is on disk (very early dev or partial
             // install). Search order: .app bundle Resources, then the
             // dev-workflow app/branding/ directory beside the binary.
+            // The 1024×1024 source PNG is downscaled to 18×18 by macOS
+            // (Core Graphics interpolates cleanly off a high-res source).
             let bundled = Bundle.main.resourcePath.flatMap { p -> String? in
-                let candidate = p + "/menubar.png"
+                let candidate = p + "/menubar-source.png"
                 return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
             }
-            let templatePath = bundled ?? (workspace + "/app/branding/menubar.png")
+            let templatePath = bundled ?? (workspace + "/app/branding/menubar-source.png")
             let avatarPath = workspace + "/assets/stand-avatar.png"
             if FileManager.default.fileExists(atPath: templatePath),
                let image = NSImage(contentsOfFile: templatePath) {
@@ -1364,18 +1366,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Composited onto the top-right corner of the 18×18 avatar so the
     /// menu bar continuously signals mode without taking an extra slot.
     func avatarImage(presenterActive: Bool, meetingActive: Bool = false) -> NSImage? {
-        // Prefer the bundled monochrome menubar template (Resources/menubar.png
-        // in the .app bundle, or app/branding/menubar.png in the dev tree).
-        // Falls back to the legacy assets/stand-avatar.png so installs
-        // that predate the template still render. Template images get
-        // tinted automatically by macOS — when one is found we keep
+        // Prefer the bundled monochrome menubar template
+        // (Resources/menubar-source.png in the .app bundle, or
+        // app/branding/menubar-source.png in the dev tree). Falls back
+        // to the legacy assets/stand-avatar.png so installs that predate
+        // the template still render. Template images get tinted
+        // automatically by macOS — when one is found we keep
         // isTemplate=true unless we composite a status dot (which needs
         // its own color, so we drop template-ness for that case).
         let bundledTemplate = Bundle.main.resourcePath.flatMap { p -> String? in
-            let candidate = p + "/menubar.png"
+            let candidate = p + "/menubar-source.png"
             return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
         }
-        let templatePath = bundledTemplate ?? (workspace + "/app/branding/menubar.png")
+        let templatePath = bundledTemplate ?? (workspace + "/app/branding/menubar-source.png")
         let fallbackPath = workspace + "/assets/stand-avatar.png"
 
         let baseIsTemplate: Bool

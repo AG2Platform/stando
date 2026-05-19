@@ -5,7 +5,8 @@
 # Reads the transcript, extracts key signals, and writes to session-state.md.
 # The incoming session reads this in CLAUDE.md or as part of the proactive loop.
 
-REPO="$HOME/Desktop/sutando"
+REPO="${SUTANDO_HOME:-$HOME/Library/Application Support/Sutando}"
+DEV_REPO="$HOME/Development/core-prod/stando"
 export PATH="/opt/homebrew/bin:$HOME/.nvm/versions/node/v24.14.1/bin:$PATH"
 STATE_FILE="$REPO/session-state.md"
 TRANSCRIPT="$1"  # Passed by PreCompact hook as $TRANSCRIPT_PATH
@@ -25,7 +26,7 @@ TRANSCRIPT="$1"  # Passed by PreCompact hook as $TRANSCRIPT_PATH
 
   # Recent git activity (what was built)
   echo "## Recent Work (last 10 commits)"
-  git -C "$REPO" log --oneline -10 2>/dev/null
+  git -C "$DEV_REPO" log --oneline -10 2>/dev/null
   echo ""
 
   # Open PRs
@@ -36,14 +37,14 @@ TRANSCRIPT="$1"  # Passed by PreCompact hook as $TRANSCRIPT_PATH
   # Pending questions — canonical home is private machine-<host>/ post-migration.
   # Resolves via util_paths.personal_path() with cwd fallback.
   PQ_PATH=$(SUTANDO_PRIVATE_DIR="${SUTANDO_PRIVATE_DIR:-}" python3 -c "
-import sys; sys.path.insert(0, '$REPO/src')
+import sys; sys.path.insert(0, '$DEV_REPO/src')
 from util_paths import personal_path
 from pathlib import Path
 print(personal_path('pending-questions.md', Path('$REPO')))
 " 2>/dev/null || echo "$REPO/pending-questions.md")
   echo "## Pending Questions"
   if [ -f "$PQ_PATH" ]; then
-    grep -A1 "^## Q" "$PQ_PATH" | head -20
+    grep "^## " "$PQ_PATH" | grep -v "^## Pending" | head -10
   else
     echo "None"
   fi
@@ -51,12 +52,13 @@ print(personal_path('pending-questions.md', Path('$REPO')))
 
   # Tasks in flight
   echo "## Tasks"
-  ls "$REPO/tasks/"*.txt 2>/dev/null | head -5 || echo "None pending"
+  ls "$REPO/tasks/"*.txt 2>/dev/null | wc -l | awk '{print $1 " pending"}' || echo "None pending"
   echo ""
 
   # Quota (with reset times)
   echo "## Quota"
-  QUOTA_FILE="$REPO/skills/quota-tracker/quota-state.json"
+  QUOTA_FILE="$DEV_REPO/skills/quota-tracker/quota-state.json"
+  [ ! -f "$QUOTA_FILE" ] && QUOTA_FILE="$HOME/.claude/skills/quota-tracker/quota-state.json"
   [ ! -f "$QUOTA_FILE" ] && QUOTA_FILE="$REPO/quota-state.json"
   if [ -f "$QUOTA_FILE" ]; then
     python3 -c "

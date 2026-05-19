@@ -56,6 +56,7 @@ SWIFT_SOURCES=(
     "$REPO/src/Sutando/main.swift"
     "$REPO/src/Sutando/LaunchAgentInstaller.swift"
     "$REPO/src/Sutando/SparkleUpdater.swift"
+    "$REPO/src/Sutando/ClaudeCodeAuth.swift"
     "$REPO/src/Sutando/CloudAuth.swift"
     "$REPO/src/Sutando/CloudClient.swift"
     "$REPO/src/Sutando/EnvFile.swift"
@@ -109,11 +110,11 @@ fi
 
 # 4.1 Menubar template icon — monochrome PNG that macOS tints for dark
 # vs light menubars. main.swift loads from Bundle.main.resourcePath first.
-if [ -f "$REPO/app/branding/menubar.png" ]; then
-    cp "$REPO/app/branding/menubar.png" "$APP/Contents/Resources/menubar.png"
-fi
-if [ -f "$REPO/app/branding/menubar@2x.png" ]; then
-    cp "$REPO/app/branding/menubar@2x.png" "$APP/Contents/Resources/menubar@2x.png"
+# We ship the 1024px source directly; macOS rasterizes to 18×18 at
+# render time so a single asset works for both retina and non-retina
+# menubars.
+if [ -f "$REPO/app/branding/menubar-source.png" ]; then
+    cp "$REPO/app/branding/menubar-source.png" "$APP/Contents/Resources/menubar-source.png"
 fi
 
 # 5. Stage the repo source (src + skills + package.json + node_modules) into

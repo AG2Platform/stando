@@ -43,6 +43,8 @@ final class SkillsViewController: NSViewController {
     private var builtinStack: NSStackView?
     private var builtinExpanded = false
 
+    private var learnedSkillsCheckbox: NSButton?
+
     private var lastInventory: CloudClient.CloudInventory?
     private var lastInventoryFetchTs: TimeInterval = 0
     private var pollTimer: Timer?
@@ -138,6 +140,16 @@ final class SkillsViewController: NSViewController {
         builtin.isHidden = true
         builtinStack = builtin
         content.addArrangedSubview(builtin)
+
+        // Behavior section — learned-skills toggle (Slice 4.16).
+        content.addArrangedSubview(groupHeader("Behavior"))
+        let learnedCB = NSButton(checkboxWithTitle: "Enable learned skills (Beta)", target: self, action: #selector(toggleLearnedSkills))
+        learnedCB.state = FileManager.default.fileExists(atPath: learnedSkillsSentinel) ? .on : .off
+        learnedCB.font = .systemFont(ofSize: 13)
+        learnedSkillsCheckbox = learnedCB
+        content.addArrangedSubview(learnedCB)
+        content.addArrangedSubview(emptyRow(
+            "Sutando scans recent tasks for repeated patterns and proposes shortcuts as custom skills. Candidates appear in Pending Questions for your review — nothing is enabled without your approval."))
 
         // Footer note.
         let footer = NSTextField(labelWithString:
@@ -488,6 +500,27 @@ final class SkillsViewController: NSViewController {
     @objc private func openLocalFromRow(_ sender: NSButton) {
         guard let path = sender.identifier?.rawValue else { return }
         NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+    }
+
+    // MARK: - Learned skills
+
+    private var sutandoHome: String {
+        if let h = ProcessInfo.processInfo.environment["SUTANDO_HOME"], !h.isEmpty { return h }
+        return NSHomeDirectory() + "/Library/Application Support/Sutando"
+    }
+
+    private var learnedSkillsSentinel: String { sutandoHome + "/state/learned-skills-enabled.sentinel" }
+
+    @objc private func toggleLearnedSkills() {
+        let fm = FileManager.default
+        let sentinel = learnedSkillsSentinel
+        if fm.fileExists(atPath: sentinel) {
+            try? fm.removeItem(atPath: sentinel)
+        } else {
+            let stateDir = (sentinel as NSString).deletingLastPathComponent
+            try? fm.createDirectory(atPath: stateDir, withIntermediateDirectories: true)
+            fm.createFile(atPath: sentinel, contents: nil)
+        }
     }
 
     // MARK: - File walks
