@@ -1,0 +1,61 @@
+--- a/Sources/MCPServer/InputGuard.swift
++++ b/Sources/MCPServer/InputGuard.swift
+@@ -26,7 +26,7 @@ final class InputGuard: @unchecked Sendable {
+     // MARK: - State
+     private var eventTap: CFMachPort?
+     private var runLoopSource: CFRunLoopSource?
+-    private var watchdogTimer: DispatchSourceTimer?
++    private var watchdogItem: DispatchWorkItem?
+     private let lock = NSLock()
+     private var _engaged = false
+     private var _cancelled = false
+@@ -172,17 +172,17 @@ final class InputGuard: @unchecked Sendable {
+     // MARK: - Watchdog
+
+     private func startWatchdog() {
+-        let timer = DispatchSource.makeTimerSource(queue: .global())
+-        timer.schedule(deadline: .now() + watchdogTimeout)
+-        timer.setEventHandler { [weak self] in
+-            fputs("warning: InputGuard: watchdog fired after \(self?.watchdogTimeout ?? 0)s — auto-disengaging\n", stderr)
+-            self?.disengage()
+-        }
+-        timer.resume()
+-        watchdogTimer = timer
++        // Fire on the main queue so hideOverlay() runs without a nested dispatch.
++        let item = DispatchWorkItem { [weak self] in
++            guard let self = self, self.isEngaged else { return }
++            fputs("warning: InputGuard: watchdog fired after \(self.watchdogTimeout)s — auto-disengaging\n", stderr)
++            self.disengage()
++        }
++        watchdogItem = item
++        DispatchQueue.main.asyncAfter(deadline: .now() + watchdogTimeout, execute: item)
+     }
+
+     private func stopWatchdog() {
+-        watchdogTimer?.cancel()
+-        watchdogTimer = nil
++        watchdogItem?.cancel()
++        watchdogItem = nil
+     }
+
+     // MARK: - Overlay Window
+@@ -279,8 +279,13 @@ final class InputGuard: @unchecked Sendable {
+
+     private func hideOverlay() {
+-        DispatchQueue.main.async { [weak self] in
+-            self?.overlayWindow?.orderOut(nil)
+-            self?.overlayWindow = nil
+-            fputs("log: InputGuard: overlay hidden\n", stderr)
++        let hide: () -> Void = { [weak self] in
++            self?.overlayWindow?.orderOut(nil)
++            self?.overlayWindow = nil
++            fputs("log: InputGuard: overlay hidden\n", stderr)
++        }
++        if Thread.isMainThread {
++            hide()
++        } else {
++            DispatchQueue.main.async(execute: hide)
++            // Wake the run loop so the queued block drains even when the loop is idle.
++            CFRunLoopWakeUp(CFRunLoopGetMain())
+         }
+     }
