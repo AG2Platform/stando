@@ -37,7 +37,7 @@ export default function ConversationTopBar({
 	const busy = isVoiceBusy(voiceStatus);
 	return (
 		<header
-			className="sticky top-0 z-30 flex items-center gap-3.5 border-b border-(--border)/70 bg-(--surface)/75 px-5 py-3 backdrop-blur-[14px] backdrop-saturate-140"
+			className="flex items-center gap-3.5 border-b border-(--border)/70 bg-(--surface)/75 px-5 py-3 backdrop-blur-[14px] backdrop-saturate-140"
 		>
 			<div className="flex min-w-0 flex-1 items-center gap-2.5">
 				<BrandMark />

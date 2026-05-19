@@ -179,19 +179,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             observeCloudAuthSignIn()
             observeCloudAuthRevoked()
             logToFile("App started, workspace=\(workspace)")
-            // Onboarding gate. Until $SUTANDO_HOME/.onboarding-complete
-            // exists, the wizard owns the screen — no main window, no
-            // bootstrap, no auto-sign-in flow. The wizard handles the
-            // Gemini key, Claude CLI, permissions, and the first
-            // launchd-service install itself; on Done it calls back into
-            // proceedAfterOnboardingOrLaunch() which resumes the normal
-            // post-launch path below.
+            // Onboarding wizard is bypassed on cold launch. The wizard
+            // turned every transient failure (cloud sign-in, Claude
+            // install, permission prompt) into "the app won't open"
+            // because it owned the screen until every step finished.
+            // SettingsWindowController.needsFirstLaunchSetup hosts the
+            // same Gemini-key / Claude CLI / permissions flow inside
+            // a closable window via `maybeRunFirstLaunchFlow()` below,
+            // so first-launch users still land on the setup stepper —
+            // they just don't get locked out if anything in it stalls.
+            // Auto-write the completion sentinel so every downstream
+            // `needsOnboarding` check (openUnifiedWindow gate, sign-in
+            // observer) flips false consistently.
             if OnboardingWindowController.needsOnboarding {
-                logToFile("Onboarding incomplete — showing welcome wizard")
-                showOnboardingWindow()
-            } else {
-                proceedAfterOnboardingOrLaunch()
+                logToFile("Onboarding gate bypassed — writing sentinel, routing to first-launch Settings flow")
+                OnboardingWindowController.markCompleteSkippingWizard()
             }
+            proceedAfterOnboardingOrLaunch()
         }
     }
 
@@ -268,8 +272,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // runs during onboarding — this covers the post-onboarding
         // returning-user path that PR-cdhash-mismatch first surfaced.
         if !CGPreflightScreenCaptureAccess() {
-            logToFile("autoBootstrapServices: Screen Recording not granted — requesting prompt")
-            CGRequestScreenCaptureAccess()
+            // See `SystemPermission.shouldSkipScreenRecordingPrompt`.
+            // CGRequestScreenCaptureAccess traps on macOS 26 without
+            // the new screen-capture entitlement and may regress on
+            // other versions, taking the app down before the menu bar
+            // even appears. When the safety gate is tripped we open
+            // the System Settings deeplink instead so the user can fix
+            // the cdhash-mismatch case manually.
+            if SystemPermission.shouldSkipScreenRecordingPrompt {
+                logToFile("autoBootstrapServices: Screen Recording not granted — skipping in-process prompt, opening System Settings")
+                if let url = SystemPermission.screenRecording.systemSettingsURL {
+                    DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+                }
+            } else {
+                logToFile("autoBootstrapServices: Screen Recording not granted — requesting prompt")
+                CGRequestScreenCaptureAccess()
+            }
         }
         // Screen-capture has its own supervisor — start it here so it
         // races alongside launchd bootstrap rather than waiting for it.

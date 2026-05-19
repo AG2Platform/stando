@@ -21,13 +21,15 @@ import { useVoiceSession } from '@/hooks/useVoiceSession';
  * Conversation page — full redesign.
  *
  * Layout (top to bottom):
- *   .conv-topbar          sticky glass header (brand · live indicator · voice)
+ *   .conv-chrome          sticky wrapper — top bar + global panel dock
+ *     ConversationTopBar  brand · live indicator · voice
+ *     ConversationPanels  pill row launching Tasks / Notes / Asks / Activity
+ *                         (drawer slides down below the dock when open)
  *   .conv-main
  *     .conv-hero          idle only — animated orb + greeting + Start voice
  *     KbdHintsRow         hotkey reminders under the hero
  *     QuickStartGrid      idle only — quick-start cards
  *     .conv-stream-card   live only — chat-bubble transcript
- *     ConversationPanels  always — tabbed Tasks / Notes / Asks / Activity
  *   .conv-composer-wrap   fixed pill composer at the bottom
  *
  * `.legacy-shell` is retained on the root so existing CSS (avatar
@@ -72,15 +74,18 @@ export default function ConversationPage() {
 
 	return (
 		<div className={`legacy-shell conv-root ${isLive ? 'is-live' : ''}`}>
-			<ConversationTopBar
-				standName={standName}
-				voiceStatus={voice.status}
-				muted={voice.muted}
-				dashboardUrl={DASHBOARD_ORIGIN}
-				onStartVoice={onStartVoice}
-				onStopVoice={onStopVoice}
-				onToggleMute={toggleMute}
-			/>
+			<div className="sticky top-0 z-30">
+				<ConversationTopBar
+					standName={standName}
+					voiceStatus={voice.status}
+					muted={voice.muted}
+					dashboardUrl={DASHBOARD_ORIGIN}
+					onStartVoice={onStartVoice}
+					onStopVoice={onStopVoice}
+					onToggleMute={toggleMute}
+				/>
+				<ConversationPanels />
+			</div>
 
 			<main className="mx-auto flex w-full max-w-[920px] flex-col gap-9 px-6 pb-10 pt-8">
 				{isLive ? (
@@ -99,8 +104,6 @@ export default function ConversationPage() {
 						<QuickStartGrid connected={isLive} onPick={onPickPrompt} />
 					</>
 				)}
-
-				<ConversationPanels />
 			</main>
 
 			<ConversationComposer

@@ -13,6 +13,8 @@
 #   bash app/rebuild.sh             # fast: rebuild app/build/Sutando.app, launch it
 #   bash app/rebuild.sh --install   # rebuild AND copy to /Applications/, launch from there
 #   bash app/rebuild.sh --full      # also re-stage app/vendor/runtime/ (slow path)
+#   bash app/rebuild.sh --reset-onboarding
+#                                   # wipe onboarding markers so the wizard shows on launch
 #
 # Why two launch locations:
 #   - app/build/Sutando.app keeps the same path across rebuilds, so TCC
@@ -23,20 +25,22 @@
 #     TCC to re-prompt because macOS treats a different bundle path as
 #     a different app.
 #
-# Combine flags freely:  bash app/rebuild.sh --full --install
+# Combine flags freely:  bash app/rebuild.sh --full --install --reset-onboarding
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL=0
 FULL=0
+RESET_ONBOARDING=0
 
 for arg in "$@"; do
     case "$arg" in
         --install) INSTALL=1 ;;
         --full)    FULL=1 ;;
+        --reset-onboarding) RESET_ONBOARDING=1 ;;
         -h|--help)
-            sed -n '2,26p' "$0"
+            sed -n '2,28p' "$0"
             exit 0
             ;;
         *)
@@ -45,6 +49,21 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+if [ "$RESET_ONBOARDING" = "1" ]; then
+    echo "→ Resetting onboarding markers..."
+    # Dev builds (app/build/) walk up to the repo for $SUTANDO_HOME when the
+    # env var is unset; installed builds fall back to Application Support.
+    for root in "$REPO" "${SUTANDO_HOME:-}" "$HOME/Library/Application Support/Sutando"; do
+        [ -z "$root" ] && continue
+        root="${root/#\~/$HOME}"
+        rm -f \
+            "$root/.onboarding-complete" \
+            "$root/.onboarding-step" \
+            "$root/.firstrun-complete"
+    done
+    echo "  ✓ Cleared — wizard will show on next launch."
+fi
 
 echo "→ Quitting any running Sutando..."
 osascript -e 'tell application "Sutando" to quit' 2>/dev/null || true

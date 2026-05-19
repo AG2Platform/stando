@@ -78,6 +78,7 @@ export const APP_COPY = {
 	convPanelNotes: 'Notes',
 	convPanelQuestions: 'Asks',
 	convPanelActivity: 'Activity',
+	convPanelDrawerClose: 'Close panel',
 	convComposerPlaceholder: 'Ask Sutando anything…',
 	convComposerSend: 'Send',
 	convDashboardLink: 'Dashboard',

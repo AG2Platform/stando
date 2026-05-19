@@ -84,6 +84,32 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         !FileManager.default.fileExists(atPath: onboardingCompleteMarker())
     }
 
+    /// Write the completion sentinel(s) without showing the wizard.
+    /// `applicationDidFinishLaunching` calls this on first launch so
+    /// the wizard never appears — the Settings panel's first-launch
+    /// stepper (`SettingsWindowController.needsFirstLaunchSetup`)
+    /// hosts the same Gemini-key / Claude CLI / permissions flow and
+    /// runs in a window the user can close, dismiss, or come back to.
+    /// The wizard was a launch-blocking modal that turned every
+    /// transient failure in those flows into "the app won't open" for
+    /// the user. Keeping the wizard code in-tree (rather than deleting
+    /// it) means we can still wheel it out later if we decide the
+    /// guided flow is worth the maintenance — but it's no longer on
+    /// the cold-launch critical path.
+    static func markCompleteSkippingWizard() {
+        let marker = onboardingCompleteMarker()
+        let dir = (marker as NSString).deletingLastPathComponent
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: marker) {
+            FileManager.default.createFile(atPath: marker, contents: Data())
+        }
+        // Resume marker from a partially-completed wizard run is no
+        // longer meaningful once the wizard is bypassed — clean it up
+        // so a future re-enable doesn't drop the user back into a
+        // half-completed step.
+        try? FileManager.default.removeItem(atPath: onboardingStepMarker())
+    }
+
     // MARK: - Step state
 
     private enum Step: Int, CaseIterable {

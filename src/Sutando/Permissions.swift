@@ -104,6 +104,35 @@ enum SystemPermission: String, CaseIterable {
     nonisolated(unsafe) private static var liveScreenInFlight: Bool = false
     private static let liveScreenLock = NSLock()
 
+    /// True iff the in-process Screen Recording prompt
+    /// (`CGRequestScreenCaptureAccess`) is unsafe to call from this
+    /// process on the current macOS.
+    ///
+    /// Background: Apple tightened the Screen Recording TCC model in
+    /// macOS 15 (Sequoia, per-app granular capture) and again in
+    /// macOS 26. On macOS 26 specifically, the request API traps
+    /// before returning when called from an app that doesn't carry
+    /// the new (still-undocumented) screen-capture entitlement —
+    /// which `app/Sutando.entitlements` does not. The observed
+    /// symptom was the v0.3.0 onboarding wizard crashing on first
+    /// launch and locking every user on macOS 26 out of the app.
+    ///
+    /// We default to "unsafe" on macOS 26+ where we have hard
+    /// evidence, and also honor `SUTANDO_SKIP_SCREEN_RECORDING_PROMPT=1`
+    /// as a no-rebuild escape hatch for users hitting similar crashes
+    /// on other versions. On older macOS the in-process prompt has
+    /// worked for years; we keep it as the default UX there.
+    ///
+    /// When this returns true, callers must open the System Settings
+    /// deeplink instead of calling `CGRequestScreenCaptureAccess()`.
+    /// The deeplink works on every macOS version that has TCC.
+    static var shouldSkipScreenRecordingPrompt: Bool {
+        if ProcessInfo.processInfo.environment["SUTANDO_SKIP_SCREEN_RECORDING_PROMPT"] == "1" {
+            return true
+        }
+        return ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 26
+    }
+
     /// Return the live SCShareableContent result if we ran the probe in
     /// the last 30 seconds — otherwise nil so callers fall through to
     /// the synchronous CG checks. 30s matches the typical
@@ -132,39 +161,27 @@ enum SystemPermission: String, CaseIterable {
     /// Coalesced: at most one in-flight probe at a time. Subsequent
     /// calls while one is running are no-ops.
     static func runLiveScreenRecordingProbe() {
-        liveScreenLock.lock()
-        if liveScreenInFlight {
-            liveScreenLock.unlock()
-            return
-        }
-        liveScreenInFlight = true
-        liveScreenLock.unlock()
-
-        guard #available(macOS 12.3, *) else {
-            liveScreenLock.lock()
-            liveScreenInFlight = false
-            liveScreenLock.unlock()
-            return
-        }
-
-        Task.detached(priority: .utility) {
-            let granted: Bool
-            do {
-                _ = try await SCShareableContent.current
-                granted = true
-            } catch {
-                // SCShareableContent throws SCStreamError.userDeclined
-                // when permission isn't granted. Anything else (window
-                // server unavailable, etc.) we conservatively treat as
-                // ungranted so the row stays ✗ rather than going stale-✓.
-                granted = false
-            }
-            liveScreenLock.lock()
-            liveScreenGranted = granted
-            liveScreenAt = Date()
-            liveScreenInFlight = false
-            liveScreenLock.unlock()
-        }
+        // Disabled across all macOS versions. Calling
+        // `SCShareableContent.current` was crashing the v0.3.0
+        // onboarding wizard on macOS 26 (no screen-capture
+        // entitlement), and Apple has touched this surface in every
+        // major macOS release since 15 (Sequoia) — keeping the call
+        // alive on "supposedly safe" versions is asking for the same
+        // app-doesn't-open regression to recur. The probe was only
+        // ever defensive (catching revoke-while-wizard-is-open), not
+        // load-bearing: skipping it makes `status()` fall through to
+        // the synchronous `CGPreflightScreenCaptureAccess` +
+        // window-name checks, which is the same fallback path used
+        // on macOS < 12.3 and which covers the install flow fine.
+        //
+        // Re-enable only after the .app carries the macOS 26
+        // screen-capture entitlement (and a regression test confirms
+        // first-launch survival on every supported macOS major).
+        // The original implementation lives in git history at the
+        // commit that introduced this guard — restore via `git log
+        // -p src/Sutando/Permissions.swift` rather than ressurecting
+        // dead code in the file.
+        return
     }
 
     /// Live probe: returns true iff we can read at least one window name
@@ -208,6 +225,25 @@ enum SystemPermission: String, CaseIterable {
             let trusted = AXIsProcessTrustedWithOptions(opts)
             completion(trusted ? .granted : .notDetermined)
         case .screenRecording:
+            // See `shouldSkipScreenRecordingPrompt` doc-comment. The
+            // CG request path traps on macOS 26 without the new
+            // (still-undocumented) screen-capture entitlement and may
+            // regress on other versions, so when the safety gate is
+            // tripped we skip the in-process prompt entirely and
+            // route the user straight to System Settings. The helper-
+            // trigger path still runs because that's a separate
+            // python3 process and the entitlement constraint applies
+            // to the calling binary, not us.
+            if Self.shouldSkipScreenRecordingPrompt {
+                if let url = self.systemSettingsURL {
+                    NSWorkspace.shared.open(url)
+                }
+                Self.triggerHelperScreenAccess()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    completion(self.status())
+                }
+                return
+            }
             // Async prompt; we poll on the main queue.
             CGRequestScreenCaptureAccess()
             // ALSO trigger a screen-capture attempt from the launchd
