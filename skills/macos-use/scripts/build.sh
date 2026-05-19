@@ -44,6 +44,18 @@ fi
 
 BINARY="$CLONE_DIR/.build/release/$BIN_NAME"
 
+# Apply local patches (bug fixes pending upstream merge).
+SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+PATCHES_DIR="$SKILL_DIR/patches"
+if [[ -d "$PATCHES_DIR" ]]; then
+    for patch in "$PATCHES_DIR"/*.patch; do
+        [[ -f "$patch" ]] || continue
+        echo "→ applying patch $(basename "$patch")"
+        (cd "$CLONE_DIR" && git apply --check "$patch" 2>/dev/null && git apply "$patch") \
+            || echo "  (skipping — already applied or inapplicable)"
+    done
+fi
+
 if [[ -f "$BINARY" ]] && ! $FORCE; then
     echo "✓ $BIN_NAME already built at $BINARY"
     echo "  (use --force to rebuild)"
