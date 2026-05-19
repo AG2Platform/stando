@@ -1,0 +1,53 @@
+/*
+ * Minimal CSS for the conversation page. Everything else is Tailwind
+ * utilities on the components.
+ *
+ * Three things live here because they can't sensibly be a utility class:
+ *   1. `.legacy-shell.conv-root` overrides — the root element keeps the
+ *      `.legacy-shell` class so the avatar `s-{state}` animations and the
+ *      panel internals (`.tasks`, `.dr-questions`, etc.) keep matching;
+ *      these rules unwind the legacy layout (flex centering, min-height,
+ *      reset padding) so the new chrome can take over.
+ *   2. The ambient gradient background — multiple radial-gradients with a
+ *      `prefers-color-scheme` variant. Doable as an arbitrary value but
+ *      noisy enough on the root element that a class is cleaner.
+ *   3. Legacy panel content resets — the panel organisms (TaskList,
+ *      NotesPanel, etc.) ship their own `.tasks` / `.dr-questions` CSS
+ *      from legacy.css. We strip the inner card chrome since the new
+ *      ConversationPanels card already provides the surface.
+ */
+
+.legacy-shell.conv-root {
+	display: block;
+	align-items: stretch;
+	min-height: 100vh;
+	padding: 0 0 112px 0;
+	background:
+		radial-gradient(1200px 600px at 50% -240px, rgba(124, 131, 255, 0.22), transparent 60%),
+		radial-gradient(900px 600px at 100% 110%, rgba(78, 204, 163, 0.10), transparent 55%),
+		radial-gradient(700px 500px at -10% 80%, rgba(240, 173, 78, 0.06), transparent 50%),
+		var(--bg);
+	background-attachment: fixed;
+}
+
+@media (prefers-color-scheme: light) {
+	.legacy-shell.conv-root {
+		background:
+			radial-gradient(1200px 600px at 50% -240px, rgba(124, 131, 255, 0.12), transparent 60%),
+			radial-gradient(900px 600px at 100% 110%, rgba(78, 204, 163, 0.06), transparent 55%),
+			var(--bg);
+		background-attachment: fixed;
+	}
+}
+
+/* Strip the legacy card chrome from panel organisms rendered inside the
+   new ConversationPanels card. They each set their own background +
+   border + padding via legacy.css; the outer card already provides that
+   surface, so double-stacked padding/borders look wrong. */
+.conv-root .conv-panel-body :is(.tasks, .dr-questions, .dr-chips) {
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	padding: 0;
+	margin: 0;
+}

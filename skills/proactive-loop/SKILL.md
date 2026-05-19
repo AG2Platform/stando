@@ -68,6 +68,8 @@ Skip step 6 (end the pass early after step 3) if and only if one of these applie
 
 3. **Check system health.** Run `python3 src/health-check.py`. If issues found, fix what you can (`--fix` flag), note what you can't.
 
+3a. **Learned-skills scan (gated, ~daily).** If `state/learned-skills-enabled.sentinel` exists AND no `state/learned-skills-scan.last` marker from the last 24h, run `python3 src/detect-learned-skills.py` and touch `state/learned-skills-scan.last`. Detector creates candidate bundles under `learned-skills/<slug>/` and writes a yes/no entry into `pending-questions.md` for each — step 2 of the next pass surfaces them. The canonical schedule is the `learned-skills-scan` row in `crons.example.json` (daily at 07:30); this in-loop fallback covers users who haven't synced their crons yet.
+
 4. **Read the build log** (`build_log.md`) — understand what exists. Do not rebuild what works.
 
 5. **Pick the highest-ROI available work.** Priority order when choosing from step 6's menu:

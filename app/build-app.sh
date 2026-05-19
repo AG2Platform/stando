@@ -22,9 +22,25 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${1:-$REPO/app/build}"
 APP="$OUT_DIR/Sutando.app"
-SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
 ENABLE_SPARKLE="${ENABLE_SPARKLE:-0}"
 SPARKLE_FRAMEWORK="${SPARKLE_FRAMEWORK:-$REPO/app/vendor/Sparkle.framework}"
+
+# Auto-pick the dev cert if SIGNING_IDENTITY is unset. Falls back to
+# ad-hoc ("-") when no cert exists. Rationale: ad-hoc signing yokes the
+# Designated Requirement to the CDHash, so every rebuild creates a fresh
+# TCC row and the previous one becomes a stale entry in System Settings →
+# Privacy & Security. Using a stable cert keeps the DR (and therefore the
+# TCC grant) constant across rebuilds. See app/dev-cert.sh.
+DEV_CERT_NAME="Sutando Dev"
+if [ -z "${SIGNING_IDENTITY:-}" ]; then
+    if security find-identity -v -p codesigning 2>/dev/null \
+        | grep -q "\"$DEV_CERT_NAME\""; then
+        SIGNING_IDENTITY="$DEV_CERT_NAME"
+        echo "  Using dev cert '$DEV_CERT_NAME' (TCC grants will persist across rebuilds)"
+    else
+        SIGNING_IDENTITY="-"
+    fi
+fi
 
 echo "Building Sutando.app → $APP"
 
@@ -56,6 +72,7 @@ SWIFT_SOURCES=(
     "$REPO/src/Sutando/main.swift"
     "$REPO/src/Sutando/LaunchAgentInstaller.swift"
     "$REPO/src/Sutando/SparkleUpdater.swift"
+    "$REPO/src/Sutando/ClaudeCodeAuth.swift"
     "$REPO/src/Sutando/CloudAuth.swift"
     "$REPO/src/Sutando/CloudClient.swift"
     "$REPO/src/Sutando/EnvFile.swift"
@@ -109,11 +126,11 @@ fi
 
 # 4.1 Menubar template icon — monochrome PNG that macOS tints for dark
 # vs light menubars. main.swift loads from Bundle.main.resourcePath first.
-if [ -f "$REPO/app/branding/menubar.png" ]; then
-    cp "$REPO/app/branding/menubar.png" "$APP/Contents/Resources/menubar.png"
-fi
-if [ -f "$REPO/app/branding/menubar@2x.png" ]; then
-    cp "$REPO/app/branding/menubar@2x.png" "$APP/Contents/Resources/menubar@2x.png"
+# We ship the 1024px source directly; macOS rasterizes to 18×18 at
+# render time so a single asset works for both retina and non-retina
+# menubars.
+if [ -f "$REPO/app/branding/menubar-source.png" ]; then
+    cp "$REPO/app/branding/menubar-source.png" "$APP/Contents/Resources/menubar-source.png"
 fi
 
 # 5. Stage the repo source (src + skills + package.json + node_modules) into

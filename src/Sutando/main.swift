@@ -179,17 +179,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             observeCloudAuthSignIn()
             observeCloudAuthRevoked()
             logToFile("App started, workspace=\(workspace)")
-            // Onboarding gate. Until $SUTANDO_HOME/.onboarding-complete
-            // exists, the wizard owns the screen — no main window, no
-            // bootstrap, no auto-sign-in flow. The wizard handles the
-            // Gemini key, Claude CLI, permissions, and the first
-            // launchd-service install itself; on Done it calls back into
-            // proceedAfterOnboardingOrLaunch() which resumes the normal
-            // post-launch path below.
-            if OnboardingWindowController.needsOnboarding {
-                logToFile("Onboarding incomplete — showing welcome wizard")
+            // Onboarding wizard is bypassed on cold launch. The wizard
+            // turned every transient failure (cloud sign-in, Claude
+            // install, permission prompt) into "the app won't open"
+            // because it owned the screen until every step finished.
+            // SettingsWindowController.needsFirstLaunchSetup hosts the
+            // same Gemini-key / Claude CLI / permissions flow inside
+            // a closable window via `maybeRunFirstLaunchFlow()` below,
+            // so first-launch users still land on the setup stepper —
+            // they just don't get locked out if anything in it stalls.
+            // Auto-write the completion sentinel so every downstream
+            // `needsOnboarding` check (openUnifiedWindow gate, sign-in
+            // observer) flips false consistently.
+            //
+            // Escape hatch: `app/rebuild.sh --reset-onboarding` drops
+            // a `.onboarding-force` sentinel that flips us into the
+            // guided flow on the next launch. Used in dev when you
+            // explicitly want to walk the wizard again — production
+            // cold launches never see this file.
+            if OnboardingWindowController.forceWizardRequested {
+                logToFile("Onboarding force sentinel present — showing wizard, deferring bootstrap until Done")
                 showOnboardingWindow()
             } else {
+                if OnboardingWindowController.needsOnboarding {
+                    logToFile("Onboarding gate bypassed — writing sentinel, routing to first-launch Settings flow")
+                    OnboardingWindowController.markCompleteSkippingWizard()
+                }
                 proceedAfterOnboardingOrLaunch()
             }
         }
@@ -268,8 +283,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // runs during onboarding — this covers the post-onboarding
         // returning-user path that PR-cdhash-mismatch first surfaced.
         if !CGPreflightScreenCaptureAccess() {
-            logToFile("autoBootstrapServices: Screen Recording not granted — requesting prompt")
-            CGRequestScreenCaptureAccess()
+            // See `SystemPermission.shouldSkipScreenRecordingPrompt`.
+            // CGRequestScreenCaptureAccess traps on macOS 26 without
+            // the new screen-capture entitlement and may regress on
+            // other versions, taking the app down before the menu bar
+            // even appears. When the safety gate is tripped we open
+            // the System Settings deeplink instead so the user can fix
+            // the cdhash-mismatch case manually.
+            if SystemPermission.shouldSkipScreenRecordingPrompt {
+                logToFile("autoBootstrapServices: Screen Recording not granted — skipping in-process prompt, opening System Settings")
+                if let url = SystemPermission.screenRecording.systemSettingsURL {
+                    DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+                }
+            } else {
+                logToFile("autoBootstrapServices: Screen Recording not granted — requesting prompt")
+                CGRequestScreenCaptureAccess()
+            }
         }
         // Screen-capture has its own supervisor — start it here so it
         // races alongside launchd bootstrap rather than waiting for it.
@@ -711,11 +740,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // glyph if neither is on disk (very early dev or partial
             // install). Search order: .app bundle Resources, then the
             // dev-workflow app/branding/ directory beside the binary.
+            // The 1024×1024 source PNG is downscaled to 18×18 by macOS
+            // (Core Graphics interpolates cleanly off a high-res source).
             let bundled = Bundle.main.resourcePath.flatMap { p -> String? in
-                let candidate = p + "/menubar.png"
+                let candidate = p + "/menubar-source.png"
                 return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
             }
-            let templatePath = bundled ?? (workspace + "/app/branding/menubar.png")
+            let templatePath = bundled ?? (workspace + "/app/branding/menubar-source.png")
             let avatarPath = workspace + "/assets/stand-avatar.png"
             if FileManager.default.fileExists(atPath: templatePath),
                let image = NSImage(contentsOfFile: templatePath) {
@@ -1364,18 +1395,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Composited onto the top-right corner of the 18×18 avatar so the
     /// menu bar continuously signals mode without taking an extra slot.
     func avatarImage(presenterActive: Bool, meetingActive: Bool = false) -> NSImage? {
-        // Prefer the bundled monochrome menubar template (Resources/menubar.png
-        // in the .app bundle, or app/branding/menubar.png in the dev tree).
-        // Falls back to the legacy assets/stand-avatar.png so installs
-        // that predate the template still render. Template images get
-        // tinted automatically by macOS — when one is found we keep
+        // Prefer the bundled monochrome menubar template
+        // (Resources/menubar-source.png in the .app bundle, or
+        // app/branding/menubar-source.png in the dev tree). Falls back
+        // to the legacy assets/stand-avatar.png so installs that predate
+        // the template still render. Template images get tinted
+        // automatically by macOS — when one is found we keep
         // isTemplate=true unless we composite a status dot (which needs
         // its own color, so we drop template-ness for that case).
         let bundledTemplate = Bundle.main.resourcePath.flatMap { p -> String? in
-            let candidate = p + "/menubar.png"
+            let candidate = p + "/menubar-source.png"
             return FileManager.default.fileExists(atPath: candidate) ? candidate : nil
         }
-        let templatePath = bundledTemplate ?? (workspace + "/app/branding/menubar.png")
+        let templatePath = bundledTemplate ?? (workspace + "/app/branding/menubar-source.png")
         let fallbackPath = workspace + "/assets/stand-avatar.png"
 
         let baseIsTemplate: Bool

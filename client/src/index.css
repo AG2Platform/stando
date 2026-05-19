@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* Pull legacy.css into the `components` cascade layer so Tailwind utility
+   classes (which live in the later `utilities` layer) reliably win. Without
+   this, the global `.legacy-shell button { padding: 7px 14px; ... }` rule
+   would override our new pill/composer Tailwind padding/font-size utilities. */
+@import "./styles/legacy.css" layer(components);
+
 /* Sutando design tokens. Mirrors the palette from agent-universe so the
    cloud and desktop UIs stay visually coherent when packages/ui ships
    (PR-D). Keep this list small — anything you reach for repeatedly
@@ -16,6 +22,17 @@
   --color-success: oklch(0.78 0.18 150);
   --color-warning: oklch(0.82 0.18 70);
   --color-danger: oklch(0.68 0.21 25);
+
+  /* Animations consumed by the conversation page (live-pulse on the voice
+     indicator dot). Avatar `s-{state}` ring animations live in legacy.css
+     because the SVG default avatar is shared across both layouts. */
+  --animate-live-pulse: live-pulse 1.6s ease-out infinite;
+  --animate-live-pulse-fast: live-pulse 1s ease-out infinite;
+}
+
+@keyframes live-pulse {
+  0%   { box-shadow: 0 0 0 0 var(--pulse-color, rgba(110, 231, 183, 0.55)); }
+  100% { box-shadow: 0 0 0 8px transparent; }
 }
 
 html,
