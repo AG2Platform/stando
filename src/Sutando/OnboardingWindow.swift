@@ -265,7 +265,12 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         // Re-poll status when the window comes back to the front so
         // permissions granted via System Settings reflect immediately.
         refreshClaudeStatus()
-        refreshPermissionStatus()
+        // Only probe screen-recording on the permissions step. On macOS 26,
+        // CGPreflightScreenCaptureAccess() crashes when called before the
+        // entitlement context is established (fresh install, Welcome step).
+        if currentStep == .permissions {
+            refreshPermissionStatus()
+        }
     }
 
     // MARK: - UI construction
