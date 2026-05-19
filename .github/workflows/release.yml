@@ -75,6 +75,11 @@ jobs:
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "Building Sutando $VERSION on $CHANNEL channel"
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - name: Set up Node 22
         uses: actions/setup-node@v4
         with:
