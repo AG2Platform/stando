@@ -1,7 +1,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveWorkspace } from '../src/workspace_default.js';
 import { startWebServer } from '../src/web-server.js';
@@ -45,6 +45,11 @@ async function fetchJson(path: string): Promise<any> {
 
 describe('/sse-status + /mute-state — agent state plumbing (PR #418)', () => {
 	before(async () => {
+		// The workspace dir (resolveWorkspace(), default ~/.sutando/workspace/)
+		// is not guaranteed to exist — a clean CI runner has no such dir. Ensure
+		// it before writing core-status.json / voice-state.json into it.
+		mkdirSync(resolveWorkspace(), { recursive: true });
+
 		// Stash + neutralize core-status.json so a mid-pass "running" write
 		// by a live proactive loop can't leak "working" state into the test.
 		if (existsSync(CORE_STATUS_PATH)) {
