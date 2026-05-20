@@ -47,9 +47,20 @@ export function useTextSubmit(getSession: () => VoiceSession | null): (text: str
 			void (async () => {
 				const result = await postWebTask(agentApiOrigin, trimmed);
 				if (!result.ok || !result.task_id) {
-					conversationStore.appendSystem(
-						`Failed to send: ${result.error ?? 'unknown error'}. Is the agent bridge running?`
-					);
+					switch (result.kind) {
+						case 'bridge-down':
+							conversationStore.appendSystem('Agent bridge unreachable on :7843. Try relaunching Sutando.');
+							break;
+						case 'task-error':
+							conversationStore.appendSystem(
+								`Couldn't submit task — agent bridge returned: ${result.error ?? 'unknown error'}. Check ~/Library/Application Support/Sutando/logs/agent-api.log`
+							);
+							break;
+						default:
+							conversationStore.appendSystem(
+								`Failed to send: ${result.error ?? 'unknown error'}. Is the agent bridge running?`
+							);
+					}
 					return;
 				}
 				const taskId = result.task_id;

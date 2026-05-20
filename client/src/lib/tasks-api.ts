@@ -8,6 +8,10 @@
 import type { ApiTasksResponse } from '@/types/task';
 
 const stripTrailingSlash = (origin: string): string => origin.replace(/\/$/, '');
+const POST_WEB_TASK_RETRY_DELAY_MS = 500;
+
+const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 export async function fetchActiveTasks(agentApiOrigin: string, signal?: AbortSignal): Promise<ApiTasksResponse> {
 	const url = `${stripTrailingSlash(agentApiOrigin)}/tasks/active`;
@@ -16,6 +20,17 @@ export async function fetchActiveTasks(agentApiOrigin: string, signal?: AbortSig
 		throw new Error(`fetchActiveTasks ${response.status}`);
 	}
 	return (await response.json()) as ApiTasksResponse;
+}
+
+export async function pingAgentApi(agentApiOrigin: string, timeoutMs = 1000): Promise<boolean> {
+	try {
+		const response = await fetch(`${stripTrailingSlash(agentApiOrigin)}/ping`, {
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		return response.ok;
+	} catch {
+		return false;
+	}
 }
 
 export interface PostTaskReplyResult {
@@ -46,14 +61,17 @@ export async function postTaskReply(
 		const data = (await response.json()) as PostTaskReplyResult;
 		return { ok: !!data.ok, error: data.error };
 	} catch (err) {
-		return { ok: false, error: (err as Error).message };
+		return { ok: false, error: errorMessage(err) };
 	}
 }
+
+export type PostTaskFailureKind = 'bridge-down' | 'task-error';
 
 export interface PostTaskResult {
 	ok: boolean;
 	task_id?: string;
 	error?: string;
+	kind?: PostTaskFailureKind;
 }
 
 export interface TaskResultPoll {
@@ -73,16 +91,32 @@ export async function postWebTask(
 ): Promise<PostTaskResult> {
 	const trimmed = task.trim();
 	if (!trimmed) return { ok: false, error: 'empty task' };
-	try {
+
+	const submit = async (): Promise<PostTaskResult> => {
 		const response = await fetch(`${stripTrailingSlash(agentApiOrigin)}/task`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ from: 'web', task: trimmed }),
 			signal,
 		});
-		return (await response.json()) as PostTaskResult;
-	} catch (err) {
-		return { ok: false, error: (err as Error).message };
+		const data = (await response.json()) as PostTaskResult;
+		return data.ok ? data : { ...data, ok: false, kind: data.kind ?? 'task-error' };
+	};
+
+	try {
+		return await submit();
+	} catch {
+		await delay(POST_WEB_TASK_RETRY_DELAY_MS);
+		try {
+			return await submit();
+		} catch (retryErr) {
+			const bridgeUp = await pingAgentApi(agentApiOrigin);
+			return {
+				ok: false,
+				error: errorMessage(retryErr),
+				kind: bridgeUp ? 'task-error' : 'bridge-down',
+			};
+		}
 	}
 }
 
