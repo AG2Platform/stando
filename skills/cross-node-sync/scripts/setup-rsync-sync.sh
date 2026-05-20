@@ -159,10 +159,12 @@ fi
 
 # --- Sync mode ---------------------------------------------------------------
 if [ -z "$PEER" ]; then
-    say "ERROR: SUTANDO_SYNC_PEER not set. Example:" >&2
-    say '    export SUTANDO_SYNC_PEER="susan@MacBook-Pro.local"' >&2
-    say "Then: bash skills/cross-node-sync/scripts/setup-rsync-sync.sh" >&2
-    exit 1
+    # Silent no-op when called from cron — the cron fires every 7 min and
+    # producing an error on every tick is noise. Only warn when run directly.
+    if [ -t 1 ]; then
+        say "SUTANDO_SYNC_PEER not set — skipping. Add to .env to enable cross-node sync."
+    fi
+    exit 0
 fi
 # MEM_PEER / NOTES_PEER default to local paths now; no hard-error path needed.
 # (Previously required SUTANDO_PEER_* env vars; removed per owner's 2026-04-17
