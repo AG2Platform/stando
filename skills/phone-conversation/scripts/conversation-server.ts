@@ -258,6 +258,11 @@ let activePlaybackProc: ChildProcess | null = null; // ffmpeg process for /play-
 const pendingMeetingJoins = new Set<string>(); // prevents duplicate near-simultaneous joins
 let nextBodhiPort = 9910; // Dynamic ports for per-call VoiceSessions
 
+// Pre-warm cache: VoiceSession started early at /twilio/connect to reduce call setup latency.
+// Maps callSid → promise that resolves to a partially-wired CallSession.
+// WS 'start' handler adopts the pre-warmed session and wires twilioWs + triggers the greeting.
+const _preWarmByCallSid = new Map<string, Promise<CallSession | null>>();
+
 // --- Goodbye detection ---
 // Phone calls need explicit hangup (unlike browser which just disconnects).
 // Instead of a separate classifier, the conversation model has a `hang_up` tool
@@ -671,6 +676,9 @@ async function createCallSession(params: {
 	meetingId?: string;
 	passcode?: string;
 	parentCallSid?: string;
+	// If true: start VoiceSession but skip handleClientConnected + silencePad.
+	// The WS 'start' handler will wire twilioWs/streamSid and trigger the greeting itself.
+	preWarm?: boolean;
 }): Promise<CallSession> {
 	const bodhiPort = nextBodhiPort++;
 
@@ -784,14 +792,14 @@ async function createCallSession(params: {
 		if (isReplaying || _isRecordingMuted?.()) return;
 		const pcmBuf = Buffer.from(data, 'base64');
 		_teeAudio?.(pcmBuf);
-		if (params.twilioWs.readyState === WebSocket.OPEN) {
+		if (callSession.twilioWs?.readyState === WebSocket.OPEN) {
 			const mulawBuf = pcm24kToMulaw8k(pcmBuf);
 			const CHUNK = 160;
 			for (let offset = 0; offset < mulawBuf.length; offset += CHUNK) {
 				const chunk = mulawBuf.subarray(offset, Math.min(offset + CHUNK, mulawBuf.length));
-				params.twilioWs.send(JSON.stringify({
+				callSession.twilioWs.send(JSON.stringify({
 					event: 'media',
-					streamSid: params.streamSid,
+					streamSid: callSession.streamSid,
 					media: { payload: chunk.toString('base64') },
 				}));
 			}
@@ -862,24 +870,26 @@ async function createCallSession(params: {
 		}
 	});
 
-	// Trigger client connected (so VoiceSession sends greeting and starts Gemini)
-	sessionAny.handleClientConnected();
+	if (!params.preWarm) {
+		// Trigger client connected (so VoiceSession sends greeting and starts Gemini)
+		sessionAny.handleClientConnected();
 
-	// Silence padding: Twilio suppresses media events when caller is silent, causing sparse
-	// audio that Gemini's VAD can't detect speech in. Send a 20ms silence frame whenever
-	// no real audio arrived in the last 25ms to keep the audio stream continuous for Gemini.
-	const SILENCE_FRAME = Buffer.alloc(640, 0); // 160 mulaw samples → 640 bytes PCM16@16kHz
-	callSession.lastAudioMs = Date.now();
-	callSession.silencePadInterval = setInterval(() => {
-		if (!activeCalls.has(callSession.callSid) || callSession.hangingUp) {
-			clearInterval(callSession.silencePadInterval!);
-			callSession.silencePadInterval = null;
-			return;
-		}
-		if (Date.now() - callSession.lastAudioMs > 25) {
-			try { (callSession.voiceSession as any).handleAudioFromClient(SILENCE_FRAME); } catch {}
-		}
-	}, 20);
+		// Silence padding: Twilio suppresses media events when caller is silent, causing sparse
+		// audio that Gemini's VAD can't detect speech in. Send a 20ms silence frame whenever
+		// no real audio arrived in the last 25ms to keep the audio stream continuous for Gemini.
+		const SILENCE_FRAME = Buffer.alloc(640, 0); // 160 mulaw samples → 640 bytes PCM16@16kHz
+		callSession.lastAudioMs = Date.now();
+		callSession.silencePadInterval = setInterval(() => {
+			if (!activeCalls.has(callSession.callSid) || callSession.hangingUp) {
+				clearInterval(callSession.silencePadInterval!);
+				callSession.silencePadInterval = null;
+				return;
+			}
+			if (Date.now() - callSession.lastAudioMs > 25) {
+				try { (callSession.voiceSession as any).handleAudioFromClient(SILENCE_FRAME); } catch {}
+			}
+		}, 20);
+	}
 	// Suppress greeting on reconnect — mute the first few seconds of audio after reconnect
 	let firstGreetingSent = false;
 	const origSendGreeting = sessionAny.sendGreeting?.bind(sessionAny);
@@ -1550,6 +1560,38 @@ const server = createServer(async (req, res) => {
   </Connect>
 </Response>`);
 
+			// Pre-warm: start VoiceSession now so Gemini WS is ready when Twilio WS opens (~1.3s saved).
+			const connectCallSid = form.get('CallSid');
+			if (connectCallSid && !activeCalls.has(connectCallSid) && !_preWarmByCallSid.has(connectCallSid)) {
+				const preDir: 'outbound' | 'inbound' = _cloudSessionPromiseByCallSid.has(connectCallSid) ? 'outbound' : 'inbound';
+				const preCallerNum = toParam || callerNumber;
+				const preNormalized = normalizePhone(preCallerNum);
+				const ownerNums = OWNER_NUMBER ? OWNER_NUMBER.split(',').map(n => normalizePhone(n.trim())) : [];
+				const preIsOwner = (preDir === 'outbound' && ownerNums.length > 0 && ownerNums.includes(preNormalized))
+					|| (!OWNER_NUMBER && (VERIFIED_CALLERS.size === 0 || VERIFIED_CALLERS.has(preNormalized)));
+				const preVerified = VERIFIED_CALLERS.size === 0 || VERIFIED_CALLERS.has(preNormalized);
+				const stubWs = { readyState: -1, send: () => {} } as unknown as WebSocket;
+
+				const preWarmPromise = createCallSession({
+					callSid: connectCallSid,
+					streamSid: '',
+					purpose,
+					twilioWs: stubWs,
+					callerNumber: preCallerNum,
+					callerVerified: preVerified,
+					isOwner: preIsOwner,
+					isMeeting,
+					direction: preDir,
+					meetingId: meetingId ? meetingId.replace(/\D/g, '') : undefined,
+					passcode: passcodeParam || undefined,
+					parentCallSid: parentCallSid || undefined,
+					preWarm: true,
+				}).then(cs => { console.log(`${ts()} [PreWarm] ready for ${connectCallSid}`); return cs; })
+				  .catch(e => { console.error(`${ts()} [PreWarm] failed for ${connectCallSid}:`, e); _preWarmByCallSid.delete(connectCallSid); return null; });
+
+				_preWarmByCallSid.set(connectCallSid, preWarmPromise);
+			}
+
 		} else if (path === '/twilio/status' && req.method === 'POST') {
 			const form = new URLSearchParams(await readBody(req));
 			const sid = form.get('CallSid') ?? '';
@@ -1652,20 +1694,53 @@ wss.on('connection', (ws: WebSocket) => {
 					}
 
 					try {
-						callSession = await createCallSession({
-							callSid,
-							streamSid,
-							purpose: cp.purpose ?? '',
-							twilioWs: ws,
-							callerNumber: recipientNumber || callerNumber,
-							callerVerified,
-							isOwner,
-							isMeeting,
-							direction,
-							meetingId: meetingId ? meetingId.replace(/\D/g, '') : undefined,
-							passcode: cp.passcode || undefined,
-							parentCallSid: cp.parentCallSid || undefined,
-						});
+						// Adopt pre-warmed session if available — skips the ~1.3s VoiceSession.start() wait.
+						const preWarmed = _preWarmByCallSid.has(callSid) ? await _preWarmByCallSid.get(callSid) : null;
+						_preWarmByCallSid.delete(callSid);
+
+						if (preWarmed) {
+							console.log(`${ts()} [PreWarm] adopting pre-warmed session for ${callSid}`);
+							// Wire the real Twilio WS and streamSid into the pre-warmed session.
+							// handleAudioOutput already references callSession.twilioWs / callSession.streamSid.
+							preWarmed.twilioWs = ws;
+							preWarmed.streamSid = streamSid;
+							// Apply final verified/owner status (STIR/SHAKEN may have changed it)
+							preWarmed.callerVerified = callerVerified;
+							preWarmed.isOwner = isOwner;
+
+							// Trigger greeting + start silence padding (skipped during pre-warm)
+							const preSessionAny = preWarmed.voiceSession as any;
+							preSessionAny.handleClientConnected();
+							const SILENCE_FRAME_PRE = Buffer.alloc(640, 0);
+							preWarmed.lastAudioMs = Date.now();
+							preWarmed.silencePadInterval = setInterval(() => {
+								if (!activeCalls.has(preWarmed.callSid) || preWarmed.hangingUp) {
+									clearInterval(preWarmed.silencePadInterval!);
+									preWarmed.silencePadInterval = null;
+									return;
+								}
+								if (Date.now() - preWarmed.lastAudioMs > 25) {
+									try { preSessionAny.handleAudioFromClient(SILENCE_FRAME_PRE); } catch {}
+								}
+							}, 20);
+
+							callSession = preWarmed;
+						} else {
+							callSession = await createCallSession({
+								callSid,
+								streamSid,
+								purpose: cp.purpose ?? '',
+								twilioWs: ws,
+								callerNumber: recipientNumber || callerNumber,
+								callerVerified,
+								isOwner,
+								isMeeting,
+								direction,
+								meetingId: meetingId ? meetingId.replace(/\D/g, '') : undefined,
+								passcode: cp.passcode || undefined,
+								parentCallSid: cp.parentCallSid || undefined,
+							});
+						}
 						activeCalls.set(callSid, callSession);
 
 						// Notify parent if child call
