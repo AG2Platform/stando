@@ -2769,7 +2769,7 @@ _recovered_replies = load_pending_replies_from_disk()
 async def poll_results():
     """Poll results/ for replies to send back to Discord."""
     global _recovered_replies
-    heartbeat_file = REPO / "state" / "discord-bridge.heartbeat"
+    heartbeat_file = STATE_DIR / "discord-bridge.heartbeat"
     last_heartbeat = 0
     while True:
         # Heartbeat is gated on `client.is_ready()` (Discord gateway WS
@@ -2925,7 +2925,7 @@ async def poll_results():
                         metadata={
                             "channel_id": str(channel.id),
                             "task_id": task_id,
-                            "reply_chunks": len(_chunk_for_discord(clean_text)) if clean_text else 0,
+                            "reply_chunks": len(list(_chunk_for_discord(clean_text))) if clean_text else 0,
                             "file_count": len(files),
                         },
                     )

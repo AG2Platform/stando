@@ -107,6 +107,12 @@ task_history = {}
 voice_desired_state = "disconnected"
 
 
+def _pgrep_ok(pattern: str) -> bool:
+    try:
+        return subprocess.run(["pgrep", "-f", pattern], capture_output=True, timeout=2).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
 
 def get_status() -> dict:
     try:
@@ -287,8 +293,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, get_status())
         elif path == "/tasks/active":
             # List active tasks + system status for the web client
-            watcher_ok = subprocess.run(["pgrep", "-f", "watch-tasks"], capture_output=True).returncode == 0
-            claude_ok = subprocess.run(["pgrep", "-f", "claude.*sutando-core"], capture_output=True).returncode == 0
+            watcher_ok = _pgrep_ok("watch-tasks")
+            claude_ok = _pgrep_ok("claude.*sutando-core")
             # Scan disk for active tasks, update history (preserve existing text)
             for f in sorted(TASK_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
                 task_id = f.stem
@@ -821,16 +827,29 @@ async function send(){
 
 if __name__ == "__main__":
     bind = os.environ.get("AGENT_API_BIND", "127.0.0.1")
-    server = http.server.HTTPServer((bind, PORT), Handler)
-    import socket
-    local_ip = socket.gethostbyname(socket.gethostname())
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1)
+        if probe.connect_ex((bind, PORT)) == 0:
+            print(
+                f"[agent-api] ERROR: port {PORT} is already in use. "
+                f"Try `pkill -f agent-api.py` or inspect with `lsof -i :{PORT}`.",
+                file=sys.stderr,
+                flush=True,
+            )
+            sys.exit(1)
+    server = http.server.ThreadingHTTPServer((bind, PORT), Handler)
     print(f"Sutando Agent API → http://{bind}:{PORT}")
     print(f"  POST /task  — submit a task")
     print(f"  GET  /status — health + capabilities")
     print(f"  GET  /ping   — alive check")
     if bind == "127.0.0.1":
         print(f"  (localhost only — set AGENT_API_BIND=0.0.0.0 for LAN access)")
+    print(f"[agent-api] listening on http://{bind}:{PORT}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nDone.")
+    except Exception:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
