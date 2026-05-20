@@ -833,7 +833,7 @@ const mainAgent: MainAgent = {
 // (~/.claude/projects/-{slug}/memory). Failure-silent: a missing memory
 // dir should never block voice startup.
 function bootstrapMemoryDir(): void {
-	const slug = '-' + WORKSPACE_DIR.replace(/\/$/, '').split('/').filter(Boolean).join('-');
+	const slug = WORKSPACE_DIR.replace(/\/$/, '').replace(/[^a-zA-Z0-9]/g, '-');
 	const memDir = process.env.SUTANDO_MEMORY_DIR || join(homedir(), '.claude', 'projects', slug, 'memory');
 	try {
 		mkdirSync(memDir, { recursive: true });
