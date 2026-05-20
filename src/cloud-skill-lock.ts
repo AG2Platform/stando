@@ -19,17 +19,14 @@
 import { existsSync, mkdirSync, openSync, closeSync, writeFileSync, statSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { resolveWorkspace } from './workspace_default.js';
 
 const STALE_LOCK_MS = 5 * 60 * 1000;
 const MAX_WAIT_MS = 30 * 1000;
 const POLL_MS = 250;
 
 function locksDir(): string {
-	const home = process.env.SUTANDO_HOME;
-	const root = home
-		? home.replace(/^~/, homedir())
-		: join(homedir(), 'Library', 'Application Support', 'Sutando');
-	return join(root, 'cloud-skills');
+	return join(resolveWorkspace(), 'cloud-skills');
 }
 
 function lockPath(slug: string): string {

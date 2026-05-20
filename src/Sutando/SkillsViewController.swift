@@ -505,8 +505,10 @@ final class SkillsViewController: NSViewController {
     // MARK: - Learned skills
 
     private var sutandoHome: String {
-        if let h = ProcessInfo.processInfo.environment["SUTANDO_HOME"], !h.isEmpty { return h }
-        return NSHomeDirectory() + "/Library/Application Support/Sutando"
+        if let ws = ProcessInfo.processInfo.environment["SUTANDO_WORKSPACE"], !ws.isEmpty {
+            return (ws as NSString).expandingTildeInPath
+        }
+        return NSHomeDirectory() + "/.sutando/workspace"
     }
 
     private var learnedSkillsSentinel: String { sutandoHome + "/state/learned-skills-enabled.sentinel" }
@@ -545,7 +547,8 @@ final class SkillsViewController: NSViewController {
     }
 
     private var privateSkillsDir: String? {
-        if let raw = ProcessInfo.processInfo.environment["SUTANDO_PRIVATE_DIR"], !raw.isEmpty {
+        if let raw = ProcessInfo.processInfo.environment["SUTANDO_MEMORY_DIR"]
+            ?? ProcessInfo.processInfo.environment["SUTANDO_PRIVATE_DIR"], !raw.isEmpty {
             let expanded = (raw as NSString).expandingTildeInPath
             return expanded + "/skills"
         }

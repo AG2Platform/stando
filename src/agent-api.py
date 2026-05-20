@@ -89,7 +89,8 @@ PORT = int(os.environ.get("AGENT_API_PORT", "7843"))
 # so /avatar and /stand-identity endpoints prefer the per-machine private dir,
 # and tasks/results live under SUTANDO_HOME when the .app bundle sets it.
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import personal_path, state_dir, state_path  # noqa: E402
+from util_paths import personal_path  # noqa: E402
+from state_paths import state_dir, state_path  # noqa: E402
 
 # Simple token auth — set SUTANDO_API_TOKEN in .env for remote access security
 API_TOKEN = os.environ.get("SUTANDO_API_TOKEN", "")

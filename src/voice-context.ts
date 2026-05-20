@@ -6,7 +6,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { sharedPersonalPath, statePath } from './util_paths.js';
+import { sharedPersonalPath } from './util_paths.js';
+import { statePath } from './state-paths.js';
 
 function defaultMemoryDir(): string {
     const repo = resolve(join(import.meta.dirname, '..'));

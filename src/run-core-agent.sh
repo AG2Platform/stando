@@ -17,7 +17,7 @@
 #     be installed when this script fires)
 #
 # Env from the plist:
-#   SUTANDO_HOME    where state + logs live
+#   SUTANDO_WORKSPACE  where state + logs live (default ~/.sutando/workspace/)
 #   PATH            we extend with /opt/homebrew/bin and /usr/local/bin so
 #                   `tmux` and `claude` resolve under launchd's minimal PATH
 
@@ -25,7 +25,7 @@ set -u
 
 SOCKET=/tmp/sutando-tmux.sock
 SESSION=sutando-core
-SUTANDO_HOME="${SUTANDO_HOME:-$HOME/Library/Application Support/Sutando}"
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 
 # Self-detect the bundled runtime and prepend it to PATH. When run from
 # inside Sutando.app, $SCRIPT_DIR is Resources/repo/src and the bundled
@@ -49,10 +49,10 @@ fi
 # so users who don't have Homebrew claude end up with it there.
 export PATH="$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin"
 
-# Symlink read-only repo bits into SUTANDO_HOME so claude's relative-path
+# Symlink read-only repo bits into the workspace so claude's relative-path
 # tool invocations (`bash src/watch-tasks-stream.sh`, `python3
 # src/health-check.py`, etc.) resolve. The plist's WorkingDirectory is
-# SUTANDO_HOME, so claude inherits cwd=SUTANDO_HOME — but writable state
+# the workspace, so claude inherits cwd=workspace — but writable state
 # (tasks/, results/, core-status.json) lives there, while the actual
 # scripts ship inside the .app at Resources/repo/. Without these symlinks,
 # every relative path in proactive-loop's SKILL.md fails on a fresh user
@@ -64,10 +64,10 @@ export PATH="$HOME/.local/bin:$PATH:/opt/homebrew/bin:/usr/local/bin"
 # /Applications/Sutando.app shell). Real files/dirs at the link path are
 # never touched.
 REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-mkdir -p "$SUTANDO_HOME"
+mkdir -p "$WORKSPACE"
 for name in src skills node_modules package.json package-lock.json tsconfig.json CLAUDE.md; do
     target="$REPO_DIR/$name"
-    link="$SUTANDO_HOME/$name"
+    link="$WORKSPACE/$name"
     if [ -L "$link" ]; then
         # Existing symlink — replace when it points anywhere except $target
         current=$(readlink "$link" 2>/dev/null || echo "")
@@ -98,7 +98,7 @@ fi
 # Create the session if it doesn't exist. `-d` = detached (no TTY needed,
 # which is required under launchd). `-A` = attach if exists, but with -d
 # it has no effect — we already check existence above.
-LOG_DIR="${LOG_DIR:-$SUTANDO_HOME/logs}"
+LOG_DIR="${LOG_DIR:-$WORKSPACE/logs}"
 PANE_LOG="$LOG_DIR/core-agent.pane.log"
 
 # Always kill any pre-existing session first. We used to skip recreation

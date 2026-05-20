@@ -11,10 +11,10 @@ MSG="$1"
 if [ -z "$MSG" ]; then echo "Usage: bash src/notify.sh 'message'"; exit 1; fi
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# Runtime-state root: respect SUTANDO_HOME (set by the packaged .app),
-# fall back to REPO_DIR for bare-repo dev installs. Mirrors util_paths
-# `_state_root()` so shell + Python writers agree on where results land.
-STATE_ROOT="${SUTANDO_HOME:-$REPO_DIR}"
+# Runtime-state root: $SUTANDO_WORKSPACE, defaulting to ~/.sutando/workspace/.
+# Mirrors workspace_default.resolve_workspace() so shell + Python writers
+# agree on where results land.
+STATE_ROOT="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 TS=$(date +%s%3N)
 
 # Load tokens from channel configs

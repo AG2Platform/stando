@@ -22,6 +22,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolveWorkspace } from './workspace_default.js';
 
 interface CloudAuthRecord {
 	token: string;
@@ -164,10 +165,7 @@ function expandHome(p: string): string {
 }
 
 function authFilePath(): string {
-	const root = process.env.SUTANDO_HOME
-		? expandHome(process.env.SUTANDO_HOME)
-		: new URL('..', import.meta.url).pathname.replace(/\/$/, '');
-	return join(root, 'cloud-auth.json');
+	return join(resolveWorkspace(), 'cloud-auth.json');
 }
 
 /** Read the auth file. Returns null if the user isn't signed in. */

@@ -62,7 +62,7 @@ import { hostname } from 'node:os';
 
 // Personal-asset path resolver — twin of util_paths.py / voice-agent.ts:personalPath.
 function personalPath(filename: string): string {
-	const privateRoot = process.env.SUTANDO_PRIVATE_DIR;
+	const privateRoot = process.env.SUTANDO_MEMORY_DIR ?? process.env.SUTANDO_PRIVATE_DIR;
 	if (privateRoot) {
 		const root = privateRoot.replace(/^~/, process.env.HOME || '');
 		const host = hostname().split('.')[0];

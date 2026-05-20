@@ -16,6 +16,7 @@
 
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { existsSync } from 'node:fs';
+import { resolveWorkspace } from './workspace_default.js';
 import * as path from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import * as pty from 'node-pty';
@@ -221,7 +222,7 @@ wss.on('connection', (ws: WebSocket) => {
 			name: 'xterm-256color',
 			cols: 120,
 			rows: 36,
-			cwd: process.env.SUTANDO_HOME ?? process.env.HOME ?? '/tmp',
+			cwd: resolveWorkspace(),
 			env,
 		},
 	);

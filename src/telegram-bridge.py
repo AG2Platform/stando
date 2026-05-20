@@ -8,24 +8,34 @@ Usage: python3 src/telegram-bridge.py
 
 import json
 import os
-import time
 import sys
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
+# Vision-frame helper — pushes the latest photo into the active voice session
+# so Gemini can react in-stream. No-op when voice isn't connected. Import is
+# best-effort so the bridge keeps booting if vision_push.py is missing.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from util_paths import state_dir, state_path  # noqa: E402
+try:
+    from vision_push import push_image as _push_vision_image  # type: ignore
+except Exception:  # pragma: no cover — bridge must keep running
+    def _push_vision_image(path: str, source: str = "telegram") -> bool:  # type: ignore
+        return False
+from task_priority import default_priority_for_source  # noqa: E402
+from result_markers import parse_markers  # noqa: E402
 
-TASKS_DIR = state_dir("tasks")
-RESULTS_DIR = state_dir("results")
+from workspace_default import resolve_workspace  # noqa: E402
+REPO = resolve_workspace()
+TASKS_DIR = REPO / "tasks"
+RESULTS_DIR = REPO / "results"
 
 # Lazy import for cloud telemetry — keeps the bridge bootable even if
 # src/cloud_metrics.py is missing in some installs. Helper below silently
 # no-ops on any failure; telemetry must never break the bridge.
 try:
-    from cloud_metrics import (
+    from cloud_metrics import (  # noqa: E402
         record_event as _cloud_record_event,
         cap_status as _cloud_cap_status,
     )
@@ -75,7 +85,7 @@ def _cap_hit_reply_text(reason: str | None) -> str:
 # Allowlist for paths that may be sent via Telegram [file: /path] markers.
 # Mirrors _is_path_sendable() in discord-bridge.py.
 SEND_ALLOWED_ROOTS = (
-    str(RESULTS_DIR),
+    str(REPO / "results"),
     str(REPO / "notes"),
     str(REPO / "docs"),
 )
@@ -109,7 +119,7 @@ def _is_path_sendable(fpath: str) -> bool:
 
 try:
     from dotenv import load_dotenv
-    load_dotenv(state_path(".env"))
+    load_dotenv(REPO / ".env")
 except ImportError:
     pass  # python-dotenv not installed — token loaded from channels config below
 
@@ -129,16 +139,56 @@ if not TOKEN:
     print("TELEGRAM_BOT_TOKEN not set")
     exit(1)
 
-STATE_DIR = state_dir("state")
-ARCHIVE_TASKS_DIR = TASKS_DIR / "archive"
-ARCHIVE_RESULTS_DIR = RESULTS_DIR / "archive"
+TASKS_DIR = REPO / "tasks"
+RESULTS_DIR = REPO / "results"
+STATE_DIR = REPO / "state"
+ARCHIVE_TASKS_DIR = REPO / "tasks" / "archive"
+ARCHIVE_RESULTS_DIR = REPO / "results" / "archive"
 OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
+TASKS_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def extract_forward_note(msg: dict) -> str:
+    """Return a ` [forwarded from ...]` suffix for a Telegram message dict.
+
+    Handles Bot API 7.0+ `forward_origin` (user / hidden_user / chat / channel)
+    and legacy `forward_from` / `forward_sender_name`. Returns "" for
+    non-forwarded messages or unknown `forward_origin.type` values so the
+    bridge fails open rather than crashing on future Telegram additions.
+    """
+    fwd_origin = msg.get("forward_origin") or {}
+    if fwd_origin:
+        fwd_type = fwd_origin.get("type")
+        if fwd_type == "user":
+            u = fwd_origin.get("sender_user", {})
+            name = u.get("username") or u.get("first_name") or "unknown"
+            return f" [forwarded from @{name}]"
+        if fwd_type == "hidden_user":
+            name = fwd_origin.get("sender_user_name", "hidden")
+            return f" [forwarded from {name}]"
+        if fwd_type == "chat":
+            chat = fwd_origin.get("sender_chat", {})
+            name = chat.get("title") or chat.get("username") or "channel"
+            return f" [forwarded from chat: {name}]"
+        if fwd_type == "channel":
+            chat = fwd_origin.get("chat", {})
+            name = chat.get("title") or chat.get("username") or "channel"
+            return f" [forwarded from channel: {name}]"
+        return ""
+    if "forward_from" in msg:
+        u = msg["forward_from"]
+        name = u.get("username") or u.get("first_name") or "unknown"
+        return f" [forwarded from @{name}]"
+    if "forward_sender_name" in msg:
+        return f" [forwarded from {msg['forward_sender_name']}]"
+    return ""
 
 
 def write_owner_activity(channel: str, summary: str) -> None:
     """Record owner activity — see src/discord-bridge.py for schema."""
     try:
-        STATE_DIR.mkdir(exist_ok=True)
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
         payload = {
             "ts": int(time.time()),
             "channel": channel,
@@ -175,7 +225,7 @@ def archive_file(src: "Path", kind: str, task_id: str) -> None:
 # Presenter mode: silence proactive DMs during ICLR/talk windows. Sentinel
 # is written by scripts/presenter-mode.sh with an ISO-8601 expiry. Matches
 # the check in src/check-pending-questions.py and src/discord-bridge.py.
-PRESENTER_SENTINEL = STATE_DIR / "presenter-mode.sentinel"
+PRESENTER_SENTINEL = REPO / "state" / "presenter-mode.sentinel"
 
 
 def presenter_mode_active():
@@ -197,11 +247,47 @@ def presenter_mode_active():
 # Load access config
 ACCESS_FILE = Path.home() / ".claude" / "channels" / "telegram" / "access.json"
 def load_allowed():
+    """Return the set of allowed sender IDs, OR None if access.json doesn't exist.
+
+    The None vs empty-set distinction matters for trust-on-first-use (TOFU)
+    auto-onboarding: "file missing" → the bridge has never been configured,
+    so the first DM should auto-onboard the sender as the owner. "File exists
+    but empty allowFrom" → the admin explicitly locked it down; never TOFU.
+    """
     try:
         data = json.loads(ACCESS_FILE.read_text())
         return set(data.get("allowFrom", []))
-    except:
+    except FileNotFoundError:
+        return None
+    except Exception:
         return set()
+
+
+def tofu_onboard(sender_id, username):
+    """First-time auto-onboard: write access.json with this sender as owner.
+
+    Triggered when access.json doesn't exist (i.e., the bridge has never been
+    configured for any user) AND a DM arrives. The expected flow is: user
+    rotates a token, starts the bridge, sends "hi" to their own bot, and
+    Sutando auto-trusts that first DM as coming from them. Subsequent senders
+    will be rejected as non-allowed and need explicit `/telegram:access allow`.
+
+    Logs the onboarding so the act is visible. Safe-by-default: if the file
+    already exists at write time (race with manual config), we don't clobber.
+    """
+    if ACCESS_FILE.exists():  # race-safety: someone else wrote it first
+        return load_allowed() or set()
+    ACCESS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "allowFrom": [sender_id],
+        "tofuOwner": sender_id,
+        "tofuOnboardedAt": int(time.time()),
+        "tofuOnboardedUsername": username or None,
+    }
+    ACCESS_FILE.write_text(json.dumps(payload, indent=2) + "\n")
+    os.chmod(ACCESS_FILE, 0o600)  # don't inherit umask 644 — file holds owner's Telegram user ID
+    print(f"  TOFU: auto-onboarded @{username} (id={sender_id}) as owner — wrote {ACCESS_FILE}")
+    return {sender_id}
 
 def api(method, **params):
     url = f"https://api.telegram.org/bot{TOKEN}/{method}"
@@ -282,14 +368,10 @@ def send_reply(chat_id, text):
     files = file_pattern.findall(text)
     clean_text = file_pattern.sub('', text).strip()
 
-    sent_text_chunks = 0
-    sent_files = 0
-
     # Send text (if any remains after extracting file refs)
     if clean_text:
         for i in range(0, len(clean_text), 4000):
             api("sendMessage", chat_id=chat_id, text=clean_text[i:i+4000])
-            sent_text_chunks += 1
 
     # Send files (allowlist-gated; see _is_path_sendable)
     for fpath in files:
@@ -297,20 +379,20 @@ def send_reply(chat_id, text):
         if _is_path_sendable(fpath):
             send_file(chat_id, fpath)
             print(f"  Sent file: {fpath}")
-            sent_files += 1
         elif os.path.isfile(fpath):
             api("sendMessage", chat_id=chat_id, text=f"(file access denied: {fpath})")
             print(f"  BLOCKED file: {fpath}")
         else:
             api("sendMessage", chat_id=chat_id, text=f"(file not found: {fpath})")
 
-    if sent_text_chunks or sent_files:
+    text_chunks = (len(clean_text) // 4000 + 1) if clean_text else 0
+    if text_chunks or files:
         _emit_channel_metric(
             "out",
             metadata={
                 "chat_id": str(chat_id),
-                "text_chunks": sent_text_chunks,
-                "file_count": sent_files,
+                "text_chunks": text_chunks,
+                "file_count": len(files),
             },
         )
 
@@ -320,7 +402,7 @@ def main():
     allowed = load_allowed()
     pending_replies = {}  # task_id -> chat_id
 
-    heartbeat_file = STATE_DIR / "telegram-bridge.heartbeat"
+    heartbeat_file = REPO / "state" / "telegram-bridge.heartbeat"
     last_heartbeat = 0
     while True:
         # Poll for new messages
@@ -363,6 +445,10 @@ def main():
 
                 # Reload access list periodically
                 allowed = load_allowed()
+                if allowed is None:
+                    # First-ever DM after install — access.json doesn't exist.
+                    # Auto-onboard this sender as the owner (TOFU).
+                    allowed = tofu_onboard(sender_id, username)
                 if sender_id not in allowed:
                     print(f"  Dropped message from non-allowed @{username}")
                     continue
@@ -377,6 +463,13 @@ def main():
                     local_path = download_file(file_id, "photo")
                     if local_path:
                         attachment_note = f"\n[Photo attached: {local_path}]"
+                        # If voice is connected, also push the photo as a
+                        # vision frame so Gemini sees it in-stream (in
+                        # addition to the file-attached task pipeline).
+                        try:
+                            _push_vision_image(local_path, source="telegram")
+                        except Exception:
+                            pass
                 if "document" in msg:
                     file_id = msg["document"]["file_id"]
                     fname = msg["document"].get("file_name", "file")
@@ -392,7 +485,9 @@ def main():
                 if not text and not attachment_note:
                     continue
 
-                print(f"  @{username}: {text}{attachment_note}")
+                forward_note = extract_forward_note(msg)
+
+                print(f"  @{username}{forward_note}: {text}{attachment_note}")
 
                 # Cap-hit short-circuit. Cloud denied a recent channel.*
                 # accounting → reply once per ~5 min per chat and skip
@@ -427,12 +522,14 @@ def main():
                 ts = int(time.time() * 1000)
                 task_id = f"task-{ts}"
                 task_file = TASKS_DIR / f"{task_id}.txt"
+                priority = default_priority_for_source("telegram", "owner")
                 task_file.write_text(
                     f"id: {task_id}\n"
-                    f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%S')}Z\n"
-                    f"task: [Telegram @{username}] {text}{attachment_note}\n"
+                    f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+                    f"task: [Telegram @{username}{forward_note}] {text}{attachment_note}\n"
                     f"source: telegram\n"
                     f"chat_id: {chat_id}\n"
+                    f"priority: {priority}\n"
                 )
                 pending_replies[task_id] = chat_id
                 _emit_channel_metric(
@@ -488,11 +585,14 @@ def main():
             if result_file.exists():
                 reply_text = result_file.read_text().strip()
                 chat_id = pending_replies.pop(task_id)
-                # Skip sending if already replied directly.
-                # Clean up both files so watcher doesn't re-fire on leftover
-                # task — same bug class as discord-bridge had.
-                if reply_text.startswith('[no-send]') or reply_text.startswith('[REPLIED]'):
-                    print(f"  Skipped (already replied): {task_id}")
+                # Parse markers via the unified module (#873). Telegram
+                # honors [no-send] / [REPLIED] / [deduped: <id>] as skip
+                # and strips file markers from the text it sends. It
+                # ignores [channel:] redirects (no concept in Telegram —
+                # the marker is silently dropped from body, not leaked).
+                parsed = parse_markers(reply_text)
+                if any(a.kind == "skip" for a in parsed.actions):
+                    print(f"  Skipped (marker): {task_id}", flush=True)
                     archive_file(result_file, "results", task_id)
                     task_file = TASKS_DIR / f"{task_id}.txt"
                     archive_file(task_file, "tasks", task_id)

@@ -28,7 +28,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from util_paths import state_dir, state_path  # noqa: E402
+from state_paths import state_dir, state_path  # noqa: E402
 
 TASKS_DIR = state_dir("tasks")
 PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else 7847

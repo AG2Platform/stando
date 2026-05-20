@@ -36,6 +36,8 @@ from urllib.error import HTTPError, URLError
 REPO_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cloud_metrics import load_cloud_auth  # noqa: E402
+from workspace_default import resolve_workspace  # noqa: E402
+from util_paths import shared_personal_path  # noqa: E402
 
 
 PAID_PLANS = {"plus", "pro", "max"}
@@ -55,16 +57,12 @@ def memory_dir() -> Path:
 
 
 def notes_dir() -> Path:
-    """Return the notes/ directory under $SUTANDO_HOME (or repo)."""
-    home = os.environ.get("SUTANDO_HOME")
-    base = Path(os.path.expanduser(home)) if home else REPO_DIR
-    return base / "notes"
+    """Return the notes/ directory (memory-dir-first, workspace fallback)."""
+    return shared_personal_path("notes")
 
 
 def state_dir() -> Path:
-    home = os.environ.get("SUTANDO_HOME")
-    base = Path(os.path.expanduser(home)) if home else REPO_DIR
-    return base / "state"
+    return resolve_workspace(migrate=False) / "state"
 
 
 def _log(msg: str) -> None:

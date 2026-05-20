@@ -52,7 +52,7 @@ __all__ = ["log_event", "get_log_path", "LOGS_DIR"]
 
 REPO_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import state_dir as _state_dir  # noqa: E402
+from state_paths import state_dir as _state_dir  # noqa: E402
 LOGS_DIR = _state_dir("logs")
 
 _CACHED_MACHINE: str | None = None

@@ -73,7 +73,7 @@ class LaunchAgentInstaller {
         let runtimeBinDir = runtimeBin.flatMap { dir in
             FileManager.default.fileExists(atPath: dir + "/node") ? dir : nil
         }
-        let home = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support/Sutando")
+        let home = (NSHomeDirectory() as NSString).appendingPathComponent(".sutando/workspace")
         return LaunchAgentPaths(repoDir: repoDir, sutandoHome: home, runtimeBinDir: runtimeBinDir)
     }
 
@@ -108,7 +108,7 @@ class LaunchAgentInstaller {
             "{{NODE_BIN_DIR}}": nodeBinDir,
             "{{PYTHON_BIN}}": pythonBin,
             "{{TMUX_BIN}}": tmuxBin,
-            "{{SUTANDO_HOME}}": p.sutandoHome,
+            "{{SUTANDO_WORKSPACE}}": p.sutandoHome,
             "{{LOG_DIR}}": logDir,
             // For PathState-gated KeepAlive (discord/telegram bridges
             // wait on ~/.claude/channels/<name>/.env before running).
@@ -134,11 +134,11 @@ class LaunchAgentInstaller {
     /// them by path on app launch and unloads on app quit.
     var runDir: String {
         let home: String
-        if let env = ProcessInfo.processInfo.environment["SUTANDO_HOME"], !env.isEmpty {
+        if let env = ProcessInfo.processInfo.environment["SUTANDO_WORKSPACE"], !env.isEmpty {
             home = (env as NSString).expandingTildeInPath
         } else {
             home = (NSHomeDirectory() as NSString)
-                .appendingPathComponent("Library/Application Support/Sutando")
+                .appendingPathComponent(".sutando/workspace")
         }
         return home + "/LaunchAgents"
     }
@@ -204,7 +204,13 @@ class LaunchAgentInstaller {
         // broken install of one skill doesn't block service bootstrap.
         // Idempotent (pip is a no-op on already-installed packages of the
         // same version) so we run it on every install.
-        installPythonSkillDeps()
+        let phs = placeholders(paths)
+        // Install skill deps into the SAME interpreter the service plists run
+        // ({{PYTHON_BIN}} — the bundled runtime python if present, else the
+        // resolved system python3). Hardcoding /usr/bin/python3 here installed
+        // discord.py for the wrong interpreter, so discord-bridge — launched
+        // with /opt/homebrew/bin/python3 — still crashed on `import discord`.
+        installPythonSkillDeps(pythonBin: phs["{{PYTHON_BIN}}"] ?? "/usr/bin/python3")
 
         // Build the macos-use MCP server (~35s `xcrun swift build`) and
         // register it with Claude Code. Fire-and-forget on a background
@@ -216,7 +222,6 @@ class LaunchAgentInstaller {
         // no-ops when the MCP server is already registered.
         buildMacosUseAsync(repoDir: paths.repoDir)
 
-        let phs = placeholders(paths)
         let files = try FileManager.default.contentsOfDirectory(atPath: templatesDir)
         var summary = LaunchAgentInstallSummary()
         // Labels we explicitly skip even if their template is present in
@@ -311,7 +316,7 @@ class LaunchAgentInstaller {
         let installScript = repoDir + "/skills/macos-use/scripts/install-mcp.sh"
         guard FileManager.default.fileExists(atPath: buildScript) else { return }
         let logDir = (NSHomeDirectory() as NSString)
-            .appendingPathComponent("Library/Application Support/Sutando/logs")
+            .appendingPathComponent(".sutando/workspace/logs")
         try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
         let logPath = logDir + "/macos-use-build.log"
         DispatchQueue.global(qos: .background).async {
@@ -348,7 +353,7 @@ class LaunchAgentInstaller {
     /// take ~30s on a fresh Mac; no service plist imports these deps at
     /// boot, so a delayed install is fine. Logs to
     /// `$SUTANDO_HOME/logs/pip-skill-deps.log` for post-mortem.
-    private func installPythonSkillDeps() {
+    private func installPythonSkillDeps(pythonBin: String) {
         // Canonical list (verified by grepping non-stdlib imports across
         // skills/ + src/):
         //   - google-genai  → image-generation
@@ -358,12 +363,12 @@ class LaunchAgentInstaller {
         // urllib or self-install on demand.
         let packages = ["google-genai", "Pillow", "discord.py"]
         let logDir = (NSHomeDirectory() as NSString)
-            .appendingPathComponent("Library/Application Support/Sutando/logs")
+            .appendingPathComponent(".sutando/workspace/logs")
         try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
         let logPath = logDir + "/pip-skill-deps.log"
         DispatchQueue.global(qos: .background).async {
             let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            proc.executableURL = URL(fileURLWithPath: pythonBin)
             proc.arguments = ["-m", "pip", "install",
                               "--break-system-packages",
                               "--user",

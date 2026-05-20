@@ -20,6 +20,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { resolveWorkspace } from './workspace_default.js';
 import { cloudFetch, isCloudSignedIn, recordEvent as cloudRecordEvent, recordError as cloudRecordError } from './cloud-client.js';
 import { withSkillLock } from './cloud-skill-lock.js';
 
@@ -37,9 +38,7 @@ interface InstalledRow {
 }
 
 function skillsInstallDir(): string {
-	const home = process.env.SUTANDO_HOME;
-	if (home) return join(home.replace(/^~/, homedir()), 'cloud-skills');
-	return join(homedir(), 'Library', 'Application Support', 'Sutando', 'cloud-skills');
+	return join(resolveWorkspace(), 'cloud-skills');
 }
 
 async function fetchInstalled(): Promise<InstalledRow[] | null> {

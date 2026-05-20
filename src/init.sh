@@ -11,10 +11,9 @@
 set -e
 
 REPO="${SUTANDO_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
-# Per-machine runtime state. Falls back to REPO so dev installs keep working
-# without setting SUTANDO_HOME. The .app bundle sets it to
-# ~/Library/Application Support/Sutando.
-STATE_ROOT="${SUTANDO_HOME:-$REPO}"
+# Per-machine runtime state. Resolves $SUTANDO_WORKSPACE, defaulting to
+# ~/.sutando/workspace/ (the canonical workspace per docs/workspace-design.md).
+STATE_ROOT="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 MODE="${1:-full}"
 
 case "$MODE" in

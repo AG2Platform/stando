@@ -13,7 +13,7 @@ import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync, readdir
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
-import { stateDir, statePath } from './util_paths.js';
+import { stateDir, statePath } from './state-paths.js';
 
 const REPO_DIR = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const TASK_DIR = stateDir('tasks');

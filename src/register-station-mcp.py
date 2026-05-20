@@ -31,22 +31,16 @@ import sys
 import tempfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workspace_default import resolve_workspace  # noqa: E402
+
 
 SERVER_KEY = "sutando-station"
 
 
 def cloud_auth_path() -> Path | None:
-    home = os.environ.get("SUTANDO_HOME")
-    candidates: list[Path] = []
-    if home:
-        candidates.append(Path(home).expanduser() / "cloud-auth.json")
-    # Repo-root fallback (dev workflow).
-    here = Path(__file__).resolve().parent.parent
-    candidates.append(here / "cloud-auth.json")
-    for p in candidates:
-        if p.exists():
-            return p
-    return None
+    p = resolve_workspace(migrate=False) / "cloud-auth.json"
+    return p if p.exists() else None
 
 
 def load_cloud_auth() -> dict | None:

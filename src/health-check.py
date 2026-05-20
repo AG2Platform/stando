@@ -10,6 +10,7 @@ Usage:
   python3 src/health-check.py --notify-on-fail # macOS notification on failure
 
 Checks:
+  - macOS TCC Documents-folder access (when repo is under ~/Documents)
   - Voice agent (port 9900), web client, agent API, dashboard
   - Critical files (CLAUDE.md, build_log.md, ACTIVITY.md)
   - Memory system (MEMORY.md index, key memory files)
@@ -28,7 +29,18 @@ from typing import Optional
 
 REPO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import shared_personal_path, state_path, state_dir  # noqa: E402
+from util_paths import shared_personal_path  # noqa: E402
+from workspace_default import resolve_workspace  # noqa: E402
+
+# Workspace = runtime-state root (tasks/, results/, state/). REPO_DIR stays the
+# source-code root (src/, skills/, logs/, .env, build_log.md). Before PR #762's
+# resolver existed, every consumer hardcoded REPO_DIR / "tasks" — so when the
+# owner set $SUTANDO_WORKSPACE to a non-repo location, health-check kept
+# writing alerts to <repo>/tasks/ while the watcher was reading from
+# $SUTANDO_WORKSPACE/tasks/. Three task-health alerts on 2026-05-16 landed in
+# the wrong dir before this fix; same drift class as src/watch-tasks-stream.sh
+# pre-#736 and skills/self-diagnose pre-#769.
+WORKSPACE_DIR = resolve_workspace()
 
 def _default_memory_dir() -> str:
     """Auto-detect Claude Code memory dir from repo path."""
@@ -58,7 +70,7 @@ def check_launchd(label: str) -> dict:
     """Check if a launchd job is loaded and running."""
     try:
         result = subprocess.run(
-            ["launchctl", "list"],
+            ["/bin/launchctl", "list"],
             capture_output=True, text=True, timeout=5,
         )
         for line in result.stdout.split("\n"):
@@ -95,7 +107,7 @@ def check_directory(path: Path, name: str) -> dict:
 def check_memory_sync() -> dict:
     """Verify memory sync is configured and has run recently."""
     name = "memory-sync"
-    env_path = state_path(".env")
+    env_path = REPO_DIR / ".env"
     repo_url = ""
     if env_path.exists():
         for line in env_path.read_text().splitlines():
@@ -104,9 +116,18 @@ def check_memory_sync() -> dict:
                 break
     if not repo_url:
         return {"name": name, "status": "warn", "detail": "SUTANDO_MEMORY_REPO not set — cross-machine sync disabled"}
-    sync_dir = Path.home() / ".sutando-memory-sync"
-    if not sync_dir.exists():
-        return {"name": name, "status": "warn", "detail": "repo configured but never synced — run bash ~/.sutando-memory-sync/scripts/sync-memory.sh"}
+    # Memory-sync clone dir: PR #764 renamed legacy ~/.sutando-memory-sync/
+    # → ~/.sutando/memory-sync/. Check new path first; fall back to legacy
+    # for installs that haven't migrated yet (sync-memory.sh auto-migrates
+    # on next run when env is unset).
+    sync_dir_new = Path.home() / ".sutando" / "memory-sync"
+    sync_dir_legacy = Path.home() / ".sutando-memory-sync"
+    if sync_dir_new.exists():
+        sync_dir = sync_dir_new
+    elif sync_dir_legacy.exists():
+        sync_dir = sync_dir_legacy
+    else:
+        return {"name": name, "status": "warn", "detail": "repo configured but never synced — run bash scripts/sync-memory.sh"}
     git_dir = sync_dir / ".git" / "FETCH_HEAD"
     if git_dir.exists():
         age_h = (time.time() - git_dir.stat().st_mtime) / 3600
@@ -116,12 +137,61 @@ def check_memory_sync() -> dict:
     return {"name": name, "status": "ok", "detail": "initialized, never fetched"}
 
 
+def check_tcc_documents_access() -> dict:
+    """Detect macOS TCC denial of Documents-folder access (issue #709).
+
+    Relevant when REPO_DIR is inside ~/Documents — the default location for
+    git checkouts on macOS. A process that hasn't been granted Documents access
+    in System Settings → Privacy & Security → Files and Folders will hit
+    PermissionError on every file read/write in the repo, causing tasks to go
+    missing and services to crash on startup with no obvious error.
+
+    Probe: attempt to list REPO_DIR and write+unlink a throwaway temp file.
+    Safe even when access is denied — the PermissionError is caught and reported
+    rather than propagated.
+    """
+    name = "tcc-documents-access"
+    docs_dir = Path.home() / "Documents"
+    try:
+        in_documents = str(REPO_DIR.resolve()).startswith(str(docs_dir.resolve()))
+    except OSError:
+        in_documents = True  # can't resolve → assume we're in Documents and probe
+
+    if not in_documents:
+        return {"name": name, "status": "ok", "detail": "repo not in ~/Documents — TCC check N/A"}
+
+    probe = REPO_DIR / ".tcc-probe"
+    try:
+        list(REPO_DIR.iterdir())
+        probe.write_text("")
+        probe.unlink()
+        return {"name": name, "status": "ok", "detail": "Documents folder access granted"}
+    except PermissionError:
+        try:
+            probe.unlink()
+        except Exception:
+            pass
+        return {
+            "name": name,
+            "status": "fail",
+            "detail": (
+                "macOS TCC denied Documents folder access — grant in "
+                "System Settings → Privacy & Security → Files and Folders "
+                "→ Terminal (or your IDE/launchd app)"
+            ),
+        }
+    except OSError:
+        return {"name": name, "status": "ok", "detail": "Documents access check inconclusive"}
+
+
 # ---------------------------------------------------------------------------
 # Fix attempts
 # ---------------------------------------------------------------------------
 
 def fix_launchd(label: str) -> str:
     """Try to reload a launchd job."""
+    # The fork folded the web server into voice-agent (PR-A) — there is no
+    # separate com.sutando.web-client plist.
     plist_map = {
         "com.sutando.voice-agent": Path.home() / "Library/LaunchAgents/com.sutando.voice-agent.plist",
     }
@@ -129,17 +199,17 @@ def fix_launchd(label: str) -> str:
     if not plist or not plist.exists():
         return f"no plist found for {label}"
 
-    uid = subprocess.run(["id", "-u"], capture_output=True, text=True).stdout.strip()
+    uid = subprocess.run(["/usr/bin/id", "-u"], capture_output=True, text=True).stdout.strip()
     # Try kickstart
     result = subprocess.run(
-        ["launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
+        ["/bin/launchctl", "kickstart", "-k", f"gui/{uid}/{label}"],
         capture_output=True, text=True, timeout=10,
     )
     if result.returncode == 0:
         return f"restarted {label}"
     # Try bootstrap
     result = subprocess.run(
-        ["launchctl", "bootstrap", f"gui/{uid}", str(plist)],
+        ["/bin/launchctl", "bootstrap", f"gui/{uid}", str(plist)],
         capture_output=True, text=True, timeout=10,
     )
     if result.returncode == 0:
@@ -156,7 +226,7 @@ def mark_stale_if_outdated(check: dict, src_file: Path, pgrep_pattern: str, thre
     started more than `threshold_sec` before `src_file`'s mtime.
 
     Extracted so the same logic covers all tsx-managed services
-    (voice-agent, conversation-server) without duplication.
+    (voice-agent, web-client, conversation-server) without duplication.
     30 min default threshold tolerates `git checkout` mtime bumps; real
     stale deploys are hours/days old. Silent on any failure — stale
     detection is advisory, not authoritative.
@@ -186,14 +256,14 @@ def mark_stale_if_outdated(check: dict, src_file: Path, pgrep_pattern: str, thre
             pass
     try:
         pids = subprocess.run(
-            ["pgrep", "-f", pgrep_pattern],
+            ["/usr/bin/pgrep", "-f", pgrep_pattern],
             capture_output=True, text=True, timeout=5
         ).stdout.strip().split("\n")
         pids = [p for p in pids if p]
         if not pids:
             return
         ps_out = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", ",".join(pids)],
+            ["/bin/ps", "-o", "lstart=", "-p", ",".join(pids)],
             capture_output=True, text=True, timeout=5
         ).stdout.strip().split("\n")
         from datetime import datetime as _dt
@@ -237,7 +307,7 @@ def _file_unchanged_since(src_file: Path, proc_start: float) -> bool:
     """
     try:
         log = subprocess.run(
-            ["git", "log", "-1", "--format=%ct", "HEAD", "--", str(src_file)],
+            ["/usr/bin/git", "log", "-1", "--format=%ct", "HEAD", "--", str(src_file)],
             cwd=REPO_DIR, capture_output=True, text=True, timeout=5
         )
         if log.returncode != 0 or not log.stdout.strip():
@@ -248,7 +318,7 @@ def _file_unchanged_since(src_file: Path, proc_start: float) -> bool:
             return False
         # No commits since proc_start; check for uncommitted edits
         diff = subprocess.run(
-            ["git", "diff", "--quiet", "HEAD", "--", str(src_file)],
+            ["/usr/bin/git", "diff", "--quiet", "HEAD", "--", str(src_file)],
             cwd=REPO_DIR, capture_output=True, timeout=5
         )
         return diff.returncode == 0  # 0 = no diff
@@ -270,6 +340,32 @@ REQUIRED_VOICE_WATCHERS = [
 ]
 
 
+def _voice_log_path() -> Path:
+    """Resolve where voice-agent's stdout/stderr lands.
+
+    Two paths exist for legitimate reasons:
+    - launchd plist (~/Library/LaunchAgents/com.sutando.voice-agent.plist)
+      pipes StandardOut/ErrorPath to `~/Library/Application Support/Sutando/
+      logs/voice-agent.log`. This is the path **generated by Sutando.app's
+      installer** — not a fixed assumption. Hosts that predate Sutando.app
+      (or have a hand-written plist) may instead point at
+      `<workspace>/logs/voice-agent.log`, in which case the resolver falls
+      through to the workspace path below and behavior is unchanged.
+    - `src/startup.sh:153` writes to `<workspace>/logs/voice-agent.log`
+      when the user starts voice-agent manually (dev mode).
+
+    Prefer the launchd path when it has content. Falls back to the
+    workspace path so manually-launched voice-agents still resolve.
+    Without this resolver, `voice-watchers` and `voice-transport` would
+    permanently warn "voice-agent.log not found" on Sutando.app installs.
+    """
+    launchd_log = Path.home() / "Library/Application Support/Sutando/logs/voice-agent.log"
+    workspace_log = WORKSPACE_DIR / "logs" / "voice-agent.log"
+    if launchd_log.exists() and launchd_log.stat().st_size > 0:
+        return launchd_log
+    return workspace_log
+
+
 def check_voice_watchers(voice_check: dict) -> dict:
     """Verify all 3 task-bridge watchers are registered in the current
     voice-agent process. Parses logs/voice-agent.log for the most recent
@@ -284,7 +380,7 @@ def check_voice_watchers(voice_check: dict) -> dict:
         check["status"] = "warn"
         check["detail"] = f"voice-agent {vs}" if vs else "voice-agent status unknown"
         return check
-    log_file = state_path("logs/voice-agent.log")
+    log_file = _voice_log_path()
     if not log_file.exists():
         check["status"] = "warn"
         check["detail"] = "voice-agent.log not found"
@@ -361,7 +457,7 @@ def check_voice_transport(voice_check: dict) -> dict:
         check["status"] = "warn"
         check["detail"] = f"voice-agent {vs}" if vs else "voice-agent status unknown"
         return check
-    log_file = state_path("logs/voice-agent.log")
+    log_file = _voice_log_path()
     if not log_file.exists():
         check["status"] = "warn"
         check["detail"] = "voice-agent.log not found"
@@ -529,7 +625,7 @@ def _extract_body(text: str, start: int) -> str:
 # ---------------------------------------------------------------------------
 # These two checks together catch the failure mode observed 2026-05-06 where
 # voice-queued tasks piled up in tasks/ for 5+ minutes with no processing,
-# because (a) the watch-tasks.sh fswatch shim wasn't running and (b) the
+# because (a) the watch-tasks fswatch shim wasn't running and (b) the
 # core proactive loop's last status update was 5 days old (status="running"
 # with a stale ts means a pass crashed mid-execution and the loop never
 # re-armed). Each check is a *consequence* signal that fires regardless of
@@ -548,7 +644,7 @@ def check_core_proactive_loop(threshold_sec: int = 600) -> dict:
     Status is anything other than "running" → ok regardless of age.
     """
     name = "core-proactive-loop"
-    status_path = state_path("core-status.json")
+    status_path = WORKSPACE_DIR / "core-status.json"
     if not status_path.exists():
         return {"name": name, "status": "ok", "detail": "core-status.json not yet written"}
     try:
@@ -583,7 +679,7 @@ def check_task_queue(threshold_count: int = 3, threshold_age_sec: int = 300) -> 
     alert.
     """
     name = "task-queue"
-    tasks_dir = REPO_DIR / "tasks"
+    tasks_dir = WORKSPACE_DIR / "tasks"
     if not tasks_dir.exists():
         return {"name": name, "status": "ok", "detail": "tasks/ not yet created"}
     # *.txt at the top level only — archive lives in tasks/archive/<YYYY-MM>/
@@ -615,15 +711,12 @@ def run_all_checks() -> list[dict]:
     checks.append(check_voice_transport(voice_check))
     checks.append(check_bodhi_dist())
 
-    # HTTP server for the conversation page lives in the same process as the
-    # voice agent (PR-A: src/web-server.ts started by src/voice-agent.ts).
-    # A separate port check still catches the "voice agent up, HTTP server
-    # crashed at startup" case — same code, same process, but distinct
-    # listening sockets, so failures here are independent of WS health.
-    http_check = check_port(8080, "voice-agent-http")
-    if http_check["status"] == "ok":
-        mark_stale_if_outdated(http_check, REPO_DIR / "src" / "web-server.ts", "voice-agent.ts")
-    checks.append(http_check)
+    # PR-A: the HTTP server (src/web-server.ts) is started by src/voice-agent.ts,
+    # not a standalone web-client process.
+    web_check = check_port(8080, "voice-agent-http")
+    if web_check["status"] == "ok":
+        mark_stale_if_outdated(web_check, REPO_DIR / "src" / "web-server.ts", "web-server.ts")
+    checks.append(web_check)
 
     # Optional services (downgrade missing to warning, not failure)
     for port, name in [(7843, "agent-api"), (7844, "dashboard"), (7845, "screen-capture")]:
@@ -633,11 +726,15 @@ def run_all_checks() -> list[dict]:
             c["detail"] = "not running (optional)"
         checks.append(c)
 
+    # macOS TCC — must come before critical-file checks so if TCC is blocking
+    # everything, the operator sees the root cause before the downstream failures.
+    checks.append(check_tcc_documents_access())
+
     # Critical files
     for name, path in [
         ("CLAUDE.md", REPO_DIR / "CLAUDE.md"),
-        ("build_log.md", Path(shared_personal_path("build_log.md", REPO_DIR))),
-        (".env", state_path(".env")),
+        ("build_log.md", WORKSPACE_DIR / "build_log.md"),
+        (".env", REPO_DIR / ".env"),
     ]:
         checks.append(check_file(path, name))
 
@@ -647,14 +744,17 @@ def run_all_checks() -> list[dict]:
     else:
         checks.append({"name": "memory-dir", "status": "ok", "detail": "not yet created (normal for new installs)"})
 
-    # Notes — canonical home is shared private dir post-migration
-    checks.append(check_directory(Path(shared_personal_path("notes", REPO_DIR)), "notes-dir"))
+    # Notes — canonical home is shared private dir post-migration.
+    # Pass WORKSPACE_DIR (not REPO_DIR) so the check resolves to
+    # ~/.sutando/workspace/notes rather than <repo>/notes — the notes/
+    # .gitkeep was removed from the repo in #793's workspace migration.
+    checks.append(check_directory(Path(shared_personal_path("notes", WORKSPACE_DIR)), "notes-dir"))
 
     # Memory sync
     checks.append(check_memory_sync())
 
     # Phone conversation server (optional — only check if Twilio configured and not skipped)
-    env_path = state_path(".env")
+    env_path = REPO_DIR / ".env"
     if env_path.exists():
         env_content = env_path.read_text()
         has_twilio = "TWILIO_ACCOUNT_SID=" in env_content and not env_content.split("TWILIO_ACCOUNT_SID=")[1].startswith("\n")
@@ -671,39 +771,45 @@ def run_all_checks() -> list[dict]:
                     "conversation-server.ts",
                 )
             checks.append(c)
-            # Tunnel check — depends on TWILIO_WEBHOOK_URL host (Funnel) or ngrok
+            # Tunnel check — depends on TWILIO_WEBHOOK_URL host (Funnel) or ngrok.
+            # Skip the whole block when TWILIO_WEBHOOK_URL is unset/empty: with
+            # no inbound webhook, no tunnel is required, so flagging ngrok
+            # "down — phone calls won't reach server" would be a false alarm
+            # (issue #710). The has_twilio gate above only requires
+            # TWILIO_ACCOUNT_SID, which the owner may set for outbound-only.
             if c["status"] == "ok":
                 webhook_url = ""
                 for line in env_content.splitlines():
                     if line.startswith("TWILIO_WEBHOOK_URL="):
                         webhook_url = line.split("=", 1)[1].strip().strip('"').strip("'")
                         break
-                from urllib.parse import urlparse as _urlparse
-                _host = _urlparse(webhook_url).hostname or ""
-                is_funnel = _host.endswith(".ts.net")
-                if is_funnel:
-                    # Tailscale Funnel — verify funnel is serving and reachable
-                    funnel_c = {"name": "tailscale-funnel", "status": "ok", "detail": f"serving {webhook_url}"}
-                    try:
-                        import urllib.request
-                        req = urllib.request.Request(f"{webhook_url}/health", headers={"User-Agent": "sutando-healthcheck"})
-                        with urllib.request.urlopen(req, timeout=5) as resp:
-                            if resp.status != 200:
-                                funnel_c["status"] = "down"
-                                funnel_c["detail"] = f"webhook returned {resp.status}"
-                    except Exception as e:
-                        funnel_c["status"] = "down"
-                        funnel_c["detail"] = f"unreachable: {str(e)[:60]}"
-                    checks.append(funnel_c)
-                else:
-                    ngrok_c = check_port(4040, "ngrok")
-                    if ngrok_c["status"] == "ok":
-                        ngrok_c["detail"] = "tunnel active (port 4040)"
+                if webhook_url:
+                    from urllib.parse import urlparse as _urlparse
+                    _host = _urlparse(webhook_url).hostname or ""
+                    is_funnel = _host.endswith(".ts.net")
+                    if is_funnel:
+                        # Tailscale Funnel — verify funnel is serving and reachable
+                        funnel_c = {"name": "tailscale-funnel", "status": "ok", "detail": f"serving {webhook_url}"}
+                        try:
+                            import urllib.request
+                            req = urllib.request.Request(f"{webhook_url}/health", headers={"User-Agent": "sutando-healthcheck"})
+                            with urllib.request.urlopen(req, timeout=5) as resp:
+                                if resp.status != 200:
+                                    funnel_c["status"] = "down"
+                                    funnel_c["detail"] = f"webhook returned {resp.status}"
+                        except Exception as e:
+                            funnel_c["status"] = "down"
+                            funnel_c["detail"] = f"unreachable: {str(e)[:60]}"
+                        checks.append(funnel_c)
                     else:
-                        # Critical: phone calls fail without ngrok
-                        ngrok_c["status"] = "down"
-                        ngrok_c["detail"] = "not running — phone calls won't reach server"
-                    checks.append(ngrok_c)
+                        ngrok_c = check_port(4040, "ngrok")
+                        if ngrok_c["status"] == "ok":
+                            ngrok_c["detail"] = "tunnel active (port 4040)"
+                        else:
+                            # Critical: phone calls fail without ngrok
+                            ngrok_c["status"] = "down"
+                            ngrok_c["detail"] = "not running — phone calls won't reach server"
+                        checks.append(ngrok_c)
 
     # Messaging bridges (optional — only check if configured and not skipped)
     skip_telegram = (env_path.exists() and "SKIP_TELEGRAM=1" in env_path.read_text()) or os.environ.get("SKIP_TELEGRAM") == "1"
@@ -723,7 +829,7 @@ def run_all_checks() -> list[dict]:
             # invocations, ps/grep pipelines, etc). Otherwise pgrep -f bare
             # name produces false-positive "multiple processes" warnings
             # that scared us into thinking the bridges were zombied today.
-            result = subprocess.run(["pgrep", "-f", f"{proc_name}\\.py$"], capture_output=True, text=True)
+            result = subprocess.run(["/usr/bin/pgrep", "-f", f"{proc_name}\\.py$"], capture_output=True, text=True)
             pids = result.stdout.strip().split("\n") if result.returncode == 0 else []
             pids = [p for p in pids if p]
         except:
@@ -744,9 +850,9 @@ def run_all_checks() -> list[dict]:
         # so log-stale warnings never fired (caught 2026-05-05 when Mini's
         # logs/discord-bridge.log was 36h stale but health-check stayed "ok").
         import time
-        log_file = state_path(f"logs/{name}.log")
+        log_file = WORKSPACE_DIR / "logs" / f"{name}.log"
         if not log_file.exists():
-            log_file = state_path(f"src/{name}.log")
+            log_file = REPO_DIR / "src" / f"{name}.log"
         detail = "running"
         status = "ok"
         if log_file.exists():
@@ -756,7 +862,7 @@ def run_all_checks() -> list[dict]:
                 detail = f"running but log stale ({int(age_sec)}s old)"
 
         # Check 3: Heartbeat file freshness (overrides log staleness if fresh)
-        heartbeat_file = state_path(f"state/{name}.heartbeat")
+        heartbeat_file = WORKSPACE_DIR / "state" / f"{name}.heartbeat"
         if heartbeat_file.exists():
             hb_age = time.time() - heartbeat_file.stat().st_mtime
             if hb_age <= 120:  # heartbeat is fresh — bridge is alive
@@ -776,7 +882,7 @@ def run_all_checks() -> list[dict]:
                 src_mtime = src_file.stat().st_mtime
                 # Use ps to get process start time as Unix epoch
                 ps_out = subprocess.run(
-                    ["ps", "-o", "lstart=", "-p", pids[0]],
+                    ["/bin/ps", "-o", "lstart=", "-p", pids[0]],
                     capture_output=True, text=True, timeout=5
                 ).stdout.strip()
                 if ps_out:
@@ -790,8 +896,8 @@ def run_all_checks() -> list[dict]:
                     # branch switching.
                     if src_mtime - proc_start > 1800:  # source >30 min newer
                         # Cross-check with git before flagging — #253 added this
-                        # for voice-agent via mark_stale_if_outdated, this path
-                        # does the same check inline to reach bridges.
+                        # for voice-agent + web-server via mark_stale_if_outdated,
+                        # this path does the same check inline to reach bridges.
                         if not _file_unchanged_since(src_file, proc_start):
                             status = "stale"
                             detail = f"running but code is {int((src_mtime - proc_start) / 60)} min newer than process — restart needed"
@@ -807,7 +913,7 @@ def run_all_checks() -> list[dict]:
         # state/<name>.heartbeat.
         try:
             lsof_out = subprocess.run(
-                ["lsof", "-p", pids[0]], capture_output=True, text=True, timeout=5
+                ["/usr/sbin/lsof", "-p", pids[0]], capture_output=True, text=True, timeout=5
             ).stdout
             for line in lsof_out.splitlines():
                 parts = line.split()
@@ -832,32 +938,59 @@ def run_all_checks() -> list[dict]:
 
         checks.append({"name": name, "status": status, "detail": detail})
 
-    # Sutando menu bar app — check either dev-built binary or installed .app.
-    # On the distributed .app path the dev binary doesn't ship; we still want
-    # the menu bar check to run so dashboard reports accurate status.
+    # Sutando menu bar app — dev-built binary OR installed .app. The fork
+    # ships as a signed .app, so on a real install only app_bin exists;
+    # dev clones have dev_bin. Check whichever is present.
     dev_bin = REPO_DIR / "src" / "Sutando" / "Sutando"
     app_bin = Path("/Applications/Sutando.app/Contents/MacOS/Sutando")
     if dev_bin.exists() or app_bin.exists():
+        # Distinguish pgrep failures (exit code != 0 and != 1) from a real
+        # no-match (exit code 1). Pre-fix the bare try/except swallowed
+        # subprocess errors AND empty results into a single "no pids" path,
+        # which surfaced as a false "not running" warn when pgrep itself
+        # hiccupped (CPU contention, fd exhaustion, etc.). Chi hit this
+        # 2026-05-18 — app was alive (PID 34586 since May 17) but a
+        # health-check tick reported "not running."
+        pgrep_status = None  # "ok-running" | "ok-stopped" | "error"
+        pgrep_err = ""
+        pids: list[str] = []
         try:
-            result = subprocess.run(["pgrep", "-f", "(Sutando|MacOS)/Sutando"], capture_output=True, text=True)
-            pids = [p for p in result.stdout.strip().split("\n") if p]
-        except:
-            pids = []
-        if pids:
+            result = subprocess.run(
+                ["/usr/bin/pgrep", "-f", "(Sutando|MacOS)/Sutando"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                pids = [p for p in result.stdout.strip().split("\n") if p]
+                pgrep_status = "ok-running"
+            elif result.returncode == 1:
+                # pgrep convention: 1 = no match
+                pgrep_status = "ok-stopped"
+            else:
+                pgrep_status = "error"
+                pgrep_err = (result.stderr or f"pgrep exit={result.returncode}").strip()[:120]
+        except Exception as e:
+            pgrep_status = "error"
+            pgrep_err = f"{type(e).__name__}: {e}"[:120]
+
+        if pgrep_status == "ok-running" and pids:
             check = {"name": "sutando-app", "status": "ok", "detail": f"running (⌃C/⌃V/⌃M)"}
-            # Staleness check is meaningful only in the dev workflow — the
-            # .app binary and bundled main.swift share a build mtime, so a
-            # comparison there is always equal. Skip when dev_bin missing.
+            # Source-vs-binary staleness is only meaningful for a dev build;
+            # the installed .app is rebuilt by app/build-app.sh, not in place.
             if dev_bin.exists():
                 mark_stale_if_outdated(
                     check,
                     REPO_DIR / "src" / "Sutando" / "main.swift",
-                    "(Sutando|MacOS)/Sutando",
+                    "src/Sutando/Sutando",
                     binary_path=dev_bin,
                 )
             checks.append(check)
-        else:
+        elif pgrep_status == "ok-stopped":
             checks.append({"name": "sutando-app", "status": "warn", "detail": "not running — hotkeys disabled"})
+        else:
+            # pgrep itself errored — don't false-alarm "not running" when we
+            # actually couldn't determine state. Surface as a transient warn
+            # with the cause so it's debuggable, not a routine "app is down."
+            checks.append({"name": "sutando-app", "status": "warn", "detail": f"detection failed (pgrep: {pgrep_err or 'unknown error'}) — actual app state unknown"})
 
     # Stuck-loop / queue-pileup detection — consequence-level signals that
     # fire whether the watcher died, the proactive loop crashed mid-pass, or
@@ -869,6 +1002,32 @@ def run_all_checks() -> list[dict]:
     checks.append(check_task_queue(threshold_count=queue_count, threshold_age_sec=queue_age_sec))
 
     return checks
+
+
+def _any_core_alive(workspace: Optional[Path] = None, max_age_s: float = 90.0) -> bool:
+    """Return True if any sutando-core on any host has a live heartbeat.
+
+    Each running core writes `<workspace>/state/cores/<hostname>.alive` every
+    30 seconds (src/core_heartbeat.py). A file younger than `max_age_s` (3
+    missed beats at 30s each) means the core is alive. When it is, the
+    proactive loop already handles health inline — no need to queue a task.
+
+    `workspace` defaults to `WORKSPACE_DIR` at call time (not at import time)
+    so tests can patch the module-level name and have the change take effect.
+    """
+    if workspace is None:
+        workspace = WORKSPACE_DIR
+    cores_dir = workspace / "state" / "cores"
+    if not cores_dir.is_dir():
+        return False
+    now = time.time()
+    for alive_file in cores_dir.glob("*.alive"):
+        try:
+            if now - alive_file.stat().st_mtime < max_age_s:
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def emit_task_for_failures(checks: list[dict], state_file: Optional[Path] = None, tasks_dir: Optional[Path] = None) -> None:
@@ -901,11 +1060,10 @@ def emit_task_for_failures(checks: list[dict], state_file: Optional[Path] = None
         return
 
     if state_file is None or tasks_dir is None:
-        REPO = Path(__file__).resolve().parent.parent
         if state_file is None:
-            state_file = REPO / "state" / "health-last-alerted.json"
+            state_file = WORKSPACE_DIR / "state" / "health-last-alerted.json"
         if tasks_dir is None:
-            tasks_dir = REPO / "tasks"
+            tasks_dir = WORKSPACE_DIR / "tasks"
     tasks_dir.mkdir(parents=True, exist_ok=True)
     state_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -941,6 +1099,7 @@ def emit_task_for_failures(checks: list[dict], state_file: Optional[Path] = None
         f"source: health-check\n"
         f"user_id: health-check\n"
         f"access_tier: owner\n"
+        f"priority: low\n"
     )
     task_path = tasks_dir / f"task-health-{int(time.time())}.txt"
     task_path.write_text(body)
@@ -979,7 +1138,7 @@ def notify_for_failures(
         return
 
     if state_file is None:
-        state_file = REPO_DIR / "state" / "health-last-notified.json"
+        state_file = WORKSPACE_DIR / "state" / "health-last-notified.json"
     state_file.parent.mkdir(parents=True, exist_ok=True)
 
     set_key = "|".join(sorted(c["name"] for c in failures))
@@ -1052,7 +1211,12 @@ def main():
     # `--quiet --emit-task --notify-on-fail` invocation bypassed via the
     # quiet-path sys.exit(1). Splitting the emit logic by --fix state
     # restores coverage for the no-fix path.
-    if do_emit and not do_fix:
+    #
+    # Skip when a live core is present (issue #635 dedup-runners): the
+    # proactive loop already handles health inline — writing a task file
+    # here creates a duplicate that re-queues the same check. The task-file
+    # path is only useful when the core is dead (queues for next restart).
+    if do_emit and not do_fix and not _any_core_alive():
         emit_task_for_failures(checks)
 
     if as_json:
@@ -1113,11 +1277,11 @@ def main():
                             # bridge process. PR #243 fixed the detect
                             # side; this keeps the kill side consistent.
                             old_pids = subprocess.run(
-                                ["pgrep", "-f", f"{c['name']}\\.py$"], capture_output=True, text=True
+                                ["/usr/bin/pgrep", "-f", f"{c['name']}\\.py$"], capture_output=True, text=True
                             ).stdout.strip().split("\n")
                             for pid in old_pids:
                                 if pid:
-                                    subprocess.run(["kill", pid], check=False)
+                                    subprocess.run(["/bin/kill", pid], check=False)
                             import time as _t; _t.sleep(1)
                         except Exception:
                             pass
@@ -1127,7 +1291,7 @@ def main():
                     # dotenv, etc.) — restart would crash on import.
                     # Log path uses logs/ (post-PR #251 refactor).
                     subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
-                                     stdout=open(str(state_path(f"logs/{c['name']}.log")), "a"),
+                                     stdout=open(str(WORKSPACE_DIR / "logs" / f"{c['name']}.log"), "a"),
                                      stderr=subprocess.STDOUT, start_new_session=True)
                     print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
                 elif c["name"] == "sutando-app":
@@ -1146,7 +1310,7 @@ def main():
                     print(f"  {c['name']}: not auto-fixed — needs manual rebuild + relaunch (see memory feedback_sutando_app_launch_method.md)")
                 elif c["name"] == "ngrok":
                     # Read ngrok domain from .env if set, otherwise use default
-                    env_path = state_path(".env")
+                    env_path = REPO_DIR / ".env"
                     domain_arg = []
                     if env_path.exists():
                         for line in env_path.read_text().splitlines():
@@ -1171,12 +1335,12 @@ def main():
                     if c["status"] == "stale":
                         try:
                             old_pids = subprocess.run(
-                                ["pgrep", "-f", "conversation-server.ts"],
+                                ["/usr/bin/pgrep", "-f", "conversation-server.ts"],
                                 capture_output=True, text=True
                             ).stdout.strip().split("\n")
                             for pid in old_pids:
                                 if pid:
-                                    subprocess.run(["kill", pid], check=False)
+                                    subprocess.run(["/bin/kill", pid], check=False)
                             import time as _t; _t.sleep(1)
                         except Exception:
                             pass
@@ -1190,7 +1354,7 @@ def main():
     # review). The no-fix path emits earlier, before --quiet / --json early
     # exits (per #640 v2-regression: launchd's `--quiet --emit-task` was
     # bypassing the end-of-main emit via sys.exit(1)).
-    if do_emit and do_fix and issues:
+    if do_emit and do_fix and issues and not _any_core_alive():
         # Brief delay so restarts have a chance to register before re-check.
         # 2s matches the fix-loop's per-service `time.sleep(1)` budget.
         import time as _t; _t.sleep(2)

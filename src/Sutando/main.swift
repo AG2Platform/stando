@@ -42,17 +42,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return fallback.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().path
     }()
 
-    /// Per-machine runtime state root. Reads `$SUTANDO_HOME` from the
-    /// environment if set (the .app bundle exports it pointing at
-    /// `~/Library/Application Support/Sutando`); otherwise falls back to
-    /// `workspace` so the raw-binary dev workflow continues to write
-    /// state into the repo cwd. Mirrors `statePath()` in
-    /// `src/util_paths.ts` and `state_path()` in `src/util_paths.py`.
+    /// Per-machine runtime state root. Resolves `$SUTANDO_WORKSPACE`,
+    /// defaulting to `~/.sutando/workspace/` — the canonical workspace per
+    /// docs/workspace-design.md. Mirrors resolveWorkspace() in
+    /// src/workspace_default.{ts,py}.
     lazy var stateRoot: String = {
-        if let home = ProcessInfo.processInfo.environment["SUTANDO_HOME"], !home.isEmpty {
-            return (home as NSString).expandingTildeInPath
+        if let ws = ProcessInfo.processInfo.environment["SUTANDO_WORKSPACE"], !ws.isEmpty {
+            return (ws as NSString).expandingTildeInPath
         }
-        return workspace
+        return NSHomeDirectory() + "/.sutando/workspace"
     }()
 
     var resultWatchSource: DispatchSourceFileSystemObject?

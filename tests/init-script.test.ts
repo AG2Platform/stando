@@ -24,7 +24,14 @@ function runInit(repoDir: string, mode?: '--auto' | '--preflight'): RunResult {
 	const args = ['bash', INIT_SH];
 	if (mode) args.push(mode);
 	const proc = spawnSync(args[0]!, args.slice(1), {
-		env: { ...process.env, SUTANDO_REPO: repoDir, HOME: repoDir + '/.fake-home' },
+		env: {
+			...process.env,
+			SUTANDO_REPO: repoDir,
+			// init.sh writes runtime state under $SUTANDO_WORKSPACE; point it
+			// at the scratch repo so the per-dir assertions resolve there.
+			SUTANDO_WORKSPACE: repoDir,
+			HOME: repoDir + '/.fake-home',
+		},
 		encoding: 'utf-8',
 	});
 	return { stdout: proc.stdout, stderr: proc.stderr, status: proc.status };

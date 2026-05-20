@@ -59,11 +59,13 @@ def make_checks(*statuses_and_names):
     return [{"name": n, "status": s, "detail": "test"} for (s, n) in statuses_and_names]
 
 
-def write_status(repo_dir: Path, payload: dict | None) -> None:
-    """Write core-status.json into a temp REPO_DIR override; pass None to
-    skip writing the file at all."""
+def write_status(workspace_dir: Path, payload: dict | None) -> None:
+    """Write core-status.json into a temp WORKSPACE_DIR override; pass None
+    to skip writing the file at all. (Was REPO_DIR pre-PR #836;
+    check_core_proactive_loop now reads from WORKSPACE_DIR — core-status.json
+    is per-user runtime state, not code.)"""
     if payload is not None:
-        (repo_dir / "core-status.json").write_text(json.dumps(payload))
+        (workspace_dir / "core-status.json").write_text(json.dumps(payload))
 
 
 def write_task(tasks_dir: Path, name: str, age_sec: int) -> Path:
@@ -79,23 +81,19 @@ def write_task(tasks_dir: Path, name: str, age_sec: int) -> Path:
 # ---------------------------------------------------------------------------
 
 def with_repo_override(payload):
-    """Run check_core_proactive_loop against a temp REPO_DIR. Returns the
-    check dict. `payload=None` means don't write the status file."""
+    """Run check_core_proactive_loop against a temp WORKSPACE_DIR. Returns
+    the check dict. `payload=None` means don't write the status file.
+    Renamed semantics: pre-PR #836 this mocked REPO_DIR; core-status.json
+    now lives in WORKSPACE_DIR (per-user runtime state)."""
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         write_status(td, payload)
-        orig_repo = hc.REPO_DIR
-        orig_home = os.environ.get("SUTANDO_HOME")
+        orig_ws = hc.WORKSPACE_DIR
         try:
-            hc.REPO_DIR = td
-            os.environ["SUTANDO_HOME"] = str(td)
+            hc.WORKSPACE_DIR = td
             return hc.check_core_proactive_loop(threshold_sec=600)
         finally:
-            hc.REPO_DIR = orig_repo
-            if orig_home is None:
-                os.environ.pop("SUTANDO_HOME", None)
-            else:
-                os.environ["SUTANDO_HOME"] = orig_home
+            hc.WORKSPACE_DIR = orig_ws
 
 
 def case_a_status_missing() -> list[str]:
@@ -111,18 +109,12 @@ def case_b_status_malformed() -> list[str]:
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         (td / "core-status.json").write_text("{ this is not json")
-        orig = hc.REPO_DIR
-        orig_home = os.environ.get("SUTANDO_HOME")
+        orig = hc.WORKSPACE_DIR
         try:
-            hc.REPO_DIR = td
-            os.environ["SUTANDO_HOME"] = str(td)
+            hc.WORKSPACE_DIR = td
             r = hc.check_core_proactive_loop(threshold_sec=600)
         finally:
-            hc.REPO_DIR = orig
-            if orig_home is None:
-                os.environ.pop("SUTANDO_HOME", None)
-            else:
-                os.environ["SUTANDO_HOME"] = orig_home
+            hc.WORKSPACE_DIR = orig
     if r["status"] != "ok":
         fails.append(f"b) malformed JSON should be ok (don't false-alarm), got {r['status']}")
     return fails
@@ -170,20 +162,22 @@ def case_f_running_no_ts() -> list[str]:
 # ---------------------------------------------------------------------------
 
 def with_tasks_override(setup_fn):
-    """Run check_task_queue against a temp REPO_DIR/tasks. setup_fn(tasks_dir)
-    populates the queue."""
+    """Run check_task_queue against a temp WORKSPACE_DIR/tasks. setup_fn(tasks_dir)
+    populates the queue. (Was REPO_DIR pre-#762; check_task_queue now resolves
+    against the workspace because that's where the watcher reads from — see
+    health-check.py top-of-file comment for the drift class.)"""
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
         tasks_dir = td / "tasks"
         if setup_fn is not None:
             tasks_dir.mkdir(parents=True, exist_ok=True)
             setup_fn(tasks_dir)
-        orig = hc.REPO_DIR
+        orig = hc.WORKSPACE_DIR
         try:
-            hc.REPO_DIR = td
+            hc.WORKSPACE_DIR = td
             return hc.check_task_queue(threshold_count=3, threshold_age_sec=300)
         finally:
-            hc.REPO_DIR = orig
+            hc.WORKSPACE_DIR = orig
 
 
 def case_g_no_tasks_dir() -> list[str]:
@@ -334,12 +328,12 @@ def case_q_separate_state_from_emit() -> list[str]:
     fails = []
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        orig = hc.REPO_DIR
+        orig = hc.WORKSPACE_DIR
         try:
-            hc.REPO_DIR = td
+            hc.WORKSPACE_DIR = td
             hc.notify_for_failures(make_checks(("down", "svc")), notify_cmd=["true"])
         finally:
-            hc.REPO_DIR = orig
+            hc.WORKSPACE_DIR = orig
         notified = td / "state" / "health-last-notified.json"
         alerted = td / "state" / "health-last-alerted.json"
         if not notified.exists():
