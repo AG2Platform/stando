@@ -249,11 +249,12 @@ fi
 
 # 7. Discord bridge (optional — needs DISCORD_BOT_TOKEN)
 if [ -f "$HOME/.claude/channels/discord/.env" ] && grep -q "DISCORD_BOT_TOKEN=" "$HOME/.claude/channels/discord/.env" 2>/dev/null; then
-  if ! python3 -c "import discord" 2>/dev/null; then
+  PYTHON3_BIN="${PYTHON3_BIN:-$(command -v python3.11 2>/dev/null || command -v python3)}"
+  if ! "$PYTHON3_BIN" -c "import discord" 2>/dev/null; then
     echo "  ~ discord bridge (needs: pip3 install discord.py)"
   elif ! pgrep -f "discord-bridge" > /dev/null 2>&1; then
     echo "  Starting Discord bridge..."
-    python3 src/discord-bridge.py > "$LOGS_DIR/discord-bridge.log" 2>&1 &
+    "$PYTHON3_BIN" src/discord-bridge.py > "$LOGS_DIR/discord-bridge.log" 2>&1 &
     echo "  ✓ discord bridge"
   else
     echo "  ✓ discord bridge (already running)"

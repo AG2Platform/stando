@@ -733,7 +733,20 @@ def run_all_checks() -> list[dict]:
             pids = []
 
         if not pids:
-            checks.append({"name": name, "status": "warn", "detail": "configured but not running"})
+            # Detect placeholder/invalid token before giving a generic warning
+            token_detail = ""
+            if env_file.exists() and channel_name == "discord":
+                try:
+                    env_text = env_file.read_text()
+                    for line in env_text.splitlines():
+                        if line.startswith("DISCORD_BOT_TOKEN="):
+                            token = line.split("=", 1)[1].strip()
+                            if len(token) < 50:
+                                token_detail = f" (token looks like placeholder: {len(token)} chars)"
+                            break
+                except Exception:
+                    pass
+            checks.append({"name": name, "status": "warn", "detail": f"configured but not running{token_detail}"})
             continue
 
         # Check 1: Multiple processes (zombie/duplicate)
