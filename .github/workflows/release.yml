@@ -152,6 +152,7 @@ jobs:
         env:
           ENABLE_SPARKLE: "1"
           SPARKLE_FRAMEWORK: ${{ github.workspace }}/app/vendor/Sparkle.framework
+          ARCH: universal
         run: bash app/build-app.sh
 
       - name: Notarize Sutando.app
