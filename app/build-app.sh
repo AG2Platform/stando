@@ -16,6 +16,9 @@
 #   ENABLE_SPARKLE     "1" to compile against Sparkle (requires SPARKLE_FRAMEWORK
 #                      to point at a valid framework). Default off so the dev
 #                      build doesn't need the framework on disk.
+#   SUTANDO_LAUNCHER_ARCH
+#                      "universal" (default) builds arm64+x86_64. Set arm64
+#                      or x86_64 for a faster single-slice dev build.
 
 set -euo pipefail
 
@@ -24,6 +27,8 @@ OUT_DIR="${1:-$REPO/app/build}"
 APP="$OUT_DIR/Sutando.app"
 ENABLE_SPARKLE="${ENABLE_SPARKLE:-0}"
 SPARKLE_FRAMEWORK="${SPARKLE_FRAMEWORK:-$REPO/app/vendor/Sparkle.framework}"
+SUTANDO_LAUNCHER_ARCH="${SUTANDO_LAUNCHER_ARCH:-universal}"
+LAUNCHER_MACOS_TARGET="macos15.0"
 
 # Auto-pick the dev cert if SIGNING_IDENTITY is unset. Falls back to
 # ad-hoc ("-") when no cert exists. Rationale: ad-hoc signing yokes the
@@ -87,7 +92,7 @@ SWIFT_SOURCES=(
     "$REPO/src/Sutando/WebWindow.swift"
 )
 SWIFT_FRAMEWORKS=(-framework Cocoa -framework Carbon -framework ApplicationServices -framework AVFoundation -framework WebKit)
-SWIFT_FLAGS=(-O -o "$APP/Contents/MacOS/Sutando")
+SWIFT_FLAGS=(-O)
 
 # Optional Sparkle linking. When ENABLE_SPARKLE=1 the launcher links
 # against the framework and the Sparkle import inside SparkleUpdater.swift
@@ -104,7 +109,35 @@ if [ "$ENABLE_SPARKLE" = "1" ]; then
     SWIFT_FLAGS+=(-DENABLE_SPARKLE)
 fi
 
-swiftc "${SWIFT_FLAGS[@]}" "${SWIFT_SOURCES[@]}" "${SWIFT_FRAMEWORKS[@]}"
+LAUNCHER_TMP="$(mktemp -d)"
+trap 'rm -rf "$LAUNCHER_TMP"' EXIT
+
+compile_launcher_slice() {
+    local arch=$1
+    local output=$2
+    swiftc "${SWIFT_FLAGS[@]}" -target "$arch-apple-$LAUNCHER_MACOS_TARGET" \
+        -o "$output" "${SWIFT_SOURCES[@]}" "${SWIFT_FRAMEWORKS[@]}"
+}
+
+case "$SUTANDO_LAUNCHER_ARCH" in
+    universal)
+        echo "  Compiling arm64 launcher slice..."
+        compile_launcher_slice arm64 "$LAUNCHER_TMP/Sutando.arm64"
+        echo "  Compiling x86_64 launcher slice..."
+        compile_launcher_slice x86_64 "$LAUNCHER_TMP/Sutando.x86_64"
+        echo "  Creating universal launcher..."
+        lipo -create "$LAUNCHER_TMP/Sutando.arm64" "$LAUNCHER_TMP/Sutando.x86_64" \
+            -output "$APP/Contents/MacOS/Sutando"
+        ;;
+    arm64|x86_64)
+        echo "  Compiling $SUTANDO_LAUNCHER_ARCH launcher..."
+        compile_launcher_slice "$SUTANDO_LAUNCHER_ARCH" "$APP/Contents/MacOS/Sutando"
+        ;;
+    *)
+        echo "  ✗ unsupported SUTANDO_LAUNCHER_ARCH=$SUTANDO_LAUNCHER_ARCH (expected universal, arm64, or x86_64)"
+        exit 1
+        ;;
+esac
 
 # 2. Copy Info.plist + entitlements into the bundle
 echo "  Copying Info.plist..."

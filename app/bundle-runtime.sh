@@ -196,7 +196,8 @@ echo "    $TMUX_VERSION"
 # evermeet.cx ships static x86_64 binaries (no dylib deps) which run on
 # Apple Silicon under Rosetta. First invocation on an arm64-only Mac
 # triggers the system Rosetta install prompt. Native arm64 is a follow-up
-# (no clean single-source static build).
+# (no clean single-source static build). TODO: track the native-arm64 gap in
+# DISTRIBUTION.md before changing the packaged ffmpeg source.
 
 fetch_evermeet_zip() {
     # $1 = "ffmpeg" or "ffprobe"
