@@ -43,6 +43,7 @@ telegram-inbox/
 discord-inbox/
 archive/
 assets/
+!client/src/assets/
 stand-identity.json
 stand-avatar.png
 docs/youtube/
