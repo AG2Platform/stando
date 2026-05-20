@@ -236,9 +236,10 @@ echo ""
 if [ "${SKIP_TELEGRAM:-}" = "1" ]; then
   echo "  ~ telegram bridge (skipped via SKIP_TELEGRAM)"
 elif [ -f "$HOME/.claude/channels/telegram/.env" ] && grep -q "TELEGRAM_BOT_TOKEN=" "$HOME/.claude/channels/telegram/.env" 2>/dev/null; then
+  PYTHON3_BIN="${PYTHON3_BIN:-$(command -v python3.11 2>/dev/null || command -v python3)}"
   if ! pgrep -f "telegram-bridge" > /dev/null 2>&1; then
     echo "  Starting Telegram bridge..."
-    python3 src/telegram-bridge.py > "$LOGS_DIR/telegram-bridge.log" 2>&1 &
+    "$PYTHON3_BIN" src/telegram-bridge.py > "$LOGS_DIR/telegram-bridge.log" 2>&1 &
     echo "  ✓ telegram bridge"
   else
     echo "  ✓ telegram bridge (already running)"
