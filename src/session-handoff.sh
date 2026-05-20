@@ -44,7 +44,7 @@ TRANSCRIPT="$1"  # Passed by PreCompact hook as $TRANSCRIPT_PATH
 
   # Open PRs
   echo "## Open PRs"
-  gh pr list --repo sonichi/sutando --state open --limit 5 2>/dev/null || echo "(couldn't fetch)"
+  gh pr list --repo AG2Platform/stando --state open --limit 5 2>/dev/null || echo "(couldn't fetch)"
   echo ""
 
   # Pending questions — canonical home is private machine-<host>/ post-migration.
@@ -88,7 +88,7 @@ print(f'5h: {d[\"utilization_5h\"]:.0%} (resets in {m5}min at {r5.strftime(\"%I:
 
   # Stars
   echo "## Repo Stats"
-  gh api repos/sonichi/sutando --jq '.stargazers_count, .forks_count' 2>/dev/null | tr '\n' ' ' | awk '{print $1 " stars, " $2 " forks"}' || echo "(couldn't fetch)"
+  gh api repos/AG2Platform/stando --jq '.stargazers_count, .forks_count' 2>/dev/null | tr '\n' ' ' | awk '{print $1 " stars, " $2 " forks"}' || echo "(couldn't fetch)"
 
 } > "$STATE_FILE" 2>/dev/null
 

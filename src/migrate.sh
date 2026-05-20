@@ -179,7 +179,7 @@ cp -r "$BUNDLE_DIR"/* "$SAVED/" 2>/dev/null || true
 cp "$BUNDLE_DIR"/.env "$SAVED/" 2>/dev/null || true
 
 if [ ! -d "$REPO/.git" ]; then
-  git clone https://github.com/sonichi/sutando.git "$REPO"
+  git clone https://github.com/AG2Platform/stando.git "$REPO"
 fi
 cd "$REPO"
 # Re-source nvm in case shell lost it after cd

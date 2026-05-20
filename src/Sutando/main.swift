@@ -1115,7 +1115,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
            // No --author filter — community PRs (e.g. #594 Jason, #593 Vasiliy)
            // are also chip-worthy. Both bots commit as sonichi so this still
            // surfaces fleet PRs, plus catches external contributions for triage.
-           let prJSON = runShell(gh, ["pr", "list", "--repo", "sonichi/sutando", "--state", "open", "--limit", "5", "--json", "number,title"]),
+           let prJSON = runShell(gh, ["pr", "list", "--repo", "AG2Platform/stando", "--state", "open", "--limit", "5", "--json", "number,title"]),
            let prData = prJSON.data(using: .utf8),
            let prs = try? JSONSerialization.jsonObject(with: prData) as? [[String: Any]] {
             for pr in prs.prefix(3) {
