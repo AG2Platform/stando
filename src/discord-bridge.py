@@ -2640,7 +2640,7 @@ _recovered_replies = load_pending_replies_from_disk()
 async def poll_results():
     """Poll results/ for replies to send back to Discord."""
     global _recovered_replies
-    heartbeat_file = REPO / "state" / "discord-bridge.heartbeat"
+    heartbeat_file = state_path("state/discord-bridge.heartbeat")
     last_heartbeat = 0
     while True:
         # Heartbeat is gated on `client.is_ready()` (Discord gateway WS

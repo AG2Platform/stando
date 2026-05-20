@@ -85,11 +85,17 @@ def with_repo_override(payload):
         td = Path(td)
         write_status(td, payload)
         orig_repo = hc.REPO_DIR
+        orig_home = os.environ.get("SUTANDO_HOME")
         try:
             hc.REPO_DIR = td
+            os.environ["SUTANDO_HOME"] = str(td)
             return hc.check_core_proactive_loop(threshold_sec=600)
         finally:
             hc.REPO_DIR = orig_repo
+            if orig_home is None:
+                os.environ.pop("SUTANDO_HOME", None)
+            else:
+                os.environ["SUTANDO_HOME"] = orig_home
 
 
 def case_a_status_missing() -> list[str]:
@@ -106,11 +112,17 @@ def case_b_status_malformed() -> list[str]:
         td = Path(td)
         (td / "core-status.json").write_text("{ this is not json")
         orig = hc.REPO_DIR
+        orig_home = os.environ.get("SUTANDO_HOME")
         try:
             hc.REPO_DIR = td
+            os.environ["SUTANDO_HOME"] = str(td)
             r = hc.check_core_proactive_loop(threshold_sec=600)
         finally:
             hc.REPO_DIR = orig
+            if orig_home is None:
+                os.environ.pop("SUTANDO_HOME", None)
+            else:
+                os.environ["SUTANDO_HOME"] = orig_home
     if r["status"] != "ok":
         fails.append(f"b) malformed JSON should be ok (don't false-alarm), got {r['status']}")
     return fails
