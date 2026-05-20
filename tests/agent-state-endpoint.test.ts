@@ -2,8 +2,8 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { resolveWorkspace } from '../src/workspace_default.js';
 import { startWebServer } from '../src/web-server.js';
 
 // Integration test for PR #418 / #419 agent-state plumbing.
@@ -26,14 +26,14 @@ const PORT = 18081; // well above the 8080 dev server + 9900 voice-agent
 // writing an idle sentinel before the test + restoring the original bytes on
 // teardown. Without this, 2 tests fail whenever `npm test` coincides with a
 // /proactive-loop step-0 write (or any other running-state write).
-const CORE_STATUS_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'core-status.json');
+const CORE_STATUS_PATH = join(resolveWorkspace(), 'core-status.json');
 let savedCoreStatus: string | null = null;
 
 // voice-state.json is read by web-server's readVoiceState() as the authoritative
 // voiceConnected source (browser POST cache is the fallback). Tests in the
 // voice-state describe block below write/remove this file to exercise both
 // branches. Stash + restore any real prod value on setup/teardown.
-const VOICE_STATE_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'voice-state.json');
+const VOICE_STATE_PATH = join(resolveWorkspace(), 'voice-state.json');
 let savedVoiceState: string | null = null;
 
 let server: Server;

@@ -216,8 +216,7 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 	const VOICE_STATE_STALE_SECONDS = 120;
 	function readVoiceState(): boolean | null {
 		try {
-			const url = new URL('../voice-state.json', import.meta.url);
-			const raw = readFileSync(url, 'utf-8');
+			const raw = readFileSync(statePath('voice-state.json'), 'utf-8');
 			const s = JSON.parse(raw) as { connected?: boolean; ts?: number };
 			const nowSec = Date.now() / 1000;
 			if (typeof s.ts === 'number' && nowSec - s.ts > VOICE_STATE_STALE_SECONDS && s.connected) {

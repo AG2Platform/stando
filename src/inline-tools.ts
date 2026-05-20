@@ -675,7 +675,7 @@ export const showViewTool: ToolDefinition = {
 	execution: 'inline',
 	async execute(args) {
 		const { view } = args as { view: string };
-		const dcPath = join(process.cwd(), 'dynamic-content.json');
+		const dcPath = statePath('dynamic-content.json');
 		writeFileSync(dcPath, JSON.stringify({ type: 'view', view }));
 		// Auto-clear after 3 seconds so it doesn't persist
 		setTimeout(() => { try { unlinkSync(dcPath); } catch {} }, 3000);
