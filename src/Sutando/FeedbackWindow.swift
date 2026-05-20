@@ -19,19 +19,12 @@ private struct _FeedbackAuth: Decodable {
     let apiBase: String
 }
 
+// Workspace dir — `$SUTANDO_WORKSPACE`, default `~/.sutando/workspace/`.
 private func _sutandoHomeForFeedback() -> String {
-    if let home = ProcessInfo.processInfo.environment["SUTANDO_HOME"], !home.isEmpty {
-        return (home as NSString).expandingTildeInPath
+    if let ws = ProcessInfo.processInfo.environment["SUTANDO_WORKSPACE"], !ws.isEmpty {
+        return (ws as NSString).expandingTildeInPath
     }
-    let exe = URL(fileURLWithPath: ProcessInfo.processInfo.arguments[0]).resolvingSymlinksInPath()
-    var url = exe
-    for _ in 0..<8 {
-        url = url.deletingLastPathComponent()
-        if FileManager.default.fileExists(atPath: url.appendingPathComponent("CLAUDE.md").path) {
-            return url.path
-        }
-    }
-    return NSHomeDirectory() + "/Library/Application Support/Sutando"
+    return NSHomeDirectory() + "/.sutando/workspace"
 }
 
 private func _loadFeedbackAuth() -> _FeedbackAuth? {

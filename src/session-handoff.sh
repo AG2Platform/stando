@@ -49,7 +49,7 @@ TRANSCRIPT="$1"  # Passed by PreCompact hook as $TRANSCRIPT_PATH
 
   # Pending questions — canonical home is private machine-<host>/ post-migration.
   # Resolves via util_paths.personal_path() with cwd fallback.
-  PQ_PATH=$(SUTANDO_PRIVATE_DIR="${SUTANDO_PRIVATE_DIR:-}" python3 -c "
+  PQ_PATH=$(SUTANDO_MEMORY_DIR="${SUTANDO_MEMORY_DIR:-${SUTANDO_PRIVATE_DIR:-}}" python3 -c "
 import sys; sys.path.insert(0, '$DEV_REPO/src')
 from util_paths import personal_path
 from pathlib import Path

@@ -73,7 +73,7 @@ class LaunchAgentInstaller {
         let runtimeBinDir = runtimeBin.flatMap { dir in
             FileManager.default.fileExists(atPath: dir + "/node") ? dir : nil
         }
-        let home = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support/Sutando")
+        let home = (NSHomeDirectory() as NSString).appendingPathComponent(".sutando/workspace")
         return LaunchAgentPaths(repoDir: repoDir, sutandoHome: home, runtimeBinDir: runtimeBinDir)
     }
 
@@ -108,7 +108,7 @@ class LaunchAgentInstaller {
             "{{NODE_BIN_DIR}}": nodeBinDir,
             "{{PYTHON_BIN}}": pythonBin,
             "{{TMUX_BIN}}": tmuxBin,
-            "{{SUTANDO_HOME}}": p.sutandoHome,
+            "{{SUTANDO_WORKSPACE}}": p.sutandoHome,
             "{{LOG_DIR}}": logDir,
             // For PathState-gated KeepAlive (discord/telegram bridges
             // wait on ~/.claude/channels/<name>/.env before running).
@@ -134,11 +134,11 @@ class LaunchAgentInstaller {
     /// them by path on app launch and unloads on app quit.
     var runDir: String {
         let home: String
-        if let env = ProcessInfo.processInfo.environment["SUTANDO_HOME"], !env.isEmpty {
+        if let env = ProcessInfo.processInfo.environment["SUTANDO_WORKSPACE"], !env.isEmpty {
             home = (env as NSString).expandingTildeInPath
         } else {
             home = (NSHomeDirectory() as NSString)
-                .appendingPathComponent("Library/Application Support/Sutando")
+                .appendingPathComponent(".sutando/workspace")
         }
         return home + "/LaunchAgents"
     }
@@ -311,7 +311,7 @@ class LaunchAgentInstaller {
         let installScript = repoDir + "/skills/macos-use/scripts/install-mcp.sh"
         guard FileManager.default.fileExists(atPath: buildScript) else { return }
         let logDir = (NSHomeDirectory() as NSString)
-            .appendingPathComponent("Library/Application Support/Sutando/logs")
+            .appendingPathComponent(".sutando/workspace/logs")
         try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
         let logPath = logDir + "/macos-use-build.log"
         DispatchQueue.global(qos: .background).async {
@@ -358,7 +358,7 @@ class LaunchAgentInstaller {
         // urllib or self-install on demand.
         let packages = ["google-genai", "Pillow", "discord.py"]
         let logDir = (NSHomeDirectory() as NSString)
-            .appendingPathComponent("Library/Application Support/Sutando/logs")
+            .appendingPathComponent(".sutando/workspace/logs")
         try? FileManager.default.createDirectory(atPath: logDir, withIntermediateDirectories: true)
         let logPath = logDir + "/pip-skill-deps.log"
         DispatchQueue.global(qos: .background).async {

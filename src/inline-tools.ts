@@ -802,7 +802,7 @@ async function loadSkillManifestTools(): Promise<ToolDefinition[]> {
 	// cloud-installed update beats either (so an updated Station bundle
 	// takes effect on next voice-agent restart without manual cleanup).
 	const dirsToScan: string[] = [join(process.cwd(), 'skills')];
-	const privateRoot = process.env.SUTANDO_PRIVATE_DIR;
+	const privateRoot = process.env.SUTANDO_MEMORY_DIR ?? process.env.SUTANDO_PRIVATE_DIR;
 	if (privateRoot) {
 		const expanded = privateRoot.replace(/^~/, process.env.HOME || '');
 		dirsToScan.push(join(expanded, 'skills'));
@@ -870,7 +870,7 @@ const personalTools = await loadSkillManifestTools();
 // what each one does.
 function loadCoreDocumentedSkills(): { name: string; description: string }[] {
 	const dirsToScan: string[] = [join(process.cwd(), 'skills')];
-	const privateRoot = process.env.SUTANDO_PRIVATE_DIR;
+	const privateRoot = process.env.SUTANDO_MEMORY_DIR ?? process.env.SUTANDO_PRIVATE_DIR;
 	if (privateRoot) {
 		const expanded = privateRoot.replace(/^~/, process.env.HOME || '');
 		dirsToScan.push(join(expanded, 'skills'));

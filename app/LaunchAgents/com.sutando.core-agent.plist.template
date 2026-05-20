@@ -16,12 +16,12 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>{{SUTANDO_HOME}}</string>
+    <string>{{SUTANDO_WORKSPACE}}</string>
 
     <key>EnvironmentVariables</key>
     <dict>
-        <key>SUTANDO_HOME</key>
-        <string>{{SUTANDO_HOME}}</string>
+        <key>SUTANDO_WORKSPACE</key>
+        <string>{{SUTANDO_WORKSPACE}}</string>
         <key>ANTHROPIC_BASE_URL</key>
         <string>http://localhost:7846</string>
         <key>PATH</key>

@@ -622,7 +622,7 @@ const mainAgent: MainAgent = {
 			// debug — Apr 29 spent 30+ minutes diff'ing files because the load
 			// path was opaque.
 			try {
-				const privateRoot = process.env.SUTANDO_PRIVATE_DIR;
+				const privateRoot = process.env.SUTANDO_MEMORY_DIR ?? process.env.SUTANDO_PRIVATE_DIR;
 				if (privateRoot) {
 					const root = privateRoot.replace(/^~/, process.env.HOME || '');
 					const pointerPath = join(root, 'voice-contexts', 'active');

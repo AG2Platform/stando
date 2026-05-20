@@ -218,10 +218,10 @@ final class ScreenCaptureSupervisor {
         proc.arguments = [scriptPath]
         proc.currentDirectoryURL = URL(fileURLWithPath: (scriptPath as NSString).deletingLastPathComponent + "/..")
 
-        // Inherit a sensible PATH + carry SUTANDO_HOME so the script
-        // writes screenshots under the right state root.
+        // Inherit a sensible PATH + carry SUTANDO_WORKSPACE so the script
+        // writes screenshots under the right workspace root.
         var env = ProcessInfo.processInfo.environment
-        env["SUTANDO_HOME"] = sutandoHome
+        env["SUTANDO_WORKSPACE"] = sutandoHome
         env["PATH"] = "/usr/local/bin:/usr/bin:/bin:/usr/sbin"
         proc.environment = env
 
