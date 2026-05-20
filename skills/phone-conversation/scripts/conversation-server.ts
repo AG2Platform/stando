@@ -56,7 +56,7 @@ if (_sutandoHome) {
 	if (_existsSync(_homeEnv)) _dotenvConfig({ path: _homeEnv, override: true });
 }
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { mkdirSync, writeFileSync, appendFileSync, unlinkSync, existsSync, readFileSync, readdirSync, symlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, appendFileSync, unlinkSync, existsSync, readFileSync, readdirSync, symlinkSync, renameSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { hostname } from 'node:os';
 
@@ -146,8 +146,8 @@ if (!GEMINI_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHON
 	console.error('Error: GEMINI_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER required');
 	process.exit(1);
 }
-if (!NGROK_AUTHTOKEN) {
-	console.error('Error: NGROK_AUTHTOKEN required for auto-tunnel');
+if (!NGROK_AUTHTOKEN && !process.env.TWILIO_WEBHOOK_URL) {
+	console.error('Error: NGROK_AUTHTOKEN required (or set TWILIO_WEBHOOK_URL to skip auto-tunnel)');
 	process.exit(1);
 }
 
@@ -248,6 +248,9 @@ interface CallSession {
 	// Observability: per-call metrics (startTime already on CallSession from #209)
 	toolCalls: { name: string; durationMs: number; timestamp: string }[];
 	events: { event: string; timestamp: string }[];
+	// Silence padding: tracks last real audio from Twilio; interval sends silence when Twilio suppresses
+	lastAudioMs: number;
+	silencePadInterval: ReturnType<typeof setInterval> | null;
 }
 
 const activeCalls = new Map<string, CallSession>();
@@ -335,6 +338,13 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 			console.log(`${ts()} [Task] result for ${taskId} (${Date.now() - startTime}ms): ${result.slice(0, 200)}`);
 			callSession.events.push({ event: `task_result:${taskId}:${Date.now() - startTime}ms`, timestamp: new Date().toISOString() });
 			try { unlinkSync(resultPath); } catch {}
+			// Archive task file so watcher doesn't re-emit it on session restart
+			try {
+				const ym = new Date().toISOString().slice(0, 7);
+				const archiveDir = join(TASKS_DIR, 'archive', ym);
+				mkdirSync(archiveDir, { recursive: true });
+				if (existsSync(taskPath)) renameSync(taskPath, join(archiveDir, `${taskId}.txt`));
+			} catch {}
 			// Cache result so duplicate requests get instant replay
 			if (!callSession.taskResultCache) callSession.taskResultCache = new Map();
 			callSession.taskResultCache.set(taskDescription, result);
@@ -348,6 +358,13 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 			clearInterval(poll);
 			callSession.pendingTasks = Math.max(0, callSession.pendingTasks - 1);
 			console.log(`${ts()} [Task] timeout for ${taskId}`);
+			// Archive task file on timeout too
+			try {
+				const ym = new Date().toISOString().slice(0, 7);
+				const archiveDir = join(TASKS_DIR, 'archive', ym);
+				mkdirSync(archiveDir, { recursive: true });
+				if (existsSync(taskPath)) renameSync(taskPath, join(archiveDir, `${taskId}.txt`));
+			} catch {}
 			try {
 				(callSession.voiceSession as any).transport.sendContent([
 					{ role: 'user', text: `[Task "${taskDescription}" timed out — still being worked on. Let the caller know.]` },
@@ -669,6 +686,8 @@ async function createCallSession(params: {
 		resultQueue: [],
 		toolCalls: [],
 		events: [{ event: 'call_started', timestamp: new Date().toISOString() }],
+		lastAudioMs: Date.now(),
+		silencePadInterval: null,
 	};
 
 	// Start live transcript file
@@ -735,6 +754,10 @@ async function createCallSession(params: {
 				}
 			},
 			onError: (e) => console.error(`${ts()} [Error] ${e.component}: ${e.error.message} (${e.severity})`),
+			onInputTranscription: (e) => {
+				// Log user speech as detected by Gemini VAD — absent = Gemini not hearing caller
+				if (e?.text?.trim()) console.log(`${ts()} [VAD] caller speech: "${e.text.slice(0, 80)}"`);
+			},
 		},
 	});
 
@@ -826,10 +849,37 @@ async function createCallSession(params: {
 				}
 			}
 		}
+
+		// Re-arm Gemini's VAD for the next user turn.
+		// gemini-3.1-flash-live-preview sometimes doesn't restart speech detection
+		// after a natural turn completion (no user interruption). Sending activityStart
+		// explicitly signals "ready for user input" and re-arms the VAD cycle.
+		const transportSession = (callSession.voiceSession as any)?.transport?.session;
+		if (transportSession?.sendRealtimeInput) {
+			try {
+				transportSession.sendRealtimeInput({ activityStart: {} });
+			} catch {}
+		}
 	});
 
 	// Trigger client connected (so VoiceSession sends greeting and starts Gemini)
 	sessionAny.handleClientConnected();
+
+	// Silence padding: Twilio suppresses media events when caller is silent, causing sparse
+	// audio that Gemini's VAD can't detect speech in. Send a 20ms silence frame whenever
+	// no real audio arrived in the last 25ms to keep the audio stream continuous for Gemini.
+	const SILENCE_FRAME = Buffer.alloc(640, 0); // 160 mulaw samples → 640 bytes PCM16@16kHz
+	callSession.lastAudioMs = Date.now();
+	callSession.silencePadInterval = setInterval(() => {
+		if (!activeCalls.has(callSession.callSid) || callSession.hangingUp) {
+			clearInterval(callSession.silencePadInterval!);
+			callSession.silencePadInterval = null;
+			return;
+		}
+		if (Date.now() - callSession.lastAudioMs > 25) {
+			try { (callSession.voiceSession as any).handleAudioFromClient(SILENCE_FRAME); } catch {}
+		}
+	}, 20);
 	// Suppress greeting on reconnect — mute the first few seconds of audio after reconnect
 	let firstGreetingSent = false;
 	const origSendGreeting = sessionAny.sendGreeting?.bind(sessionAny);
@@ -898,6 +948,11 @@ function cleanupCall(callSid: string): void {
 	session.cleanupNarration?.();
 	try { unlinkSync('/tmp/sutando-playback-pause'); } catch {}
 	try { unlinkSync('/tmp/sutando-playback-path'); } catch {}
+
+	if (session.silencePadInterval) {
+		clearInterval(session.silencePadInterval);
+		session.silencePadInterval = null;
+	}
 
 	// Close VoiceSession
 	session.voiceSession.close('call_ended').catch(e =>
@@ -1161,7 +1216,10 @@ let ngrokProcess: ChildProcess | null = null;
 async function startNgrokCli(port: number): Promise<string> {
 	try { execSync('pkill -f "ngrok http"', { stdio: 'ignore' }); } catch {}
 	await new Promise(r => setTimeout(r, 500));
-	ngrokProcess = spawn('ngrok', ['http', String(port), '--log=stdout'], {
+	const ngrokArgs = ['http', String(port), '--log=stdout'];
+	const ngrokDomain = process.env.NGROK_DOMAIN?.replace(/^https?:\/\//, '');
+	if (ngrokDomain) ngrokArgs.push(`--domain=${ngrokDomain}`);
+	ngrokProcess = spawn('ngrok', ngrokArgs, {
 		stdio: ['ignore', 'pipe', 'pipe'],
 		env: { ...process.env, NGROK_AUTHTOKEN },
 	});
@@ -1631,14 +1689,16 @@ wss.on('connection', (ws: WebSocket) => {
 				case 'media': {
 					if (!callSession?.voiceSession) break;
 					mediaEventCount++;
-					if (mediaEventCount === 1 || mediaEventCount % 500 === 0) {
-						console.log(`${ts()} [WS] media events: ${mediaEventCount}`);
+					if (mediaEventCount <= 3 || mediaEventCount % 100 === 0) {
+						const state = (callSession.voiceSession as any).sessionManager?.state ?? 'unknown';
+						const active = (callSession.voiceSession as any).sessionManager?.isActive ?? false;
+						console.log(`${ts()} [WS] media events: ${mediaEventCount} (session=${state}, active=${active})`);
 					}
 
 					// mu-law 8kHz → PCM 16kHz → feed directly to VoiceSession (bypass internal WebSocket)
 					const audioData = Buffer.from(msg.media.payload, 'base64');
 					const pcm16k = mulawTopcm16k(audioData);
-
+					callSession.lastAudioMs = Date.now(); // silence padder checks this
 
 					try {
 						(callSession.voiceSession as any).handleAudioFromClient(pcm16k);
