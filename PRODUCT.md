@@ -348,7 +348,7 @@ account names, email addresses) from `SKILL.md` before upload.
 | 4.13 | Author balance card on dashboard + Settings (lifetime earned, payout stub) | both | pending (Slice 5) |
 | 4.14 | Migration 0019 + monthly_grants idempotency + monthly comp + free-$5 grant cron | agent-universe | pending (Slice 5) |
 | 4.15 | `/admin` overview — comp burn, TTFP, per-provider burn, author leaderboard | agent-universe | pending (Slice 5) |
-| 4.16 | Learned skills directory + opt-in toggle + one proactive-loop detection rule | sutando | pending (Slice 5) |
+| 4.16 | Learned skills directory + opt-in toggle + one proactive-loop detection rule | sutando | **done** — `detect-learned-skills.py` + SkillsViewController toggle (in `josh/settings-calude-parity`) |
 | 4.17 | Comp expiry T-7d Loops email + T+0 demotion + 30%-off-Pro CTA | both | pending (Slice 5) |
 
 **Mid-flight fixes that emerged during end-to-end validation:**
