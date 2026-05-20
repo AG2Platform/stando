@@ -10,7 +10,7 @@ import { sharedPersonalPath, statePath } from './util_paths.js';
 
 function defaultMemoryDir(): string {
     const repo = resolve(join(import.meta.dirname, '..'));
-    const slug = repo.replace(/\//g, '-');
+    const slug = repo.replace(/[^a-zA-Z0-9]/g, '-');
     return join(homedir(), '.claude', 'projects', slug, 'memory');
 }
 

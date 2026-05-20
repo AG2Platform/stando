@@ -33,7 +33,10 @@ from util_paths import shared_personal_path, state_path, state_dir  # noqa: E402
 def _default_memory_dir() -> str:
     """Auto-detect Claude Code memory dir from repo path."""
     repo = Path(__file__).parent.parent.resolve()
-    slug = str(repo).replace("/", "-")
+    # Claude Code slugifies paths by replacing ALL non-alphanumeric chars
+    # (spaces in "Application Support" included) with hyphens, not just "/".
+    import re
+    slug = re.sub(r"[^a-zA-Z0-9]", "-", str(repo))
     return str(Path.home() / ".claude" / "projects" / slug / "memory")
 
 MEMORY_DIR = Path(os.environ.get("SUTANDO_MEMORY_DIR", _default_memory_dir()))
