@@ -39,7 +39,7 @@ from pathlib import Path
 # (where src/ is a real dir under SUTANDO_HOME) ever did anything. Use the
 # shared state_dir() helper so we end up at $SUTANDO_HOME/{results,tasks}.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from util_paths import state_dir  # noqa: E402
+from state_paths import state_dir  # noqa: E402
 
 RESULTS = state_dir("results")
 TASKS = state_dir("tasks")

@@ -16,7 +16,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from util_paths import state_dir, state_path  # noqa: E402
+from state_paths import state_dir, state_path  # noqa: E402
 
 TASKS_DIR = state_dir("tasks")
 RESULTS_DIR = state_dir("results")

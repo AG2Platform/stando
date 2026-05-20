@@ -31,7 +31,7 @@ import { writeFileSync, readFileSync, statSync } from 'node:fs';
 import { extname, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTmuxStatus } from './tmux-status.js';
-import { statePath } from './util_paths.js';
+import { statePath } from './state-paths.js';
 
 // Dist directory for the React bundle (`client/`). Resolved once at module
 // load — web-server.ts lives in `src/`, so `../client/dist` lands at the

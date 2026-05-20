@@ -38,6 +38,8 @@ __all__ = [
 ]
 
 REPO_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from workspace_default import resolve_workspace  # noqa: E402
 _TIMEOUT_SECONDS = 5.0
 _app_version_cache: str | None = None
 
@@ -95,10 +97,7 @@ _KNOWN_ONBOARDING_STEPS = frozenset(
 
 
 def _state_root() -> Path:
-    home = os.environ.get("SUTANDO_HOME")
-    if home:
-        return Path(os.path.expanduser(home))
-    return REPO_DIR
+    return resolve_workspace(migrate=False)
 
 
 def _auth_file() -> Path:

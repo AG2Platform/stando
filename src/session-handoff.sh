@@ -5,7 +5,7 @@
 # Reads the transcript, extracts key signals, and writes to session-state.md.
 # The incoming session reads this in CLAUDE.md or as part of the proactive loop.
 
-REPO="${SUTANDO_HOME:-$HOME/Library/Application Support/Sutando}"
+REPO="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 # Dev clone root resolved from the script's own location so this
 # works for any contributor, not just the original author. Honor
 # $SUTANDO_DEV_REPO when set (e.g. running from a vendored copy

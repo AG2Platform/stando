@@ -14,18 +14,18 @@ cd "$REPO"
 # $SUTANDO_ROOT.
 export SUTANDO_ROOT="$REPO"
 
-# Per-machine runtime state. Falls back to REPO so dev installs keep working
-# without setting SUTANDO_HOME. The .app bundle sets it to
-# ~/Library/Application Support/Sutando.
-STATE_ROOT="${SUTANDO_HOME:-$REPO}"
+# Per-machine runtime state. Resolves $SUTANDO_WORKSPACE, defaulting to
+# ~/.sutando/workspace/ (the canonical workspace per docs/workspace-design.md).
+# The .app build may pin SUTANDO_WORKSPACE to another location if needed.
+STATE_ROOT="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
 LOGS_DIR="$STATE_ROOT/logs"
 mkdir -p "$LOGS_DIR"
 
-# Layered .env: load $SUTANDO_HOME/.env when set, so its values take
+# Layered .env: load $SUTANDO_WORKSPACE/.env when present, so its values take
 # precedence over the repo .env. Python services inherit these via the
 # child process environment; Node services additionally re-load via
 # src/load-env.ts at import time.
-if [ -n "${SUTANDO_HOME:-}" ] && [ -f "$STATE_ROOT/.env" ]; then
+if [ -f "$STATE_ROOT/.env" ]; then
   set -a
   # shellcheck disable=SC1090
   . "$STATE_ROOT/.env"

@@ -26,7 +26,8 @@ REPO_DIR = Path(__file__).parent.parent
 # Personal-asset path resolver — see src/util_paths.py. Used for /avatar
 # and /stand-identity endpoints so they prefer per-machine private dir.
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import personal_path, shared_personal_path, state_path  # noqa: E402
+from util_paths import personal_path, shared_personal_path  # noqa: E402
+from state_paths import state_path  # noqa: E402
 PORT = int(os.environ.get("DASHBOARD_PORT", "7844"))
 
 

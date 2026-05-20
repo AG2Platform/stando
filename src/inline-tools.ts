@@ -9,6 +9,7 @@ import { execSync, execFileSync } from 'node:child_process';
 import { writeFileSync, unlinkSync, readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { homedir } from 'node:os';
+import { resolveWorkspace } from './workspace_default.js';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 
@@ -661,7 +662,8 @@ return frontApp`;
 // Resolve at module-init: $SUTANDO_PRIVATE_DIR/notes (canonical) when set,
 // else cwd/notes (legacy fallback). Notes are SHARED across the fleet so
 // they live at the top-level private dir, not under machine-<host>/.
-import { sharedPersonalPath, stateDir, statePath } from './util_paths.js';
+import { sharedPersonalPath } from './util_paths.js';
+import { stateDir, statePath } from './state-paths.js';
 const NOTES_DIR = sharedPersonalPath('notes', process.cwd());
 
 export const showViewTool: ToolDefinition = {
@@ -788,9 +790,7 @@ function assertUniqueToolNames(tools: ToolDefinition[]): ToolDefinition[] {
 // `skills/superpower-station/tools.ts:skillsInstallDir()`). Voice-agent must
 // scan it so Phase 6 catalog items actually load on next restart.
 function cloudSkillsScanDir(): string {
-	const home = process.env.SUTANDO_HOME;
-	if (home) return join(home.replace(/^~/, homedir()), 'cloud-skills');
-	return join(homedir(), 'Library', 'Application Support', 'Sutando', 'cloud-skills');
+	return join(resolveWorkspace(), 'cloud-skills');
 }
 
 async function loadSkillManifestTools(): Promise<ToolDefinition[]> {

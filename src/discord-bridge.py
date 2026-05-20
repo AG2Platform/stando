@@ -20,7 +20,8 @@ import discord
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from util_paths import shared_personal_path, state_dir, state_path  # noqa: E402
+from util_paths import shared_personal_path  # noqa: E402
+from state_paths import state_dir, state_path  # noqa: E402
 from cloud_metrics import (  # noqa: E402
     record_event as _cloud_record_event,
     cap_status as _cloud_cap_status,

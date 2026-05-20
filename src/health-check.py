@@ -28,7 +28,8 @@ from typing import Optional
 
 REPO_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(Path(__file__).parent))
-from util_paths import shared_personal_path, state_path, state_dir  # noqa: E402
+from util_paths import shared_personal_path  # noqa: E402
+from state_paths import state_path, state_dir  # noqa: E402
 
 def _default_memory_dir() -> str:
     """Auto-detect Claude Code memory dir from repo path."""

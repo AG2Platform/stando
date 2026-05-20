@@ -38,7 +38,8 @@ import { buildSutandoSystemPrompt, buildVoiceAgentContext } from './voice-contex
 import { classifyTransportClose, type ClassifiedClose } from './voice-error-classifier.js';
 import { startWebServer } from './web-server.js';
 
-import { personalPath, sharedPersonalPath, statePath, statePathEnsured, stateDir } from './util_paths.js';
+import { personalPath, sharedPersonalPath } from './util_paths.js';
+import { statePath, statePathEnsured, stateDir } from './state-paths.js';
 import {
 	recordEvent as cloudRecordEvent,
 	recordOnboarding as cloudRecordOnboarding,

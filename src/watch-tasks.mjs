@@ -21,17 +21,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-// Resolution order matches watch-tasks-stream.mjs: explicit argv,
-// then $SUTANDO_HOME/tasks (canonical for the .app), then $PWD/tasks
-// (dev workflow), then script-relative fallback.
-const sutandoHome = process.env.SUTANDO_HOME;
-const tasksDir = process.argv[2]
-    || (sutandoHome ? path.join(sutandoHome, 'tasks') : null)
-    || path.join(process.cwd(), 'tasks');
+// Resolution order matches watch-tasks-stream.mjs: explicit argv, then
+// $SUTANDO_WORKSPACE/tasks (default ~/.sutando/workspace/tasks). Inlined
+// because this .mjs runs under plain node and can't import the TS module.
+const workspace = process.env.SUTANDO_WORKSPACE
+    ? process.env.SUTANDO_WORKSPACE.replace(/^~/, process.env.HOME || '')
+    : path.join(process.env.HOME || '', '.sutando', 'workspace');
+const tasksDir = process.argv[2] || path.join(workspace, 'tasks');
 fs.mkdirSync(tasksDir, { recursive: true });
-// `results/calls/` is also a SUTANDO_HOME concern, not a script-relative one.
-const resultsRoot = sutandoHome || process.cwd();
-fs.mkdirSync(path.join(resultsRoot, 'results', 'calls'), { recursive: true });
+fs.mkdirSync(path.join(workspace, 'results', 'calls'), { recursive: true });
 
 function existingTxt() {
     try {
