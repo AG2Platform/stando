@@ -263,6 +263,48 @@ def load_allowed():
         return set()
 
 
+def _resolve_proactive_owner_id(env_override: str | None, access_data: dict) -> str | None:
+    """Resolve the recipient for a proactive owner-notification.
+
+    Priority order:
+      1. ``$SUTANDO_DM_OWNER_ID`` env override (`env_override`, falsy if unset).
+      2. ``tierMap[uid] == "owner"`` — the unique tier-tagged owner from
+         ``access.json``. Wins over `tofuOwner` because tier tags are an
+         explicit admin signal, while `tofuOwner` is a first-install
+         default that the admin may not have refreshed when they later
+         allowlisted additional users.
+      3. ``tofuOwner`` field — recorded by :func:`tofu_onboard` on first
+         install. Telegram-specific (no parallel field in Discord's
+         ``access.json``). Only honored if `tofuOwner` is still present
+         in ``allowFrom`` — admins who explicitly removed it have
+         signaled they no longer want it treated as the owner.
+      4. First entry in ``allowFrom`` IN LIST ORDER. The list-order
+         convention is meaningful: admins put the human owner first.
+
+    Returns ``None`` when ``allowFrom`` is empty (no eligible recipient).
+
+    Pure function — no I/O — so it's unit-testable in isolation. Callers
+    are responsible for reading ``ACCESS_FILE`` and ``os.environ`` and
+    handing the values in.
+    """
+    if env_override:
+        return env_override
+    allow_list = access_data.get("allowFrom") or []
+    if not allow_list:
+        return None
+    tier_map = access_data.get("tierMap") or {}
+    tier_owner = next(
+        (uid for uid in allow_list if tier_map.get(uid) == "owner"),
+        None,
+    )
+    if tier_owner is not None:
+        return tier_owner
+    tofu_owner = access_data.get("tofuOwner")
+    if tofu_owner is not None and tofu_owner in allow_list:
+        return tofu_owner
+    return allow_list[0]
+
+
 def tofu_onboard(sender_id, username):
     """First-time auto-onboard: write access.json with this sender as owner.
 
@@ -567,14 +609,30 @@ def main():
                         if not text:
                             f.unlink(missing_ok=True)
                             continue
-                        owner_ids = load_allowed()
-                        if owner_ids:
-                            owner_id = next(iter(owner_ids))
-                            try:
-                                send_reply(int(owner_id), text)
-                                print(f"  [proactive] sent to {owner_id}: {text[:80]}")
-                            except Exception as e:
-                                print(f"  [proactive] failed: {e}")
+                        # Pre-fix used `next(iter(load_allowed()))`,
+                        # which iterates a `set` — hash-slot order, not
+                        # list order. With multiple users in allowFrom
+                        # (e.g. admin adds a second sender via
+                        # `/telegram:access allow`), proactive
+                        # owner-notifications could route to the wrong
+                        # user. Mirrors the discord-bridge fix shipped
+                        # in PR #846; full priority chain documented on
+                        # _resolve_proactive_owner_id.
+                        env_override = os.environ.get("SUTANDO_DM_OWNER_ID", "").strip()
+                        try:
+                            access_data = json.loads(ACCESS_FILE.read_text())
+                        except Exception:
+                            access_data = {}
+                        owner_id = _resolve_proactive_owner_id(env_override, access_data)
+                        if owner_id is None:
+                            print(f"  [proactive] no owner in allowFrom, skipping {f.name}")
+                            f.unlink(missing_ok=True)
+                            continue
+                        try:
+                            send_reply(int(owner_id), text)
+                            print(f"  [proactive] sent to {owner_id}: {text[:80]}")
+                        except Exception as e:
+                            print(f"  [proactive] failed: {e}")
                         f.unlink(missing_ok=True)
         except Exception as e:
             print(f"  [proactive] poll error: {e}")
