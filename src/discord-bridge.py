@@ -2900,12 +2900,22 @@ async def poll_results():
                     # First chunk uses message_reference (if set); subsequent chunks
                     # are fresh — Discord allows only one reply-anchor per message,
                     # and split-chunk continuation isn't itself a reply.
+                    # `_chunk_for_discord` is a generator. Counting chunks via
+                    # `len(list(_chunk_for_discord(clean_text)))` walks the
+                    # text twice on every send — once here to send, once again
+                    # solely to count for the outbound metric. Track the count
+                    # in the existing send loop instead. (Calling `len()` on
+                    # the bare generator would raise TypeError, surfacing as
+                    # a misleading "Reply failed: object of type 'generator'
+                    # has no len()" log line on every successful reply.)
+                    reply_chunks = 0
                     if clean_text:
                         first = True
                         for chunk in _chunk_for_discord(clean_text):
                             ref = discord.MessageReference(message_id=reply_to_id, channel_id=channel.id, fail_if_not_exists=False) if (first and reply_to_id) else None
                             await channel.send(chunk, reference=ref)
                             first = False
+                            reply_chunks += 1
 
                     # Send files (allowlist-gated; see _is_path_sendable)
                     for fpath in files:
@@ -2925,7 +2935,7 @@ async def poll_results():
                         metadata={
                             "channel_id": str(channel.id),
                             "task_id": task_id,
-                            "reply_chunks": len(list(_chunk_for_discord(clean_text))) if clean_text else 0,
+                            "reply_chunks": reply_chunks,
                             "file_count": len(files),
                         },
                     )
