@@ -159,7 +159,35 @@ SEND_ALLOWED_PREFIXES = (
 )
 
 
-_FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*([^\s`~][^`~]*)?\s*$")
+# Discord message chunker — moved to `discord_chunker` module so the
+# previously-duplicated copy in `dm-result.py` can also import it.
+# The two copies had already drifted on the long-line hard-split branch
+# (dm-result.py's was more conservative); see discord_chunker.py
+# docstring for the history. Importing `_chunk_for_discord` keeps every
+# in-file call site working without further changes.
+from discord_chunker import _chunk_for_discord  # noqa: E402
+
+# File-marker regex — shared between this bridge's three send paths
+# (poll_results, poll_proactive, poll_dm_fallback) for `[file:|send:|
+# attach:]` markers. Mirrors `src/dm-result.py`'s `_FILE_MARKER_RE`;
+# kept inline here (rather than further extraction) because the
+# discord-bridge consumes the regex object directly in 3 sites and
+# the extra import would cost more than it saves.
+_FILE_MARKER_RE = re.compile(r'\[(?:file|send|attach):\s*((?:/|~/)[^\]:]+)\]')
+
+
+def _split_file_markers(text: str) -> tuple[str, list[str]]:
+    """Split a result body into ``(clean_text, files)``.
+
+    ``files`` is the list of paths extracted from
+    ``[file:|send:|attach:]`` markers (textual order). ``clean_text``
+    is the original text with every marker removed and surrounding
+    whitespace stripped.
+    """
+    files = _FILE_MARKER_RE.findall(text)
+    clean_text = _FILE_MARKER_RE.sub('', text).strip()
+    return clean_text, files
+
 
 # Discord-state references in task bodies that codex sandbox cannot resolve.
 # When a team/other-tier task asks the agent to look at a specific channel
@@ -193,158 +221,14 @@ def _extract_user_id_mentions(mention_strs):
     return out
 
 
-def _is_fence_open_line(line: str):
-    """Return the fence opener string if `line` is a real Markdown block-fence line.
-
-    A fence line is one whose stripped content is just a backtick/tilde run of >=3
-    optionally followed by a language/info string. Lines like `print("```")`,
-    shell heredocs, or `use ```js inline` do NOT match — they have non-fence
-    content before the fence chars on the same line.
-
-    Returns the full fence opener (e.g. "```python", "~~~", "````markdown")
-    so the chunker can reopen the SAME opener after a chunk boundary, preserving
-    the language tag and the fence-token kind/length.
-
-    Returns None if the line is not a fence line.
-    """
-    m = _FENCE_LINE.match(line)
-    if not m:
-        return None
-    return line.strip()
-
-
-def _chunk_for_discord(text: str, max_len: int = 1900):
-    """Yield Discord-safe chunks <= max_len chars, preserving Markdown code fences.
-
-    The naive `range(0, len, max_len)` chunker breaks code blocks: if a fence
-    opens before the chunk boundary and closes after, the first chunk renders as
-    a half-open code block on Discord and the second chunk leaks the literal
-    trailing backticks as plain text.
-
-    This chunker walks line-by-line, tracks fence state (the exact opener string
-    when inside a fence; None when outside). When a new line would push the
-    buffer past max_len, it closes the current fence (if open) with a matching
-    closer, yields the buffer, and reopens the SAME opener in the next chunk —
-    preserving language tags and fence-token length.
-
-    Fence detection only matches real block-fence lines (regex-anchored). Inline
-    backticks in code or prose (`print("```")`, `use ```js`) do NOT toggle state.
-
-    Single-line content longer than max_len is hard-split mid-line; fence state
-    is preserved across the split.
-    """
-    if not text:
-        return
-    fence_opener = None  # full opener string when inside a fence; None when outside
-    buf = []
-    buf_len = 0
-
-    def fence_closer(opener):
-        # Match the fence-token kind (` or ~) and use 3 of them. Discord's
-        # parser closes on >=3 matching chars, so a 3-char closer suffices
-        # even if opener was 4+ chars (the literal opener length doesn't have
-        # to match for closure, only the char kind).
-        return opener[0] * 3 if opener else "```"
-
-    def flush():
-        nonlocal buf, buf_len
-        if not buf:
-            return None
-        chunk = "\n".join(buf)
-        # If we're mid-fence at chunk boundary, close it so Discord renders cleanly
-        if fence_opener:
-            chunk = chunk + "\n" + fence_closer(fence_opener)
-        buf = []
-        buf_len = 0
-        return chunk
-
-    for line in text.split("\n"):
-        # Real fence-line detection (only at start of stripped line, not anywhere)
-        opener_on_line = _is_fence_open_line(line)
-        # If we're outside a fence and this line is a fence-open, treat as opening.
-        # If we're inside a fence and this line matches the fence-token kind,
-        # treat as closing (we don't require exact length match for close).
-
-        line_overhead = len(line) + 1  # +1 for newline
-        # Reserve space for closing fence if we'd cut mid-fence
-        reserve = (len(fence_closer(fence_opener)) + 1) if fence_opener else 0
-
-        if buf_len + line_overhead + reserve > max_len and buf:
-            chunk = flush()
-            if chunk is not None:
-                yield chunk
-            # Reopen fence in next chunk if we were inside one
-            if fence_opener:
-                buf.append(fence_opener)
-                buf_len = len(fence_opener) + 1
-
-        # Single line longer than max_len → hard-split
-        if line_overhead + reserve > max_len:
-            remaining = line
-            while len(remaining) + reserve > max_len:
-                take = max_len - reserve - buf_len - 1
-                if take <= 0:
-                    chunk = flush()
-                    if chunk is not None:
-                        yield chunk
-                    if fence_opener:
-                        buf.append(fence_opener)
-                        buf_len = len(fence_opener) + 1
-                    take = max_len - reserve - buf_len - 1
-                buf.append(remaining[:take])
-                buf_len += take + 1
-                remaining = remaining[take:]
-                chunk = flush()
-                if chunk is not None:
-                    yield chunk
-                if fence_opener:
-                    buf.append(fence_opener)
-                    buf_len = len(fence_opener) + 1
-            buf.append(remaining)
-            buf_len += len(remaining) + 1
-        else:
-            buf.append(line)
-            buf_len += line_overhead
-
-        # Update fence state AFTER placing the line (the line itself is intact)
-        if opener_on_line is not None:
-            if fence_opener is None:
-                fence_opener = opener_on_line
-            else:
-                # Fence-line at this position closes the active fence
-                # (Discord/CommonMark allows any close-fence of the same kind to close)
-                fence_opener = None
-
-    chunk = flush()
-    if chunk is not None:
-        yield chunk
-
-
-# Marker regex for inline file references in result bodies. The pattern
-# requires absolute paths (`/...` or `~/...`) — PR #496 tightened this from
-# the earlier relative-path-allowing form because relative paths resolved
-# against the bridge's CWD, which differed between launchd-managed and
-# bare-shell runs. Three call sites in this module (poll_results,
-# poll_proactive, poll_dm_fallback) previously re-defined this regex
-# inline; consolidated here so a future hardening only needs one edit.
-_FILE_MARKER_RE = re.compile(r'\[(?:file|send|attach):\s*((?:/|~/)[^\]:]+)\]')
-
-
-def _split_file_markers(text: str) -> tuple[str, list[str]]:
-    """Split a result body into ``(clean_text, files)``.
-
-    ``files`` is the list of paths extracted from ``[file:|send:|attach:]``
-    markers (in textual order). ``clean_text`` is the original text with
-    every marker removed and surrounding whitespace stripped.
-
-    Pure function — single source of truth for the marker pattern across
-    every send path in this bridge.
-    """
-    files = _FILE_MARKER_RE.findall(text)
-    clean_text = _FILE_MARKER_RE.sub('', text).strip()
-    return clean_text, files
-
-
+# Discord message chunker — sourced from `src/discord_chunker.py` so
+# this file and `dm-result.py` share a single canonical copy. The
+# two in-file copies had already drifted on the long-line hard-
+# split branch; this file's variant was less conservative. See
+# `discord_chunker.py` docstring for the history.
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from discord_chunker import _chunk_for_discord  # noqa: E402
 def _is_path_sendable(fpath: str) -> bool:
     """True iff `fpath` is a real file AND resolves under an allowed root.
 

@@ -1,59 +1,31 @@
 #!/usr/bin/env python3
-"""Unit tests for _chunk_for_discord — covers MacBook PR #563 review findings.
+"""Unit tests for `_chunk_for_discord` — covers MacBook PR #563 review findings.
 
-Both src/discord-bridge.py and src/dm-result.py carry copies of the chunker;
-test both. Loads via importlib because filenames contain hyphens.
+Pre-extraction this file loaded `src/discord-bridge.py` AND `src/dm-result.py`
+via importlib and ran the same 7 cases against EACH copy of the chunker,
+specifically because both files carried a copy and the test was the only
+thing keeping them honest (they had nonetheless already drifted on the
+long-line hard-split branch — see `src/discord_chunker.py` docstring).
+
+Post-extraction the chunker lives in `src/discord_chunker.py` and both
+bridge / dm-result import from it. The test loads it once.
 """
 
 import importlib.util
-import os
 import sys
-import types
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "src"))
 
-# discord-bridge.py module-load has two side effects that fail in clean CI:
-#   1. `import discord` + `discord.Intents.default()` + `discord.Client(...)`
-#      — discord.py isn't installed on Ubuntu CI runners.
-#   2. Reads DISCORD_BOT_TOKEN from ~/.claude/channels/discord/.env and
-#      `exit(1)` if missing — that path doesn't exist in CI.
-#
-# Bypass both so the test can reach `_chunk_for_discord` (pure string ops,
-# no discord runtime dependency). Locally with the real discord installed
-# and a real token, both bypasses no-op.
-try:
-    import discord  # noqa: F401
-except ImportError:
-    stub = types.ModuleType("discord")
-    stub.Intents = type("Intents", (), {"default": staticmethod(lambda: type("I", (), {"message_content": False})())})
-    stub.Client = type("Client", (), {"__init__": lambda self, **kw: None, "event": staticmethod(lambda fn: fn)})
-    stub.File = type("File", (), {})
-    stub.Message = type("Message", (), {})
-    sys.modules["discord"] = stub
-
-# discord-bridge.py reads DISCORD_BOT_TOKEN from a file path, not os.environ.
-# Materialize a fake .env at the expected path if absent (CI runners don't
-# have it; locally it already exists, setdefault-style logic preserves the
-# real one).
-_channels_env = Path.home() / ".claude" / "channels" / "discord" / ".env"
-if not _channels_env.exists():
-    _channels_env.parent.mkdir(parents=True, exist_ok=True)
-    _channels_env.write_text("DISCORD_BOT_TOKEN=test-token-not-real\n")
+# Plain import — `discord_chunker.py` has no underscore-in-filename
+# obstacle and no module-load side effects (no discord runtime, no token
+# file read). The previous importlib + stub-discord + materialize-.env
+# bootstrap from this file is no longer needed.
+import discord_chunker  # noqa: E402
 
 
-def _load(name: str, path: Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
-
-
-bridge = _load("dbridge", REPO / "src" / "discord-bridge.py")
-dm = _load("dm_result", REPO / "src" / "dm-result.py")
-
-
-def _run_against(mod, label):
+def _run_cases(mod, label):
     # Test 1: empty/short
     assert list(mod._chunk_for_discord("")) == []
     assert list(mod._chunk_for_discord("hi")) == ["hi"]
@@ -68,16 +40,13 @@ def _run_against(mod, label):
     src = "intro\n```python\n" + ("x = 1\n" * 400) + "```\nouter"
     chunks = list(mod._chunk_for_discord(src, max_len=300))
     assert len(chunks) >= 3, f"{label}: expected multi-chunk, got {len(chunks)}"
-    # All but last must end with ``` (closer)
     for i, c in enumerate(chunks[:-1]):
         assert c.endswith("```"), f"{label}: chunk {i} missing closer: {c[-30:]!r}"
-    # Inner chunks must reopen with the SAME opener (preserves "python" tag)
     assert "```python" in chunks[1], f"{label}: language tag dropped"
 
     # Test 4: print("```") inside fenced block must NOT close the fence early
     src = '```python\nprint("```")\nx = 1\nmore = 2\n```'
     chunks = list(mod._chunk_for_discord(src))
-    # Single chunk — but more important: fence is balanced (one opener, one closer)
     full = "\n".join(chunks)
     fence_lines = [
         ln for ln in full.split("\n") if mod._is_fence_open_line(ln) is not None
@@ -90,7 +59,6 @@ def _run_against(mod, label):
     # Test 5: nested 4-tick outer fence preserved (Markdown allows ```` to wrap ```)
     src = "````markdown\n```python\ninner\n```\nstill outer\n````"
     chunks = list(mod._chunk_for_discord(src))
-    # Outer ```` opener present in first chunk
     assert "````markdown" in chunks[0], f"{label}: outer 4-tick opener lost"
 
     # Test 6: regex correctness for _is_fence_open_line
@@ -101,29 +69,42 @@ def _run_against(mod, label):
         ("```py extra", "```py extra"),
         ("~~~js", "~~~js"),
         ('print("```")', None),
-        ("    print('```')", None),  # 4-space indent makes it not a fence
+        ("    print('```')", None),
         ("foo ```inline``` bar", None),
-        ("``", None),  # only 2 backticks
+        ("``", None),
     ]
     for inp, exp in cases:
         got = mod._is_fence_open_line(inp)
         assert got == exp, f"{label}: {inp!r} -> got {got!r}, expected {exp!r}"
 
-    # Test 7: tilde fence closes with tildes (not backticks) — token-kind preservation
+    # Test 7: tilde fence closes with tildes — token-kind preservation
     src = "~~~python\n" + ("x = 1\n" * 400) + "~~~"
     chunks = list(mod._chunk_for_discord(src, max_len=300))
     assert len(chunks) >= 2
-    # First chunk closes with ~~~ (matching opener kind), not ```
     assert chunks[0].rstrip().endswith("~~~"), (
         f"{label}: tilde fence closed with wrong token: {chunks[0][-30:]!r}"
     )
 
-    print(f"[{label}] all 7 cases OK")
+    # Test 8 (NEW): the long-line hard-split branch with non-empty buf.
+    # Pre-extraction, discord-bridge.py and dm-result.py disagreed on the
+    # while-loop condition for this branch. With both call sites now
+    # importing from the single canonical chunker, behavior is unified.
+    # Construct an input that forces the long-line branch: short line +
+    # long-line that's just under max_len, then exercise repeatedly.
+    # The bug shape we're guarding against: a chunk exceeding max_len
+    # because of mis-accounting `buf_len` in the while condition.
+    src = "short line\n" + "x" * 250 + "\n" + "y" * 250 + "\n" + "z" * 250
+    chunks = list(mod._chunk_for_discord(src, max_len=100))
+    assert all(len(c) <= 100 for c in chunks), (
+        f"{label}: hard-split chunk exceeded max_len — "
+        f"sizes: {[len(c) for c in chunks]}"
+    )
+
+    print(f"[{label}] all 8 cases OK")
 
 
 def main():
-    _run_against(bridge, "discord-bridge.py")
-    _run_against(dm, "dm-result.py")
+    _run_cases(discord_chunker, "discord_chunker")
     print("All chunker tests passed.")
 
 
