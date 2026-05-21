@@ -37,6 +37,17 @@ Before creating a PR, check `gh pr list --state open` for an existing PR on the 
 
 Never commit directly to main. Always work on a feature branch.
 
+### Tests are part of the PR
+
+Default behavior on every code-changing PR: include at least one test that would have caught the bug (for fixes), pinned the new contract (for features), or guarded the refactor's invariant (for refactors). If you didn't add a test, the PR description should say why — "tested manually in production for X hours" / "behavior is observational only" / "covered by `tests/foo.test.py:N`" — not silently omit.
+
+What "a test" looks like here:
+- Drop a file in `tests/` named `<topic>.test.py` (Python) or `<topic>.test.ts` (TypeScript). `npm test` picks both up automatically — see the `test` and `test:py` scripts in `package.json`.
+- For hyphenated module names, follow the `tests/discord-chunker.test.py` pattern: `importlib.util` to load the module, stub `discord` / materialize a placeholder `.env` / point `SUTANDO_WORKSPACE` at a tempdir so the module loads in clean CI without touching user state.
+- Tests should pin invariants the next refactor could break — not restate what `assert x == x` already says. A useful rule of thumb: aim for at least one real bug found per ~100 cases. If you're writing many tests that wouldn't catch any realistic regression, write fewer; if you're shipping zero tests because "the change is obvious," you've probably under-tested.
+
+When you find a bug while writing a test, fix it in the same PR — the test and the fix belong together so reviewers can verify the test would have caught it.
+
 ## Personal overrides
 
 If `PERSONAL_CLAUDE.md` exists in the workspace root, read and follow it. It contains user-specific rules, preferences, and configuration that override or extend these shared instructions.
