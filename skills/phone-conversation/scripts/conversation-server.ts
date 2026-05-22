@@ -78,6 +78,7 @@ import { VoiceSession, type ToolDefinition, type MainAgent } from 'bodhi-realtim
 import { WebSocketServer, WebSocket } from 'ws';
 import { recordSession, recordConversation } from '../../../src/conversation-store.js';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { createOpenAI } from '@ai-sdk/openai';
 import { z } from 'zod';
 import { inlineTools, anyCallerTools, ownerOnlyTools, configurableTools } from '../../../src/inline-tools.js';
 import {
@@ -107,6 +108,18 @@ const OWNER_NUMBER = process.env.OWNER_NUMBER ?? '';
 // Model configuration — override via .env
 const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
 const VOICE_NATIVE_AUDIO_MODEL = process.env.VOICE_NATIVE_AUDIO_MODEL || 'gemini-3.1-flash-live-preview';
+
+// SUBAGENT_PROVIDER picks the LLM used for subagent text generation (Vercel
+// AI SDK calls fired from voice tool execution). Default 'openai' as of the
+// May 2026 migration. Independent from the realtime voice transport — the
+// phone call still uses Gemini Live unless that's switched separately.
+const SUBAGENT_PROVIDER = (process.env.SUBAGENT_PROVIDER || 'openai').toLowerCase() as 'gemini' | 'openai';
+if (SUBAGENT_PROVIDER !== 'gemini' && SUBAGENT_PROVIDER !== 'openai') {
+	console.error(`Error: SUBAGENT_PROVIDER must be 'gemini' or 'openai' (got "${SUBAGENT_PROVIDER}")`);
+	process.exit(1);
+}
+const SUBAGENT_OPENAI_MODEL = process.env.SUBAGENT_OPENAI_MODEL || 'gpt-4.1-mini';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? '';
 
 /** Normalize phone number to digits only for comparison (strips +, -, spaces, parens) */
 function normalizePhone(num: string): string {
@@ -148,6 +161,11 @@ if (!GEMINI_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHON
 	console.error('Error: GEMINI_API_KEY, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER required');
 	process.exit(1);
 }
+if (SUBAGENT_PROVIDER === 'openai' && !OPENAI_API_KEY) {
+	console.error('Error: OPENAI_API_KEY is required when SUBAGENT_PROVIDER=openai (default).');
+	console.error('Set OPENAI_API_KEY in .env or set SUBAGENT_PROVIDER=gemini to keep the previous behavior.');
+	process.exit(1);
+}
 if (!NGROK_AUTHTOKEN) {
 	console.error('Error: NGROK_AUTHTOKEN required for auto-tunnel');
 	process.exit(1);
@@ -160,6 +178,13 @@ mkdirSync(TASKS_DIR, { recursive: true });
 const ts = () => new Date().toISOString().slice(11, 23);
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
+const openai = SUBAGENT_PROVIDER === 'openai'
+	? createOpenAI({ apiKey: OPENAI_API_KEY })
+	: null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const subagentModel: any = SUBAGENT_PROVIDER === 'openai'
+	? openai!(SUBAGENT_OPENAI_MODEL)
+	: google(VOICE_MODEL);
 
 // --- Audio conversion (inbound + outbound audio chains) ---
 // These functions convert between Twilio's mu-law 8kHz format and the PCM formats
@@ -695,7 +720,7 @@ async function createCallSession(params: {
 		initialAgent: 'phone',
 		port: bodhiPort,
 		host: '127.0.0.1',
-		model: google(VOICE_MODEL),
+		model: subagentModel,
 		geminiModel: VOICE_NATIVE_AUDIO_MODEL,
 		googleSearch: true,
 		speechConfig: { voiceName: 'Aoede' },

@@ -9,7 +9,7 @@ Reads:
 Produces:
   - {workdir}/frames/                     (PIL-rendered frames)
   - {workdir}/clips/                      (per-frame mp4s with Ken-Burns motion)
-  - {workdir}/narration.mp3               (TTS, gemini default → openai fallback)
+  - {workdir}/narration.mp3               (TTS, openai default → gemini fallback)
   - {workdir}/video.mp4                   (h264 + aac, 1280×720)
 
 Visual rules per SKILL.md:
@@ -428,31 +428,32 @@ def render_slate_frame(series_title: str, episode: str, date: str, out_path: Pat
     base.save(out_path, "PNG")
 
 
-def synthesize_tts(text: str, out_path: Path, provider: str = "GEMINI",
+def synthesize_tts(text: str, out_path: Path, provider: str = "OPENAI",
                     gemini_voice: str = "Aoede", openai_voice: str = "sage"):
-    """Render full narration to mp3. gemini-tts (free) → openai-tts fallback.
+    """Render full narration to mp3. openai-tts (default as of May 2026
+    migration) → gemini-tts fallback.
 
     Voice options:
-      gemini_voice: Aoede (alto/neutral, default), Charon (baritone news-anchor —
-        Susan/Lucy 2026-05-10 finding: matches Mini Wire's news-explainer shape
-        better than Aoede), Kore (mid expressive), Puck (high conversational)
       openai_voice: sage (default), nova, alloy, etc.
+      gemini_voice: Aoede (alto/neutral, default), Charon (baritone news-anchor),
+        Kore (mid expressive), Puck (high conversational). Used when provider=GEMINI
+        or as the fallback when OpenAI synthesis fails.
     """
     repo_root = Path(__file__).resolve().parents[3]
-    if provider == "GEMINI":
-        gemini_script = repo_root / "skills" / "gemini-tts" / "scripts" / "synthesize.sh"
-        if gemini_script.exists():
+    if provider == "OPENAI":
+        openai_script = repo_root / "skills" / "openai-tts" / "scripts" / "synthesize.sh"
+        if openai_script.exists():
             try:
-                subprocess.run(["bash", str(gemini_script), "--voice", gemini_voice,
+                subprocess.run(["bash", str(openai_script), "--voice", openai_voice,
                                  "--out", str(out_path), "--", text], check=True)
-                return f"GEMINI:{gemini_voice}"
+                return f"OPENAI:{openai_voice}"
             except subprocess.CalledProcessError as e:
-                print(f"  [render] gemini-tts failed (exit {e.returncode}); falling back to openai", file=sys.stderr)
-    openai_script = repo_root / "skills" / "openai-tts" / "scripts" / "synthesize.sh"
-    if openai_script.exists():
-        subprocess.run(["bash", str(openai_script), "--voice", openai_voice,
+                print(f"  [render] openai-tts failed (exit {e.returncode}); falling back to gemini", file=sys.stderr)
+    gemini_script = repo_root / "skills" / "gemini-tts" / "scripts" / "synthesize.sh"
+    if gemini_script.exists():
+        subprocess.run(["bash", str(gemini_script), "--voice", gemini_voice,
                          "--out", str(out_path), "--", text], check=True)
-        return f"OPENAI:{openai_voice}"
+        return f"GEMINI:{gemini_voice}"
     raise RuntimeError("No TTS skill available")
 
 
@@ -545,12 +546,13 @@ def concat_clips_with_audio(clip_paths: list, narration_path: Path, out_path: Pa
 def main():
     p = argparse.ArgumentParser(description="Render make-viral-video output")
     p.add_argument("--workdir", required=True, help="state/viral-{ts}/ directory")
-    p.add_argument("--tts-provider", default="GEMINI", choices=["GEMINI", "OPENAI"])
+    p.add_argument("--tts-provider", default="OPENAI", choices=["GEMINI", "OPENAI"])
     p.add_argument("--gemini-voice", default="Aoede",
                    choices=["Aoede", "Charon", "Kore", "Puck"],
-                   help="Gemini TTS voice (Charon is news-anchor baritone).")
+                   help="Gemini TTS voice (Charon is news-anchor baritone). "
+                        "Used when provider=GEMINI or as fallback.")
     p.add_argument("--openai-voice", default="sage",
-                   help="OpenAI TTS voice (used only if Gemini fallback path).")
+                   help="OpenAI TTS voice (default provider as of May 2026 migration).")
     p.add_argument("--series-title", default="Mini Wire",
                    help="Branded series name shown on the end-card slate (set empty to skip slate).")
     p.add_argument("--episode", default="001", help="Episode number for slate (e.g. '001')")
