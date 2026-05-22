@@ -6,6 +6,8 @@ Works alongside the voice task bridge. Runs as a background daemon.
 Usage: python3 src/telegram-bridge.py
 """
 
+from __future__ import annotations
+
 import json
 import os
 import sys
