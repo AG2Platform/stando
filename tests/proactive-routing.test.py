@@ -144,17 +144,65 @@ def test_state_file_non_dict_root_defaults_to_discord():
     _with_state(["not a dict"], run)
 
 
-def test_unknown_channel_value_does_not_match_anyone():
-    """`{"channel": "slack"}` — channel value not "discord" or
-    "telegram". Neither bridge should claim (the user did NOT
-    interact with either bridge most recently). Strict equality, no
-    fallback to Discord in this case — silence is correct."""
+def test_voice_channel_defaults_to_discord():
+    """Per @rickchen007 PR #35 review: `state/last-owner-activity.json`
+    is written with channel values beyond `discord`/`telegram` —
+    `"voice"` is a real value the voice agent writes on every owner
+    utterance. Pre-fix, the strict `last_channel == this_channel`
+    rule returned False for BOTH bridges in this case, stranding
+    the proactive file in `results/`.
+
+    Post-fix: non-bridge channels default to Discord (canonical
+    first-channel install path)."""
 
     def run(state):
-        assert should_claim_proactive(state, "discord") is False
+        assert should_claim_proactive(state, "discord") is True, (
+            "voice-channel-active must route to Discord — otherwise the "
+            "proactive file is stranded until the owner next DMs"
+        )
+        assert should_claim_proactive(state, "telegram") is False
+
+    _with_state({"channel": "voice", "ts": 1779339000}, run)
+
+
+def test_github_commits_channel_defaults_to_discord():
+    """Same shape: the github-commit auto-poll writes `{"channel":
+    "github-commits"}` on every observed commit. Must NOT strand the
+    proactive file."""
+
+    def run(state):
+        assert should_claim_proactive(state, "discord") is True
+        assert should_claim_proactive(state, "telegram") is False
+
+    _with_state({"channel": "github-commits", "ts": 1779339000}, run)
+
+
+def test_unrecognized_channel_defaults_to_discord():
+    """Generalization: an arbitrary non-bridge channel name (e.g.
+    `"slack"`, `"matrix"`, future channels not yet implemented) also
+    defaults to Discord rather than stranding the message. The pre-
+    fix behavior was strict equality which silently dropped the
+    proactive — exactly the bug @rickchen007 identified."""
+
+    def run(state):
+        assert should_claim_proactive(state, "discord") is True
         assert should_claim_proactive(state, "telegram") is False
 
     _with_state({"channel": "slack", "ts": 1779339000}, run)
+
+
+def test_bridge_channels_set_is_documented():
+    """Pin the BRIDGE_CHANNELS constant: a future contributor adding
+    a new bridge (e.g. matrix) must update both this constant AND
+    add a corresponding `test_<channel>_active_routes_to_<channel>`.
+    Without this pin, the constant could silently widen and break the
+    "non-bridge defaults to Discord" contract."""
+    from proactive_routing import BRIDGE_CHANNELS
+    assert BRIDGE_CHANNELS == frozenset({"discord", "telegram"}), (
+        f"BRIDGE_CHANNELS changed to {BRIDGE_CHANNELS!r}. If you added a "
+        f"new bridge, add a corresponding routing test AND update this "
+        f"assertion deliberately."
+    )
 
 
 def main():
@@ -165,7 +213,10 @@ def main():
     test_state_file_missing_channel_field_defaults_to_discord()
     test_state_file_empty_channel_string_defaults_to_discord()
     test_state_file_non_dict_root_defaults_to_discord()
-    test_unknown_channel_value_does_not_match_anyone()
+    test_voice_channel_defaults_to_discord()
+    test_github_commits_channel_defaults_to_discord()
+    test_unrecognized_channel_defaults_to_discord()
+    test_bridge_channels_set_is_documented()
     print("All proactive-routing tests passed.")
 
 

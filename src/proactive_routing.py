@@ -32,6 +32,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+# Channels whose bridges actually deliver `proactive-*.txt` files.
+# Other producers write `last-owner-activity.json` with channel values
+# like `"voice"` (voice agent registered an utterance) or
+# `"github-commits"` (auto-poll observed a new commit) — those are
+# activity-tracking signals, NOT message-delivery channels. When the
+# last activity was on a non-bridge channel, proactive messages must
+# still get delivered SOMEWHERE rather than stranded: Discord is the
+# default (the canonical first-channel install path).
+#
+# Per @rickchen007 PR #35 review: pre-fix, only `discord`/`telegram`
+# were treated as recognized — and an unrecognized value (`voice`,
+# `github-commits`, anything else) returned False for BOTH bridges,
+# silently stranding the proactive file in `results/` until the
+# next discord/telegram message restored a known activity channel.
+BRIDGE_CHANNELS = frozenset({"discord", "telegram"})
+
 
 def should_claim_proactive(state_file_path: Path, this_channel: str) -> bool:
     """Decide whether this bridge should claim `results/proactive-*.txt`.
@@ -45,14 +61,17 @@ def should_claim_proactive(state_file_path: Path, this_channel: str) -> bool:
         ``True`` iff the calling bridge is the destination for proactive
         messages right now. The decision rule:
 
-          1. State file present and parseable → claim only when
-             ``data["channel"] == this_channel``.
-          2. State file missing, unreadable, or malformed → claim only
-             when ``this_channel == "discord"``. Discord is the default
-             so a fresh install (no activity history yet) doesn't
-             silently duplicate to every configured bridge.
-          3. State file present but ``data["channel"]`` is empty or
-             absent → same default as (2).
+          1. State file says ``data["channel"]`` is a known BRIDGE
+             channel (discord / telegram) → claim only when
+             ``last_channel == this_channel``. This is the message-
+             routing match — owner was last reading there, follow-up
+             goes there.
+          2. State file missing / unreadable / malformed / no-channel
+             / channel-not-a-string / channel-not-a-bridge (e.g.
+             ``voice``, ``github-commits``) → default Discord. Owner
+             messages must not get stranded when the last activity
+             was on a non-bridge surface; Discord is the canonical
+             first-channel install path.
 
     Pure function — no side effects, no logging. Callers handle
     skip/continue control flow.
@@ -71,4 +90,12 @@ def should_claim_proactive(state_file_path: Path, this_channel: str) -> bool:
     if not isinstance(last_channel, str) or not last_channel:
         return this_channel == "discord"
 
-    return last_channel == this_channel
+    # If the last-active channel is a known bridge, match strictly so
+    # only that bridge claims.
+    if last_channel in BRIDGE_CHANNELS:
+        return last_channel == this_channel
+
+    # Non-bridge channel (voice / github-commits / etc.): the owner
+    # most recently interacted on a surface that doesn't deliver DMs.
+    # Default Discord rather than strand the proactive file.
+    return this_channel == "discord"
