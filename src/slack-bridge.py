@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Slack bridge for Sutando — receives DMs + @mentions via Socket Mode, writes to
 tasks/, sends replies from results/. Works alongside the voice / discord /
