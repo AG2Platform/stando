@@ -25,24 +25,43 @@ const ROLE_LABEL: Record<TranscriptEntry['role'], string> = {
 	system: 'System',
 };
 
+/*
+ * Each transcript entry is rendered as <wrapper><bubble/><CopyButton/></wrapper>.
+ *
+ * The wrapper is sized to its content (so the hover region matches the
+ * bubble's footprint, not the full row width) and carries the `group`
+ * class. The copy button is a sibling of the bubble — NOT a child — so
+ * revealing it on hover doesn't grow the bubble itself; it just fades
+ * into a reserved slot directly under the message.
+ */
+
 const BUBBLE_BASE =
-	'group flex max-w-[78%] flex-col gap-1 rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed break-words';
+	'flex flex-col gap-1 rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed break-words';
 
 const BUBBLE_USER =
-	'self-end rounded-br-md border border-(--text)/10 bg-(--text) text-(--bg) shadow-[0_12px_24px_-18px_rgba(0,0,0,0.55)]';
+	'rounded-br-md border border-(--text)/10 bg-(--text) text-(--bg) shadow-[0_12px_24px_-18px_rgba(0,0,0,0.55)]';
 const BUBBLE_ASSISTANT =
-	'self-start rounded-bl-md border border-(--border) bg-(--surface-elev) text-(--text)';
+	'rounded-bl-md border border-(--border) bg-(--surface-elev) text-(--text)';
 const BUBBLE_SYSTEM =
-	'self-center rounded-full border border-dashed border-(--border) bg-transparent px-2.5 py-1 text-xs text-(--text-muted)';
+	'rounded-full border border-dashed border-(--border) bg-transparent px-2.5 py-1 text-xs text-(--text-muted)';
 
-const classFor = (entry: TranscriptEntry): string => {
+const WRAPPER_USER = 'group flex max-w-[78%] flex-col items-end self-end';
+const WRAPPER_ASSISTANT = 'group flex max-w-[78%] flex-col items-start self-start';
+const WRAPPER_SYSTEM = 'flex max-w-full flex-col self-center';
+
+const bubbleClassFor = (entry: TranscriptEntry): string => {
 	if (entry.role === 'system') return `${BUBBLE_BASE} ${BUBBLE_SYSTEM}`;
 	const variant = entry.role === 'user' ? BUBBLE_USER : BUBBLE_ASSISTANT;
 	const interim = entry.interim ? 'opacity-60' : '';
 	return `${BUBBLE_BASE} ${variant} ${interim}`.trim();
 };
 
-function CopyBubble({ text }: { text: string }) {
+const wrapperClassFor = (entry: TranscriptEntry): string => {
+	if (entry.role === 'system') return WRAPPER_SYSTEM;
+	return entry.role === 'user' ? WRAPPER_USER : WRAPPER_ASSISTANT;
+};
+
+function CopyButton({ text }: { text: string }) {
 	const [copied, setCopied] = useState(false);
 	const timer = useRef<number | null>(null);
 	useEffect(
@@ -63,7 +82,8 @@ function CopyBubble({ text }: { text: string }) {
 		<button
 			type="button"
 			onClick={onClick}
-			className="hidden self-end rounded-full border border-current/25 bg-transparent px-2 py-0.5 text-[10px] opacity-70 group-hover:inline-flex"
+			aria-label={copied ? 'Copied to clipboard' : 'Copy message'}
+			className="mt-1 rounded-full border border-(--border) bg-(--surface)/80 px-2 py-0.5 text-[10px] text-(--text-muted) opacity-0 transition-opacity duration-100 hover:text-(--text) group-hover:opacity-100 focus-visible:opacity-100"
 		>
 			{copied ? 'Copied' : 'Copy'}
 		</button>
@@ -159,15 +179,17 @@ export default function ConversationStream({ errorMessage, emptyState }: Convers
 				entries.map((entry) => {
 					const showCopy = !entry.interim && entry.role !== 'system' && entry.text.length > 0;
 					return (
-						<div key={entry.id} className={classFor(entry)}>
-							{entry.role !== 'system' ? (
-								<span className="text-[10px] uppercase tracking-[0.06em] opacity-65">
-									{ROLE_LABEL[entry.role]}
-								</span>
-							) : null}
-							<MessageText entry={entry} />
-							<MediaSlot entry={entry} />
-							{showCopy ? <CopyBubble text={entry.text} /> : null}
+						<div key={entry.id} className={wrapperClassFor(entry)}>
+							<div className={bubbleClassFor(entry)}>
+								{entry.role !== 'system' ? (
+									<span className="text-[10px] uppercase tracking-[0.06em] opacity-65">
+										{ROLE_LABEL[entry.role]}
+									</span>
+								) : null}
+								<MessageText entry={entry} />
+								<MediaSlot entry={entry} />
+							</div>
+							{showCopy ? <CopyButton text={entry.text} /> : null}
 						</div>
 					);
 				})

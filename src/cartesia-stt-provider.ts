@@ -14,6 +14,40 @@ import type { STTProvider, STTAudioConfig } from 'bodhi-realtime-agent';
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 const MAX_BUFFER_BYTES = 25 * 1024 * 1024; // 25 MB safety cap
 
+/**
+ * Whisper-family STT models (including Cartesia's `ink-whisper`) emit
+ * bracketed pseudo-tokens and recurring scraped-subtitle phrases when
+ * fed near-silent or non-speech audio. They are not actual user
+ * utterances — they're training-data artifacts that leak through.
+ *
+ * Letting them reach the LLM causes two problems:
+ *   1. Gemini treats them as a turn and may echo the literal token
+ *      back as a reply (observed: `[BLANK_AUDIO]` showing up in the
+ *      assistant transcript).
+ *   2. Even when Gemini ignores the content, the empty "user turn"
+ *      can trigger spurious tool calls or filler ACKs.
+ *
+ * The patterns cover the common Whisper hallucinations documented
+ * across the openai/whisper issue tracker:
+ *   - `[BLANK_AUDIO]`, `[blank_audio]`, `[ blank audio ]`
+ *   - `[MUSIC]`, `[Music]`, `[♪ music ♪]`
+ *   - `[INAUDIBLE]`, `[silence]`, `(silence)`
+ *   - `[LAUGHTER]`, `[APPLAUSE]`, `[NOISE]`, `[BACKGROUND NOISE]`
+ *   - "Thanks for watching!" / "Subtitles by ..." subtitle credits
+ */
+const WHISPER_NOISE_RE = /^(?:\s*[\[(♪]\s*(?:blank[\s_]?audio|music|inaudible|silence|noise|background\s*noise|laughter|applause|cough|sigh|breath(?:ing)?|sound\s*effect|footsteps?|crying|whispering)\s*[\])♪]\s*\.?\s*|thanks?\s+for\s+watching[!.\s]*|subtitles?\s+by\s+.*|please\s+subscribe[!.\s]*)$/i;
+
+/**
+ * True when `text` is a Whisper-style transcription hallucination
+ * rather than a real user utterance. Exported so unit tests can
+ * exercise the pattern list directly.
+ */
+export function isWhisperHallucination(text: string): boolean {
+	const trimmed = text.trim();
+	if (trimmed.length === 0) return true;
+	return WHISPER_NOISE_RE.test(trimmed);
+}
+
 export interface CartesiaSTTConfig {
 	apiKey: string;
 	model?: string;
@@ -118,7 +152,12 @@ export class CartesiaSTTProvider implements STTProvider {
 			.then((data: any) => {
 				if (this.generation !== gen) return; // stale — session was stopped+restarted
 				const text = data?.text?.trim();
-				if (text && this.onTranscript) {
+				if (!text) return;
+				if (isWhisperHallucination(text)) {
+					console.log(`${ts()} [CartesiaSTT] Dropped Whisper artifact (turn ${turnId}): "${text.slice(0, 80)}"`);
+					return;
+				}
+				if (this.onTranscript) {
 					console.log(`${ts()} [CartesiaSTT] Transcript (turn ${turnId}): "${text.slice(0, 80)}${text.length > 80 ? '...' : ''}"`);
 					this.onTranscript(text, turnId);
 				}

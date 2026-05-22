@@ -1,6 +1,6 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { CartesiaSTTProvider } from '../src/cartesia-stt-provider.js';
+import { CartesiaSTTProvider, isWhisperHallucination } from '../src/cartesia-stt-provider.js';
 
 /** Create a base64 PCM chunk of given decoded byte size */
 function makeChunk(decodedBytes: number): string {
@@ -208,5 +208,67 @@ describe('CartesiaSTTProvider', () => {
 			await provider.start();
 			assert.equal((provider as any).stopped, false);
 		});
+	});
+});
+
+describe('isWhisperHallucination', () => {
+	it('flags [BLANK_AUDIO] and its case variants', () => {
+		assert.equal(isWhisperHallucination('[BLANK_AUDIO]'), true);
+		assert.equal(isWhisperHallucination('[blank_audio]'), true);
+		assert.equal(isWhisperHallucination('[ blank audio ]'), true);
+		assert.equal(isWhisperHallucination('[Blank Audio]'), true);
+	});
+
+	it('flags common Whisper bracketed pseudo-tokens', () => {
+		const samples = [
+			'[MUSIC]',
+			'[Music]',
+			'(silence)',
+			'[silence]',
+			'[INAUDIBLE]',
+			'[LAUGHTER]',
+			'[Applause]',
+			'[NOISE]',
+			'[background noise]',
+			'(cough)',
+			'[sigh]',
+			'[breathing]',
+			'♪ music ♪',
+		];
+		for (const s of samples) {
+			assert.equal(isWhisperHallucination(s), true, `expected hallucination: ${s}`);
+		}
+	});
+
+	it('flags well-known Whisper subtitle credits', () => {
+		assert.equal(isWhisperHallucination('Thanks for watching!'), true);
+		assert.equal(isWhisperHallucination('thanks for watching'), true);
+		assert.equal(isWhisperHallucination('Subtitles by the Amara.org community'), true);
+		assert.equal(isWhisperHallucination('Please subscribe!'), true);
+	});
+
+	it('flags empty / whitespace-only transcripts', () => {
+		assert.equal(isWhisperHallucination(''), true);
+		assert.equal(isWhisperHallucination('   '), true);
+		assert.equal(isWhisperHallucination('\n\t'), true);
+	});
+
+	it('does NOT flag real user utterances', () => {
+		const samples = [
+			'hello',
+			'yes',
+			'thank you',
+			'you',
+			'ok',
+			'mhm',
+			'play the music',
+			'I want background noise removal',
+			'send the email about [the project]',
+			'what about silence in the recording?',
+			'I am applauding the team — applause was the point',
+		];
+		for (const s of samples) {
+			assert.equal(isWhisperHallucination(s), false, `expected real utterance: ${s}`);
+		}
 	});
 });
