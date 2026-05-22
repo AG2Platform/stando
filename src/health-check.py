@@ -43,9 +43,15 @@ from workspace_default import resolve_workspace  # noqa: E402
 WORKSPACE_DIR = resolve_workspace()
 
 def _default_memory_dir() -> str:
-    """Auto-detect Claude Code memory dir from repo path."""
-    repo = Path(__file__).parent.parent.resolve()
-    slug = str(repo).replace("/", "-")
+    """Auto-detect Claude Code memory dir from workspace path.
+
+    Claude Code keys project memory to the session's working directory.
+    For Sutando that's the workspace root (SUTANDO_WORKSPACE or
+    ~/.sutando/workspace/), not the repo root. Claude slugifies by
+    replacing every '/' and '.' with '-'.
+    """
+    workspace = Path(resolve_workspace()).resolve()
+    slug = str(workspace).replace("/", "-").replace(".", "-")
     return str(Path.home() / ".claude" / "projects" / slug / "memory")
 
 MEMORY_DIR = Path(os.environ.get("SUTANDO_MEMORY_DIR", _default_memory_dir()))
