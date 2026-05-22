@@ -2922,7 +2922,7 @@ async def poll_results():
                             await channel.send(file=discord.File(fpath))
                             print(f"  Sent file: {fpath}")
                         elif not os.path.isfile(fpath):
-                            print(f"  [file marker, file not found — likely a prose quotation]: {fpath}", flush=True)
+                            print(f"  [file marker, file not found — likely a prose quotation]: {fpath}", file=sys.stderr, flush=True)
                         else:
                             await channel.send(f"(file not allowed: {fpath})")
                             print(f"  REJECTED file (not in allowlist): {fpath}", flush=True)
@@ -3056,7 +3056,7 @@ async def poll_proactive():
                                 # See poll_results: prose containing
                                 # `[file:/path]` substrings triggers this
                                 # without intending a real send. Log only.
-                                print(f"  [proactive] file marker, file not found: {fpath}", flush=True)
+                                print(f"  [proactive] file marker, file not found: {fpath}", file=sys.stderr, flush=True)
                             else:
                                 await dm.send(f"(file not allowed: {fpath})")
                                 print(f"  [proactive] REJECTED file: {fpath}", flush=True)
@@ -3215,7 +3215,7 @@ async def poll_dm_fallback():
                                     # See poll_results: prose-quoted markers
                                     # trigger this without intending a real
                                     # send. Log only.
-                                    print(f"  [dm-fallback channel-redirect] file marker, file not found: {fpath}", flush=True)
+                                    print(f"  [dm-fallback channel-redirect] file marker, file not found: {fpath}", file=sys.stderr, flush=True)
                             print(f"  [dm-fallback channel-redirect] sent {f.name} to channel {target_channel_id}", flush=True)
                             _task_file = TASKS_DIR / f"{_task_id}.txt"
                             if _task_file.exists():

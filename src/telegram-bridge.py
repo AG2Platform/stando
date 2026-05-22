@@ -387,7 +387,7 @@ def send_reply(chat_id, text):
             # but reference no actual file. Don't ship the warning to
             # the user; log for operator visibility on real typos. Same
             # rationale as discord-bridge:poll_results.
-            print(f"  file marker, file not found — likely a prose quotation: {fpath}", flush=True)
+            print(f"  file marker, file not found — likely a prose quotation: {fpath}", file=sys.stderr, flush=True)
 
     text_chunks = (len(clean_text) // 4000 + 1) if clean_text else 0
     if text_chunks or files:
