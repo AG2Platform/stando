@@ -21,7 +21,10 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-WORKSPACE = Path(__file__).parent.parent
+sys.path.insert(0, str(Path(__file__).parent))
+from workspace_default import resolve_workspace  # noqa: E402
+
+WORKSPACE = Path(resolve_workspace())
 TASKS_ARCHIVE = WORKSPACE / "tasks" / "archive"
 LEARNED_DIR = WORKSPACE / "learned-skills"
 STATE_DIR = WORKSPACE / "state"
