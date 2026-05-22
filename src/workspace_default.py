@@ -282,6 +282,25 @@ def resolve_workspace(migrate: bool = True) -> Path:
     env = os.environ.get("SUTANDO_WORKSPACE", "").strip()
     if env:
         target = Path(env).expanduser()
+        # A relative `SUTANDO_WORKSPACE` resolves against CWD, which
+        # differs between launchd-managed services, systemd units, and
+        # bare-shell launches. Two processes inheriting the same env
+        # var would then mkdir/read in DIFFERENT directories — silent
+        # split-brain that produced stranded owner DMs in the bare-
+        # vs-bundle anti-pattern documented at the top of this module.
+        # Normalize to an absolute path against the current CWD and
+        # warn loudly so the misconfig surfaces. `.resolve()` also
+        # collapses `..` segments, matching the `_is_path_sendable`
+        # sanitizer pattern in `src/discord-bridge.py`.
+        if not target.is_absolute():
+            anchored = (Path.cwd() / target).resolve()
+            print(
+                f"workspace: SUTANDO_WORKSPACE={env!r} is relative — anchored to "
+                f"{anchored} (CWD-dependent; set an absolute path to avoid "
+                f"cross-process drift)",
+                file=sys.stderr,
+            )
+            target = anchored
         if migrate:
             try:
                 _migrate_inrepo_notes(target)
