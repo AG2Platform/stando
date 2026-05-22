@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from task_priority import default_priority_for_source  # noqa: E402
 from result_markers import parse_markers  # noqa: E402
 from workspace_default import resolve_workspace  # noqa: E402
+from slack_proactive_owner import resolve_proactive_owner  # noqa: E402
 
 try:
     from slack_bolt import App
@@ -604,9 +605,20 @@ def result_watcher():
                     if not text:
                         claim.unlink(missing_ok=True)
                         continue
-                    owner_ids = load_allowed()
-                    if owner_ids:
-                        owner_id = next(iter(owner_ids))
+                    # Resolve the proactive-DM recipient deterministically.
+                    # Pre-fix: `next(iter(load_allowed()))` — load_allowed()
+                    # returns a SET, so the "owner" was an arbitrary set
+                    # element; with multiple allowFrom entries (owner + peer
+                    # bots / team) a proactive DM could go to the wrong user.
+                    # See slack_proactive_owner.py for the priority order.
+                    try:
+                        _access_data = json.loads(ACCESS_FILE.read_text())
+                    except Exception:
+                        _access_data = {}
+                    owner_id = resolve_proactive_owner(
+                        _access_data, os.environ.get("SUTANDO_DM_OWNER_ID")
+                    )
+                    if owner_id:
                         # Open a DM channel to the owner (idempotent).
                         try:
                             resp = app.client.conversations_open(users=owner_id)
