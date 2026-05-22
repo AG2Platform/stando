@@ -27,10 +27,11 @@ import {
 	recordEvent as cloudRecordEvent,
 	gatewayBaseUrl,
 } from './cloud-client.js';
+import { resolveWorkspace } from './workspace_default.js';
 
 const getCartesiaApiKey = () => process.env.CARTESIA_API_KEY || '';
 const getCartesiaVoiceId = () => process.env.CARTESIA_VOICE_ID || 'f786b574-daa5-4673-aa0c-cbe3e8534c02';
-const getWorkspace = () => process.env.WORKSPACE_DIR || process.cwd();
+const getWorkspace = () => resolveWorkspace();
 
 const SAMPLE_RATE = 24000;
 const CHANNELS = 1;
