@@ -289,9 +289,9 @@ def resolve_workspace(migrate: bool = True) -> Path:
         # split-brain that produced stranded owner DMs in the bare-
         # vs-bundle anti-pattern documented at the top of this module.
         # Normalize to an absolute path against the current CWD and
-        # warn loudly so the misconfig surfaces. `.absolute()` (not
-        # `.resolve()`) preserves any deliberate symlinks the user
-        # created at the workspace root.
+        # warn loudly so the misconfig surfaces. `.resolve()` also
+        # collapses `..` segments, matching the `_is_path_sendable`
+        # sanitizer pattern in `src/discord-bridge.py`.
         if not target.is_absolute():
             anchored = (Path.cwd() / target).resolve()
             print(
