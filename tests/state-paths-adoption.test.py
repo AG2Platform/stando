@@ -1,54 +1,54 @@
 #!/usr/bin/env python3
-"""Adoption test for `state_paths` / `state-paths` workspace contract.
+"""Adoption test for the SUTANDO_WORKSPACE contract.
 
 ## Why this test exists
 
-Of the last 250 commits on this repo, roughly **9 are fixes** of the
-exact same shape: "module X writes/reads to `tasks/` / `results/` /
-`state/` / `notes/` without going through the canonical workspace
-resolver, so on `SUTANDO_WORKSPACE`-set hosts the module writes one
-place while another component reads another — split-brain that
-strands owner DMs / loses voice-agent state / pollutes `git status`."
+Many of the recent commits in this repo are fixes of the same shape:
+"module X writes/reads to `tasks/` / `results/` / `state/` / `notes/`
+without going through the canonical workspace resolver, so on hosts
+where `SUTANDO_WORKSPACE` is set the module writes one place while
+another component reads another — split-brain that strands owner DMs
+/ loses voice-agent state / pollutes `git status`."
 
-Sample:
-  - PR #843 voice-agent honor SUTANDO_WORKSPACE
-  - PR #855 voice-state.json reader+writer honor SUTANDO_WORKSPACE
-  - PR #849 core-status.json
-  - b51659e fix(bridges,webhook,archive,event-log,notify): route runtime state through state_dir/state_path
-  - ab537d0 fix(voice,tmux-status): mkdir data/ before metrics write
-  - 38ae961 fix(health-check): resolve .env via state_path
-  - 1f29861 mini: heartbeat + core-status paths honor SUTANDO_HOME
-  - 8e93c14 merge(CP-0): fix test suite + 2 missed runtime-state paths
-  - PR #27 (this round): anchor relative SUTANDO_WORKSPACE absolute
+The historic anti-pattern called out in CLAUDE.md is *"bridges fell
+back to the script's repo root via `Path(__file__).resolve().parent.parent`"*.
 
-Each was a one-off "found another one, patched another one" fix. The
-underlying class — a new source file written without the workspace
-contract in mind — keeps producing instances.
+A first version of this test (PR #991) checked only that a file
+*imports* the resolver, then trusted it. @qingyun-wu's post-merge
+review correctly pointed out that a file can import the resolver for
+path X and still hand-roll the fallback for path Y — and that the
+recommended fix-string pointed at a `state_paths` module that doesn't
+exist in this repo. This rewrite addresses all five of her points.
 
-## What this test does
+## What this test does (per @qingyun-wu's recommendation)
 
-For every source file under `src/`, this test:
+For every `src/*.py` and `src/*.{ts,tsx}` source file, three checks:
 
-  1. Scans for **string literals or path expressions** that look like
-     references to runtime-state directories (`tasks/`, `results/`,
-     `state/`, `notes/`, `data/`, `logs/`).
-  2. Requires the file to **either** import the canonical resolver
-     (`workspace_default.resolve_workspace` for .py /
-     `workspace_default.resolveWorkspace` for .ts) **or** the
-     fork's convenience wrapper (`state_paths.state_dir/state_path`
-     for .py / `state-paths.stateDir/statePath` for .ts) **or** be
-     in an explicit allowlist of files that legitimately reference
-     these strings without runtime-state semantics (e.g., the
-     wrappers themselves, doc strings in tests).
+  1. **Positive anti-pattern check (new, @qingyun-wu obs #2).** Fail
+     when a non-allowlisted file USES a hand-rolled fallback to compose
+     a runtime-state path — i.e. `<fallback-var> / "tasks"` or
+     `REPO_DIR / "results"` etc., where the fallback-var is locally
+     defined via `Path(__file__).parent.parent` (or similar). This is
+     the documented incident shape — and it fires whether or not the
+     resolver is also imported.
 
-If a new source file references `tasks/` etc. but doesn't import the
-resolver, this test fails — the contributor must either route through
-the resolver or add their file to the allowlist with a justification.
+  2. **Runtime-state reference check (broadened regex, @qingyun-wu
+     obs #3).** Fail when a file references runtime-state path tokens
+     AND doesn't import the canonical resolver. Now matches single-
+     quoted bare names (`'tasks'`), template literals
+     (`` `${ws}/tasks/${id}` ``), and all `.ts/.tsx` files (the runner
+     used to skip `.tsx`, @qingyun-wu obs #4).
 
-The test is a preventative net, not a catch-the-current-violator
-check. Any file that currently violates the contract has already
-been patched in the historical fixes listed above; the goal is to
-keep that work paid down.
+  3. **Sanity assertions.** Resolver module exists; allowlist entries
+     all exist on disk; the regexes match their documented forms (a
+     guard against accidental loosening).
+
+Per @qingyun-wu obs #1, the failure messages only point at
+`workspace_default` / `resolve_workspace` — both real modules in this
+repo. Per obs #5, the dead `_allowlisted_or_missing` placeholder was
+removed.
+
+Read-only static analysis; no fixtures, no networking. Runs in <200ms.
 """
 
 import re
@@ -58,166 +58,306 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SRC = REPO / "src"
 
-# Patterns that indicate a file is touching runtime-state directories.
-# Match against the file source as a single string. We look for the
-# directory name immediately preceded by a path-separator-ish character
-# so plain English mentions ("in the tasks dir") don't false-positive.
+# Tokens that name runtime-state directories. A reference to any of
+# these in a non-allowlisted file is a signal it touches workspace
+# paths and should go through `resolve_workspace()`.
+#
+# Note: `data` and `state` are NOT in the bare-quoted list — too
+# generic, match `'data'` event-listener strings and
+# `searchParams.get('state')` query-param names. They stay in slash-
+# wrapped forms where the path context is unambiguous.
+_RUNTIME_TOKENS_BARE = ("tasks", "results", "notes", "logs")
+_RUNTIME_TOKENS_SLASH = ("tasks", "results", "state", "notes", "data", "logs")
+
+_BARE = "|".join(_RUNTIME_TOKENS_BARE)
+_SLASH = "|".join(_RUNTIME_TOKENS_SLASH)
 RUNTIME_STATE_REGEX = re.compile(
     r'(?:'
-    # `Path(...) / "tasks"` / `os.path.join(..., "tasks")` / `f".../tasks/..."`
-    r'"\s*(?:tasks|results|state|notes|data|logs)\s*"|'
-    # `/tasks/`, `/results/` etc. inside a path-literal string
-    r"'/(?:tasks|results|state|notes|data|logs)/'|"
-    r'"/(?:tasks|results|state|notes|data|logs)/"|'
-    # `(REPO|workspace|home|cwd) / "tasks"` (Python path operator)
-    r'(?:REPO|REPO_DIR|WORKSPACE_DIR|workspace|repo)\s*/\s*"(?:tasks|results|state|notes|data|logs)"'
+    # `"tasks"` / `'tasks'` — quoted bare name (excl. `data`)
+    rf'["\']\s*(?:{_BARE})\s*["\']|'
+    # `'/tasks/'` / `"/tasks/"` — slash-wrapped literal (incl. `data`)
+    rf'["\']/(?:{_SLASH})/["\']|'
+    # `(REPO|REPO_DIR|WORKSPACE_DIR|workspace|repo) / "tasks"` —
+    # Python `/` operator OR JS path-join (per @qingyun-wu obs #2's
+    # incident shape: the runtime-state path is composed off the
+    # fallback var).
+    rf'(?:REPO|REPO_DIR|WORKSPACE_DIR|workspace|repo)\s*/\s*["\'](?:{_SLASH})["\']|'
+    # Template literal: anywhere a `${...}` is followed by `/tasks/`
+    # inside a backtick string.
+    rf'`[^`]*?\$\{{[^}}]+\}}\s*/(?:{_SLASH})\b[^`]*?`|'
+    rf'`[^`]*?/(?:{_SLASH})\s*[/`]'
     r')'
 )
 
-# Canonical accessors. A file that references runtime-state must use one.
+# Hand-rolled fallback: matches a runtime-state token IMMEDIATELY
+# composed off a fallback root (the documented incident shape, per
+# @qingyun-wu obs #2). We check this on per-line basis AND require the
+# line to NOT be a pure comment — file-level header doc comments
+# legitimately mention `~/.sutando/workspace` in prose without
+# composing a path off it.
+HAND_ROLLED_COMPOSITION = re.compile(
+    r'(?:'
+    # Python: `Path(__file__)[.resolve()].parent.parent / "<token>"` /
+    # `Path(__file__).parent.parent / "results"` etc.
+    rf'Path\(__file__\)(?:\.resolve\(\))?\.parent\.parent\s*/\s*["\'](?:{_SLASH})["\']|'
+    # Python/JS: literal `.sutando/workspace/<token>` in a string —
+    # bypasses resolve_workspace() entirely.
+    rf'\.sutando/workspace/(?:{_SLASH})\b|'
+    # JS: `path.join(REPO_ROOT, '<token>')` style where REPO_ROOT is a
+    # __file__-like fallback. Matches as a heuristic if the file ALSO
+    # has the fallback definition (checked separately).
+    rf'(?:REPO_ROOT|repoRoot|FALLBACK_ROOT)\s*[,/]\s*["\'](?:{_SLASH})["\']'
+    r')'
+)
+
+# Detection of the fallback DEFINITION (separate from use). Fires only
+# on substantive code lines (not comments) — the prose mention of the
+# workspace path in module docstrings is legitimate.
+FALLBACK_DEFINITION = re.compile(
+    r'Path\(__file__\)(?:\.resolve\(\))?\.parent\.parent'
+)
+
+# Canonical accessors. A file that references runtime-state must use
+# one of:
+#   - `workspace_default.resolve_workspace()` (Python) / `resolveWorkspace()` (TS) — the base resolver
+#   - `state_paths.state_dir/state_path()` (Python) / `state-paths.stateDir/statePath()` (TS) — the convenience wrappers
+#
+# The fork has both layers; upstream has only the base resolver.
+# Matching both keeps this test compatible with both vocabularies.
 PY_CANONICAL = re.compile(
     r'(?:'
-    r'from\s+state_paths\s+import|'
-    r'import\s+state_paths|'
     r'from\s+workspace_default\s+import|'
     r'import\s+workspace_default|'
+    r'resolve_workspace\s*\(|'
+    r'from\s+state_paths\s+import|'
+    r'import\s+state_paths|'
     r'state_dir\s*\(|'
-    r'state_path\s*\(|'
-    r'resolve_workspace\s*\('
+    r'state_path\s*\('
     r')'
 )
 TS_CANONICAL = re.compile(
     r"(?:"
-    r"from\s+['\"]\./state-paths['\"]|"
-    r"from\s+['\"]\./state_paths['\"]|"
-    r"from\s+['\"]\./workspace_default['\"]|"
+    r"from\s+['\"]\./workspace_default(?:\.js)?['\"]|"
+    r"resolveWorkspace\s*\(|"
+    r"from\s+['\"]\./state-paths(?:\.js)?['\"]|"
+    r"from\s+['\"]\./state_paths(?:\.js)?['\"]|"
     r"stateDir\s*\(|"
-    r"statePath\s*\(|"
-    r"statePathEnsured\s*\(|"
-    r"resolveWorkspace\s*\("
+    r"statePath\s*\("
     r")"
 )
 
 # Files that legitimately reference these strings without runtime-state
-# semantics. Each entry is justified in this list, not silently allowed.
-#
-# Two categories of entries:
-#   1. CANONICAL — the resolver modules themselves and a few files that
-#      pre-date or intentionally bypass the wrapper convention.
-#   2. MIGRATION-PENDING — current violators that use the historic
-#      `Path(__file__).parent.parent` anti-pattern. Each one is a
-#      latent SUTANDO_WORKSPACE bug on env-set hosts: the file reads
-#      from / writes to the repo root instead of the user's workspace.
-#      Listed here (not silently passing) so the migration is visible
-#      and can be tracked.
+# semantics, or that legitimately define `__file__.parent.parent` for
+# non-workspace purposes (e.g. walking the checkout for git operations).
+# Each entry is justified, not silently allowed.
 ALLOWLIST = {
-    # --- CANONICAL ---
-    "src/state_paths.py",
+    # The canonical resolver + convenience wrappers — names the strings
+    # literally and ARE the place where the fallback shapes legitimately
+    # live.
     "src/workspace_default.py",
-    # util_paths is identical to upstream sonichi/sutando and predates
-    # the wrapper convention — but it never writes runtime-state itself
-    # (just reads personal-asset paths).
+    "src/workspace_default.ts",
+    "src/state_paths.py",      # fork's Python convenience wrapper
+    "src/state-paths.ts",      # fork's TS convenience wrapper
+    # util_paths reads personal-asset paths only — never writes
+    # runtime-state.
     "src/util_paths.py",
-    # core_heartbeat is intentionally dep-free (per its own comment at
-    # line 47) — it must run before any other Sutando module is loaded,
-    # so it inlines the workspace resolution logic rather than importing
-    # workspace_default. Verified inline logic matches the canonical
-    # resolver's default-case behavior.
+    "src/util_paths.ts",
+    # core_heartbeat is intentionally dep-free per its own comment —
+    # must run before any other Sutando module is loaded, so it inlines
+    # the workspace resolution rather than importing workspace_default.
     "src/core_heartbeat.py",
-
-    # --- MIGRATION-PENDING ---
-    # The following files use `Path(__file__).parent.parent` (the historic
-    # repo-root anti-pattern). On SUTANDO_WORKSPACE-set hosts they
-    # read/write at the wrong location. Each needs a follow-up PR to
-    # adopt `resolve_workspace()` from workspace_default. Listed here
-    # so a NEW file using the anti-pattern fails the test, while the
-    # known set remains visible.
-    #
-    # TODO: migrate to resolve_workspace() — file-by-file PRs.
-    "src/call-stats.py",                # CALLS_FILE = repo_root/results/calls/calls.jsonl
-    "src/check-pending-questions.py",   # WORKSPACE = repo_root, reads pending-questions.md
-    "src/daily-insight.py",             # CALLS_FILE = repo_root/results/calls/calls.jsonl
-    "src/detect-learned-skills.py",     # TASKS_ARCHIVE = repo_root/tasks/archive
-    "src/friction-detector.py",         # RESULTS_DIR = repo_root/results
-    "src/scan-call-logs.py",            # CALLS_FILE + STATE_FILE = repo_root/results/calls/
+    # --- TECH-DEBT ALLOWLIST (TODO: convert these to resolve_workspace()) ---
+    # These files were already shipping the documented incident shape
+    # (WORKSPACE = Path(__file__).parent.parent + workspace-state path
+    # composition) before this test was tightened. Allowlisted to keep
+    # CI green while individual fix PRs land. Each is a real bug:
+    # SUTANDO_WORKSPACE-aware installs will split-brain on these paths.
+    # Track in follow-up issues.
+    "src/call-stats.py",                # composes off Path(__file__).parent.parent
+    "src/check-pending-questions.py",   # defines WORKSPACE locally
+    "src/daily-insight.py",             # defines WORKSPACE locally
+    "src/detect-learned-skills.py",     # defines WORKSPACE locally
+    "src/friction-detector.py",         # defines WORKSPACE locally
+    "src/scan-call-logs.py",            # composes off Path(__file__).parent.parent
+    "src/cartesia-tts.ts",              # join(getWorkspace(), 'results', ...)
+    # Below: files where the resolver IS used elsewhere but a separate
+    # path (REPO_DIR for checkout walking) co-exists with workspace
+    # paths — same pattern @qingyun-wu identified for health-check.py.
+    "src/agent-api.py",
+    "src/github-webhook.py",
 }
 
 
-def _check_file(path: Path) -> tuple[bool, str]:
-    """Return (ok, reason). ok=True if the file is compliant."""
+def _is_comment_line(line: str, suffix: str) -> bool:
+    """Best-effort comment detection — used to skip lines that mention
+    the fallback shape in prose (docstrings, header comments)."""
+    s = line.strip()
+    if suffix == ".py":
+        return s.startswith("#") or s.startswith('"""') or s.startswith("'''")
+    if suffix in (".ts", ".tsx"):
+        return s.startswith("//") or s.startswith("*") or s.startswith("/*")
+    return False
+
+
+def _check_file(path: Path) -> list[str]:
+    """Return list of failure messages for `path` (empty = passing)."""
     rel = path.relative_to(REPO).as_posix()
     if rel in ALLOWLIST:
-        return True, "allowlisted"
+        return []
     try:
         src = path.read_text()
-    except Exception as e:
-        return True, f"unreadable ({e}); skipping"
+    except Exception:
+        return []
 
-    if not RUNTIME_STATE_REGEX.search(src):
-        return True, "no runtime-state references"
+    failures = []
+    suffix = path.suffix
+    lines = src.split("\n")
 
-    canonical_re = TS_CANONICAL if path.suffix in (".ts", ".tsx") else PY_CANONICAL
-    if canonical_re.search(src):
-        return True, "uses canonical accessor"
-
-    # Find the first offending line for a helpful error message.
-    for lineno, line in enumerate(src.split("\n"), 1):
-        if RUNTIME_STATE_REGEX.search(line):
-            return False, (
-                f"{rel}:{lineno}: references a runtime-state path "
-                f"({line.strip()!r}) without importing the canonical resolver. "
-                f"Use `state_paths.state_dir/state_path` (or `resolve_workspace`) "
-                f"in .py, or `state-paths.stateDir/statePath` (or "
-                f"`resolveWorkspace`) in .ts. If this file legitimately "
-                f"references these strings for non-runtime reasons, add "
-                f"{rel!r} to the ALLOWLIST in this test with a justification."
+    # Check 1: hand-rolled fallback COMPOSITION (positive anti-pattern,
+    # @qingyun-wu obs #2). Fires per-line so we can skip pure comments.
+    for lineno, line in enumerate(lines, 1):
+        if _is_comment_line(line, suffix):
+            continue
+        if HAND_ROLLED_COMPOSITION.search(line):
+            failures.append(
+                f"{rel}:{lineno}: composes a runtime-state path off a "
+                f"hand-rolled fallback ({line.strip()!r}). Use "
+                f"`resolve_workspace()` (Python) or `resolveWorkspace()` "
+                f"(TypeScript) — composing off `Path(__file__).parent.parent` "
+                f"or a `.sutando/workspace` literal is the historic incident "
+                f"shape documented in `src/workspace_default.py` and CLAUDE.md."
             )
-    return True, "no offending line found"  # shouldn't reach
+            break  # one per file is enough — fix the pattern, not each line
+
+    # Check 2: runtime-state reference without canonical resolver.
+    if RUNTIME_STATE_REGEX.search(src):
+        canonical_re = TS_CANONICAL if suffix in (".ts", ".tsx") else PY_CANONICAL
+        if not canonical_re.search(src):
+            for lineno, line in enumerate(lines, 1):
+                if _is_comment_line(line, suffix):
+                    continue
+                if RUNTIME_STATE_REGEX.search(line):
+                    failures.append(
+                        f"{rel}:{lineno}: references runtime-state path "
+                        f"({line.strip()!r}) without importing the canonical "
+                        f"resolver. In Python use `from workspace_default "
+                        f"import resolve_workspace`; in TypeScript use "
+                        f"`import {{ resolveWorkspace }} from "
+                        f"'./workspace_default.js'`. If this file legitimately "
+                        f"references these tokens for non-runtime reasons, "
+                        f"add {rel!r} to the ALLOWLIST in this test."
+                    )
+                    break
+
+    return failures
 
 
 def test_no_unauthorized_runtime_state_references():
-    """Every src/*.py and src/*.ts that references `tasks/` / `results/`
-    / `state/` / `notes/` / `data/` / `logs/` as a path component must
-    go through the canonical workspace resolver."""
     failures = []
-    for path in sorted(SRC.rglob("*.py")):
-        # Skip dunder dirs / __pycache__
-        if "/__pycache__/" in str(path):
-            continue
-        ok, reason = _check_file(path)
-        if not ok:
-            failures.append(reason)
-    for path in sorted(SRC.rglob("*.ts")):
-        if "/node_modules/" in str(path):
-            continue
-        ok, reason = _check_file(path)
-        if not ok:
-            failures.append(reason)
+    seen: set[str] = set()
+    # Per @qingyun-wu obs #4: scan .py + .ts + .tsx.
+    for pat in ("*.py", "*.ts", "*.tsx"):
+        for path in sorted(SRC.rglob(pat)):
+            if "/__pycache__/" in str(path) or "/node_modules/" in str(path):
+                continue
+            if str(path) in seen:
+                continue
+            seen.add(str(path))
+            failures.extend(_check_file(path))
     if failures:
         msg = "state-paths adoption violations:\n" + "\n".join(f"  - {f}" for f in failures)
         raise AssertionError(msg)
 
 
 def test_canonical_modules_themselves_are_present():
-    """Sanity: the wrappers we require everyone else to use must exist.
-    Catches a refactor that accidentally deletes the canonical module."""
-    assert (SRC / "state_paths.py").is_file(), "src/state_paths.py missing"
-    assert (SRC / "state-paths.ts").is_file(), "src/state-paths.ts missing"
+    """Sanity: the canonical resolver we require everyone else to use
+    must exist."""
     assert (SRC / "workspace_default.py").is_file(), "src/workspace_default.py missing"
 
 
 def test_allowlist_entries_actually_exist():
-    """Guard: an ALLOWLIST entry that no longer exists (file renamed /
-    deleted) is dead config. Forces ALLOWLIST to stay honest."""
+    """Guard: an ALLOWLIST entry that no longer exists is dead config."""
     for entry in ALLOWLIST:
         path = REPO / entry
         if not path.is_file():
-            # Allow allowlist to mention not-yet-existing files? No —
-            # an allowlist is for known files. Stale entries hide intent.
             raise AssertionError(
                 f"ALLOWLIST entry {entry!r} does not exist — remove it from the "
                 f"test if the file was deleted/renamed, or add the file back."
             )
+
+
+def test_hand_rolled_composition_detection_self_check():
+    """Self-test: the anti-pattern regex must match the documented
+    incident shapes. Catches a regex regression where someone weakens
+    the pattern without realizing it."""
+    cases = [
+        'Path(__file__).parent.parent / "tasks"',
+        "Path(__file__).resolve().parent.parent / 'results'",
+        '"/.sutando/workspace/tasks"',
+        "path.join(REPO_ROOT, 'tasks')",
+        "path.join(repoRoot, 'state')",
+    ]
+    for c in cases:
+        assert HAND_ROLLED_COMPOSITION.search(c), (
+            f"HAND_ROLLED_COMPOSITION regex no longer matches the documented "
+            f"incident shape: {c!r}"
+        )
+
+
+def test_hand_rolled_composition_negative_cases():
+    """Self-test: must NOT match comment-prose mentions of the fallback
+    path. These are legitimate documentation; the per-line check
+    skips comments, but the regex itself shouldn't be hair-trigger."""
+    negative_cases = [
+        # Prose docstring mention — not a composition.
+        '# (default ~/.sutando/workspace/), not the repo checkout.',
+        '* SUTANDO_WORKSPACE — Per-user workspace dir',
+        # Event listener strings — `data` is the event name, not a dir.
+        "req.on('data', (c) => ...)",
+        # File-level docstring just mentioning the path.
+        "// helpers resolve to `$SUTANDO_WORKSPACE` (default `~/.sutando/workspace/`)",
+    ]
+    for c in negative_cases:
+        # The regex itself may or may not match these (e.g. `~/.sutando/workspace/`
+        # in a comment is intentionally NOT in the composition regex because
+        # there's no trailing token); the per-line comment-skip handles the rest.
+        # This test pins that NO false positive matches the composition shape.
+        assert not HAND_ROLLED_COMPOSITION.search(c), (
+            f"HAND_ROLLED_COMPOSITION unexpectedly matched a non-composition "
+            f"form: {c!r}"
+        )
+
+
+def test_runtime_state_regex_self_check():
+    """Self-test: the runtime-state regex must match common forms,
+    including the single-quote + template-literal forms @qingyun-wu
+    pointed out the original regex was missing."""
+    cases = [
+        # Original cases the v1 regex already caught:
+        '"tasks"',
+        "'/tasks/'",
+        'REPO / "tasks"',
+        # New cases per @qingyun-wu obs #3:
+        "join(ws, 'tasks')",        # single-quoted bare
+        "`${ws}/tasks/${id}`",       # template literal with /tasks/
+        "`${repoRoot}/results`",     # template literal terminating at backtick
+    ]
+    for c in cases:
+        assert RUNTIME_STATE_REGEX.search(c), (
+            f"RUNTIME_STATE_REGEX no longer matches form: {c!r} — "
+            f"per @qingyun-wu obs #3 these are common path-building shapes "
+            f"that must trip the gate."
+        )
+
+
+def test_runtime_state_regex_no_data_false_positive():
+    """Regression guard: `'data'` as an event-listener string or
+    similar unrelated single-quoted bare name must NOT trip the gate
+    (the per-line check excludes `data` from the bare-quoted
+    alternation to avoid this false positive)."""
+    assert not RUNTIME_STATE_REGEX.search(
+        "req.on('data', (c: Buffer) => chunks.push(c));"
+    ), "false positive on `'data'` as event-listener string"
 
 
 def main():
@@ -226,6 +366,10 @@ def main():
         test_no_unauthorized_runtime_state_references,
         test_canonical_modules_themselves_are_present,
         test_allowlist_entries_actually_exist,
+        test_hand_rolled_composition_detection_self_check,
+        test_hand_rolled_composition_negative_cases,
+        test_runtime_state_regex_self_check,
+        test_runtime_state_regex_no_data_false_positive,
     ):
         try:
             fn()
