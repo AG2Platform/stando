@@ -16,8 +16,6 @@
  *                             Used by main.swift, voice-agent.ts tool hooks, and the page.
  *   GET  /toggle, /mute     — Broadcast SSE events (driven by menu-bar hotkeys).
  *   POST /note-viewing      — Write /tmp/sutando-note-viewing.json (consumed by the agent).
- *   GET  /paidsubscriptions/data  — subscription-scanner skill state JSON.
- *   POST /paidsubscriptions/scan  — queue an out-of-cycle scan (localhost-only).
  *   *    /vision/{state,start,stop,frame} — proxy to the voice-agent vision server.
  *
  * Lifecycle: started by voice-agent.ts in the same process — replaces the old
@@ -30,33 +28,17 @@
  */
 
 import { createServer } from 'node:http';
-import { writeFileSync, readFileSync, statSync, existsSync, mkdirSync, chmodSync } from 'node:fs';
-import { extname, normalize, sep, join } from 'node:path';
-import { homedir } from 'node:os';
+import { writeFileSync, readFileSync, statSync } from 'node:fs';
+import { extname, normalize, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTmuxStatus } from './tmux-status.js';
-import { statePath, statePathEnsured } from './state-paths.js';
+import { statePath } from './state-paths.js';
 
 // Dist directory for the React bundle (`client/`). Resolved once at module
 // load — web-server.ts lives in `src/`, so `../client/dist` lands at the
 // workspace root. PR-C step 6 retired the inline HTML fallback; `pnpm
 // build:client` must run for `/` to render anything.
 const CLIENT_DIST_DIR = fileURLToPath(new URL('../client/dist/', import.meta.url));
-
-// Repo root — web-server.ts lives in `src/`, so `../` is the checkout root.
-// The subscription-scanner skill's state file lives in the repo tree
-// (gitignored — personal financial data), populated by the agent on a scan.
-const REPO_DIR = fileURLToPath(new URL('../', import.meta.url));
-const SUBSCRIPTIONS_FILE = join(
-	REPO_DIR,
-	'skills',
-	'subscription-scanner',
-	'state',
-	'subscriptions.json'
-);
-
-// Slack bridge credential file — shared convention with Discord/Telegram.
-const SLACK_ENV_PATH = join(homedir(), '.claude', 'channels', 'slack', '.env');
 
 const STATIC_MIME_TYPES: Record<string, string> = {
 	'.html': 'text/html; charset=utf-8',
@@ -489,103 +471,6 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 					res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'parse failed' }));
 				}
 			});
-			return;
-		}
-
-		// Slack bridge credentials. Mirrors the Discord/Telegram convention —
-		// tokens live in `~/.claude/channels/slack/.env`, not the repo .env.
-		// GET reports only whether each token is set (never echoes the value);
-		// POST writes the file 0600. slack-bridge.py loads this file on start.
-		if (url.pathname === '/settings/slack' && req.method === 'GET') {
-			let botConfigured = false;
-			let appConfigured = false;
-			try {
-				if (existsSync(SLACK_ENV_PATH)) {
-					const env = readFileSync(SLACK_ENV_PATH, 'utf-8');
-					botConfigured = /^SLACK_BOT_TOKEN=.+/m.test(env);
-					appConfigured = /^SLACK_APP_TOKEN=.+/m.test(env);
-				}
-			} catch { /* report not-configured on any read error */ }
-			res.writeHead(200, { 'Content-Type': 'application/json' });
-			res.end(JSON.stringify({ botConfigured, appConfigured }));
-			return;
-		}
-
-		if (url.pathname === '/settings/slack' && req.method === 'POST') {
-			const chunks: Buffer[] = [];
-			req.on('data', (c: Buffer) => chunks.push(c));
-			req.on('end', () => {
-				try {
-					const body = JSON.parse(Buffer.concat(chunks).toString('utf-8'));
-					const botToken = typeof body.botToken === 'string' ? body.botToken.trim() : '';
-					const appToken = typeof body.appToken === 'string' ? body.appToken.trim() : '';
-					if (!botToken.startsWith('xoxb-') || !appToken.startsWith('xapp-')) {
-						res.writeHead(400, { 'Content-Type': 'application/json' });
-						res.end(JSON.stringify({ error: 'Bot token must start with "xoxb-" and app token with "xapp-".' }));
-						return;
-					}
-					mkdirSync(join(homedir(), '.claude', 'channels', 'slack'), { recursive: true });
-					writeFileSync(SLACK_ENV_PATH, `SLACK_BOT_TOKEN=${botToken}\nSLACK_APP_TOKEN=${appToken}\n`);
-					chmodSync(SLACK_ENV_PATH, 0o600);
-					res.writeHead(200, { 'Content-Type': 'application/json' });
-					res.end(JSON.stringify({ ok: true }));
-				} catch (e) {
-					res.writeHead(400, { 'Content-Type': 'application/json' });
-					res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'parse failed' }));
-				}
-			});
-			return;
-		}
-
-		// Paid-subscriptions dashboard data. Reads the subscription-scanner
-		// skill's state file (gitignored — populated by the agent during a
-		// scan). Returns an empty shape when the file is absent so the client
-		// renders a clean "no scan yet" state instead of erroring.
-		if (url.pathname === '/paidsubscriptions/data' && req.method === 'GET') {
-			let data: unknown = { last_scan: null, subscriptions: [], scan_history: [] };
-			try {
-				data = JSON.parse(readFileSync(SUBSCRIPTIONS_FILE, 'utf-8'));
-			} catch { /* missing or unparseable → default empty shape */ }
-			res.writeHead(200, { 'Content-Type': 'application/json' });
-			res.end(JSON.stringify(data));
-			return;
-		}
-
-		// Queue an out-of-cycle subscription scan. LOCALHOST-ONLY: the server
-		// binds 0.0.0.0, so without this gate anyone on the LAN (or a
-		// tailscale-funnel'd public URL) could enqueue an owner-tier task that
-		// the watcher runs with full agent privileges. Check the socket peer
-		// address directly — X-Forwarded-For is spoofable behind any proxy.
-		// The task body points at scan-prompt.md by path rather than inlining
-		// it, so a line in that file shaped like a task header (`source:`,
-		// `access_tier:`) can never be parsed as a real header.
-		if (url.pathname === '/paidsubscriptions/scan' && req.method === 'POST') {
-			const peer = req.socket.remoteAddress || '';
-			const isLocal =
-				peer === '127.0.0.1' || peer === '::1' || peer === '::ffff:127.0.0.1';
-			if (!isLocal) {
-				res.writeHead(403, { 'Content-Type': 'application/json' });
-				res.end(JSON.stringify({ error: 'Scan can only be triggered from localhost.' }));
-				return;
-			}
-			try {
-				const ts = Math.floor(Date.now() / 1000);
-				const id = `task-subscan-${ts}`;
-				const body =
-					[
-						`id: ${id}`,
-						`timestamp: ${new Date().toISOString()}`,
-						'task: Run an out-of-cycle paid-subscription scan. Read skills/subscription-scanner/scan-prompt.md and follow its instructions verbatim — update skills/subscription-scanner/state/subscriptions.json, snapshot history, and notify only on changes.',
-						'source: web',
-						'access_tier: owner',
-					].join('\n') + '\n';
-				writeFileSync(statePathEnsured(`tasks/${id}.txt`), body);
-				res.writeHead(200, { 'Content-Type': 'application/json' });
-				res.end(JSON.stringify({ ok: true, taskId: id }));
-			} catch (e) {
-				res.writeHead(500, { 'Content-Type': 'application/json' });
-				res.end(JSON.stringify({ error: e instanceof Error ? e.message : 'failed to queue scan' }));
-			}
 			return;
 		}
 

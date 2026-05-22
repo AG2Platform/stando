@@ -1,15 +1,20 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState, type ReactNode } from 'react';
 import { APP_COPY } from '@/const-values/app-copy';
 import { useConversation } from '@/hooks/useConversation';
 import { renderChatMarkdown } from '@/lib/chat-markdown';
 import type { TranscriptEntry } from '@/types/conversation';
 
 /**
- * Modern chat-bubble transcript. Replaces LegacyTranscript — same auto-
- * stick scrolling behavior, but every entry renders as a typed message
- * bubble (user → right purple, assistant → left neutral, system → centered
- * pill) so the conversation reads like a real chat product instead of a
- * flat "You: ... Sutando: ..." text dump.
+ * Chat-bubble transcript. Auto-stick scrolling on new entries; every
+ * entry renders as a typed message bubble (user → right inverted,
+ * assistant → left neutral, system → centered pill).
+ *
+ * The container is intentionally chrome-less (no border, no card bg) so
+ * it reads as a full-page chat thread rather than an embedded widget.
+ * It flex-1's to fill whatever vertical space the page hands it, and
+ * accepts an `emptyState` slot that ConversationPage uses to render the
+ * ChatGPT-style greeting + suggested-prompt cards when there's no
+ * conversation yet.
  */
 
 const STICK_THRESHOLD_PX = 80;
@@ -20,24 +25,43 @@ const ROLE_LABEL: Record<TranscriptEntry['role'], string> = {
 	system: 'System',
 };
 
+/*
+ * Each transcript entry is rendered as <wrapper><bubble/><CopyButton/></wrapper>.
+ *
+ * The wrapper is sized to its content (so the hover region matches the
+ * bubble's footprint, not the full row width) and carries the `group`
+ * class. The copy button is a sibling of the bubble — NOT a child — so
+ * revealing it on hover doesn't grow the bubble itself; it just fades
+ * into a reserved slot directly under the message.
+ */
+
 const BUBBLE_BASE =
-	'group flex max-w-[78%] flex-col gap-1 rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed break-words';
+	'flex flex-col gap-1 rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed break-words';
 
 const BUBBLE_USER =
-	'self-end rounded-br-md border border-(--text)/10 bg-(--text) text-(--bg) shadow-[0_12px_24px_-18px_rgba(0,0,0,0.55)]';
+	'rounded-br-md border border-(--text)/10 bg-(--text) text-(--bg) shadow-[0_12px_24px_-18px_rgba(0,0,0,0.55)]';
 const BUBBLE_ASSISTANT =
-	'self-start rounded-bl-md border border-(--border) bg-(--surface-elev) text-(--text)';
+	'rounded-bl-md border border-(--border) bg-(--surface-elev) text-(--text)';
 const BUBBLE_SYSTEM =
-	'self-center rounded-full border border-dashed border-(--border) bg-transparent px-2.5 py-1 text-xs text-(--text-muted)';
+	'rounded-full border border-dashed border-(--border) bg-transparent px-2.5 py-1 text-xs text-(--text-muted)';
 
-const classFor = (entry: TranscriptEntry): string => {
+const WRAPPER_USER = 'group flex max-w-[78%] flex-col items-end self-end';
+const WRAPPER_ASSISTANT = 'group flex max-w-[78%] flex-col items-start self-start';
+const WRAPPER_SYSTEM = 'flex max-w-full flex-col self-center';
+
+const bubbleClassFor = (entry: TranscriptEntry): string => {
 	if (entry.role === 'system') return `${BUBBLE_BASE} ${BUBBLE_SYSTEM}`;
 	const variant = entry.role === 'user' ? BUBBLE_USER : BUBBLE_ASSISTANT;
 	const interim = entry.interim ? 'opacity-60' : '';
 	return `${BUBBLE_BASE} ${variant} ${interim}`.trim();
 };
 
-function CopyBubble({ text }: { text: string }) {
+const wrapperClassFor = (entry: TranscriptEntry): string => {
+	if (entry.role === 'system') return WRAPPER_SYSTEM;
+	return entry.role === 'user' ? WRAPPER_USER : WRAPPER_ASSISTANT;
+};
+
+function CopyButton({ text }: { text: string }) {
 	const [copied, setCopied] = useState(false);
 	const timer = useRef<number | null>(null);
 	useEffect(
@@ -58,7 +82,8 @@ function CopyBubble({ text }: { text: string }) {
 		<button
 			type="button"
 			onClick={onClick}
-			className="hidden self-end rounded-full border border-current/25 bg-transparent px-2 py-0.5 text-[10px] opacity-70 group-hover:inline-flex"
+			aria-label={copied ? 'Copied to clipboard' : 'Copy message'}
+			className="mt-1 rounded-full border border-(--border) bg-(--surface)/80 px-2 py-0.5 text-[10px] text-(--text-muted) opacity-0 transition-opacity duration-100 hover:text-(--text) group-hover:opacity-100 focus-visible:opacity-100"
 		>
 			{copied ? 'Copied' : 'Copy'}
 		</button>
@@ -110,9 +135,10 @@ function MediaSlot({ entry }: { entry: TranscriptEntry }) {
 
 export interface ConversationStreamProps {
 	errorMessage?: string | null;
+	emptyState?: ReactNode;
 }
 
-export default function ConversationStream({ errorMessage }: ConversationStreamProps) {
+export default function ConversationStream({ errorMessage, emptyState }: ConversationStreamProps) {
 	const { entries } = useConversation();
 	const scrollerRef = useRef<HTMLDivElement | null>(null);
 	const stickyRef = useRef(true);
@@ -141,25 +167,29 @@ export default function ConversationStream({ errorMessage }: ConversationStreamP
 			ref={scrollerRef}
 			role="log"
 			aria-live="polite"
-			className="flex max-h-[56vh] min-h-[240px] flex-col gap-2.5 overflow-y-auto rounded-[20px] border border-(--border)/80 bg-(--surface)/85 p-3.5"
+			className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-1 py-4"
 		>
 			{isEmpty ? (
-				<div className="px-3 py-12 text-center text-sm text-(--text-muted)">
-					{APP_COPY.convStreamEmpty}
-				</div>
+				emptyState ?? (
+					<div className="m-auto px-3 py-12 text-center text-sm text-(--text-muted)">
+						{APP_COPY.convStreamEmpty}
+					</div>
+				)
 			) : (
 				entries.map((entry) => {
 					const showCopy = !entry.interim && entry.role !== 'system' && entry.text.length > 0;
 					return (
-						<div key={entry.id} className={classFor(entry)}>
-							{entry.role !== 'system' ? (
-								<span className="text-[10px] uppercase tracking-[0.06em] opacity-65">
-									{ROLE_LABEL[entry.role]}
-								</span>
-							) : null}
-							<MessageText entry={entry} />
-							<MediaSlot entry={entry} />
-							{showCopy ? <CopyBubble text={entry.text} /> : null}
+						<div key={entry.id} className={wrapperClassFor(entry)}>
+							<div className={bubbleClassFor(entry)}>
+								{entry.role !== 'system' ? (
+									<span className="text-[10px] uppercase tracking-[0.06em] opacity-65">
+										{ROLE_LABEL[entry.role]}
+									</span>
+								) : null}
+								<MessageText entry={entry} />
+								<MediaSlot entry={entry} />
+							</div>
+							{showCopy ? <CopyButton text={entry.text} /> : null}
 						</div>
 					);
 				})

@@ -5,7 +5,6 @@
  * CLAUDE.md § Frontend Conventions ("no fetch calls in components").
  */
 
-import type { SubscriptionsData } from '@/types/subscription';
 import { resolveConfig } from './config';
 
 export type AgentState = 'idle' | 'listening' | 'speaking' | 'working' | 'seeing';
@@ -38,68 +37,11 @@ export async function postMuteState(patch: {
 	await fetch(apiUrl(`/mute-state?${qs.toString()}`)).catch(() => {});
 }
 
-export interface SlackSettingsStatus {
-	botConfigured: boolean;
-	appConfigured: boolean;
-}
-
-/**
- * Report whether the Slack bridge tokens are already on disk
- * (`~/.claude/channels/slack/.env`). The endpoint never echoes the token
- * values — only a configured/not-configured flag per token.
- */
-export async function fetchSlackSettings(signal?: AbortSignal): Promise<SlackSettingsStatus> {
-	const res = await fetch(apiUrl('/settings/slack'), { signal });
-	if (!res.ok) throw new Error(`/settings/slack returned ${res.status}`);
-	return (await res.json()) as SlackSettingsStatus;
-}
-
-/**
- * Persist Slack bridge credentials. The server validates the `xoxb-` /
- * `xapp-` prefixes and writes `~/.claude/channels/slack/.env` mode 0600.
- */
-export async function saveSlackSettings(botToken: string, appToken: string): Promise<void> {
-	const res = await fetch(apiUrl('/settings/slack'), {
-		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ botToken, appToken }),
-	});
-	if (!res.ok) {
-		const detail = (await res.json().catch(() => null)) as { error?: string } | null;
-		throw new Error(detail?.error ?? `/settings/slack returned ${res.status}`);
-	}
-}
-
 export interface StandIdentity {
 	name?: string;
 	nameOrigin?: string;
 	avatarGenerated?: boolean;
 	avatarUrl?: string;
-}
-
-/**
- * Fetch the agent-maintained subscription tracker
- * (`skills/subscription-scanner/state/subscriptions.json`). The server
- * returns an empty shape when no scan has run yet, so this never 404s.
- */
-export async function fetchSubscriptions(signal?: AbortSignal): Promise<SubscriptionsData> {
-	const res = await fetch(apiUrl('/paidsubscriptions/data'), { signal });
-	if (!res.ok) throw new Error(`/paidsubscriptions/data returned ${res.status}`);
-	return (await res.json()) as SubscriptionsData;
-}
-
-/**
- * Queue an out-of-cycle subscription scan. The server gates this to
- * localhost and writes a task file the next loop pass picks up — the
- * scan itself runs asynchronously in the agent.
- */
-export async function triggerSubscriptionScan(): Promise<{ taskId: string }> {
-	const res = await fetch(apiUrl('/paidsubscriptions/scan'), { method: 'POST' });
-	if (!res.ok) {
-		const detail = (await res.json().catch(() => null)) as { error?: string } | null;
-		throw new Error(detail?.error ?? `/paidsubscriptions/scan returned ${res.status}`);
-	}
-	return (await res.json()) as { taskId: string };
 }
 
 export interface VisionState {
