@@ -31,6 +31,8 @@ File round-trip:
                files_upload_v2.
 """
 
+from __future__ import annotations
+
 import json
 import mimetypes
 import os
