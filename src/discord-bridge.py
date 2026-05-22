@@ -2940,14 +2940,22 @@ async def poll_results():
                             first = False
                             reply_chunks += 1
 
-                    # Send files (allowlist-gated; see _is_path_sendable)
+                    # Send files (allowlist-gated; see _is_path_sendable).
+                    # Missing-file case: the regex eagerly extracts every
+                    # `[file: /path]` substring, including ones that appear
+                    # inside agent prose (e.g. inline-code quoting the marker
+                    # convention itself: `\\\`[file: /tmp/x.png]\\\``). For
+                    # those, the file doesn't exist and shipping a
+                    # `(file not found: ...)` Discord message to the user is
+                    # confusing noise. Log to stderr for operator visibility
+                    # on real typos; don't surface to the user.
                     for fpath in files:
                         fpath = os.path.expanduser(fpath.strip())
                         if _is_path_sendable(fpath):
                             await channel.send(file=discord.File(fpath))
                             print(f"  Sent file: {fpath}")
                         elif not os.path.isfile(fpath):
-                            await channel.send(f"(file not found: {fpath})")
+                            print(f"  [file marker, file not found — likely a prose quotation]: {fpath}", file=sys.stderr, flush=True)
                         else:
                             await channel.send(f"(file not allowed: {fpath})")
                             print(f"  REJECTED file (not in allowlist): {fpath}", flush=True)
@@ -3076,7 +3084,10 @@ async def poll_proactive():
                             if _is_path_sendable(fpath):
                                 await dm.send(file=discord.File(fpath))
                             elif not os.path.isfile(fpath):
-                                await dm.send(f"(file not found: {fpath})")
+                                # See poll_results: prose containing
+                                # `[file:/path]` substrings triggers this
+                                # without intending a real send. Log only.
+                                print(f"  [proactive] file marker, file not found: {fpath}", file=sys.stderr, flush=True)
                             else:
                                 await dm.send(f"(file not allowed: {fpath})")
                                 print(f"  [proactive] REJECTED file: {fpath}", flush=True)
@@ -3230,7 +3241,10 @@ async def poll_dm_fallback():
                                     await target_channel.send(file=discord.File(fpath))
                                     print(f"  [dm-fallback channel-redirect] sent file: {fpath}", flush=True)
                                 elif not os.path.isfile(fpath):
-                                    await target_channel.send(f"(file not found: {fpath})")
+                                    # See poll_results: prose-quoted markers
+                                    # trigger this without intending a real
+                                    # send. Log only.
+                                    print(f"  [dm-fallback channel-redirect] file marker, file not found: {fpath}", file=sys.stderr, flush=True)
                             print(f"  [dm-fallback channel-redirect] sent {f.name} to channel {target_channel_id}", flush=True)
                             _task_file = TASKS_DIR / f"{_task_id}.txt"
                             if _task_file.exists():
