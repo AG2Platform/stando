@@ -110,10 +110,10 @@ const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
 const VOICE_NATIVE_AUDIO_MODEL = process.env.VOICE_NATIVE_AUDIO_MODEL || 'gemini-3.1-flash-live-preview';
 
 // SUBAGENT_PROVIDER picks the LLM used for subagent text generation (Vercel
-// AI SDK calls fired from voice tool execution). Default 'openai' as of the
-// May 2026 migration. Independent from the realtime voice transport — the
-// phone call still uses Gemini Live unless that's switched separately.
-const SUBAGENT_PROVIDER = (process.env.SUBAGENT_PROVIDER || 'openai').toLowerCase() as 'gemini' | 'openai';
+// AI SDK calls fired from voice tool execution). Default 'gemini' (no
+// behavior change for existing setups); set to 'openai' to route subagent
+// text through gpt-4.1-mini. Independent from the realtime voice transport.
+const SUBAGENT_PROVIDER = (process.env.SUBAGENT_PROVIDER || 'gemini').toLowerCase() as 'gemini' | 'openai';
 if (SUBAGENT_PROVIDER !== 'gemini' && SUBAGENT_PROVIDER !== 'openai') {
 	console.error(`Error: SUBAGENT_PROVIDER must be 'gemini' or 'openai' (got "${SUBAGENT_PROVIDER}")`);
 	process.exit(1);
@@ -162,8 +162,7 @@ if (!GEMINI_API_KEY || !TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHON
 	process.exit(1);
 }
 if (SUBAGENT_PROVIDER === 'openai' && !OPENAI_API_KEY) {
-	console.error('Error: OPENAI_API_KEY is required when SUBAGENT_PROVIDER=openai (default).');
-	console.error('Set OPENAI_API_KEY in .env or set SUBAGENT_PROVIDER=gemini to keep the previous behavior.');
+	console.error('Error: OPENAI_API_KEY is required when SUBAGENT_PROVIDER=openai.');
 	process.exit(1);
 }
 if (!NGROK_AUTHTOKEN) {

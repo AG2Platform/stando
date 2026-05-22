@@ -3,15 +3,15 @@
 Media generation.
 
 Supports:
-- Text-to-image: generate from a text prompt (OpenAI gpt-image-1 by default
-  as of May 2026 migration; Gemini Flash Image when IMAGE_PROVIDER=gemini)
+- Text-to-image: generate from a text prompt (Gemini Flash Image by default;
+  OpenAI gpt-image-1 when IMAGE_PROVIDER=openai)
 - Image editing: modify an existing image with a text prompt (both providers)
 - Text-to-video: generate video from a text prompt (Veo — Gemini only; no
   OpenAI equivalent yet)
 - Image-to-video: generate video from reference image + prompt (Veo only)
 
 Provider selection:
-  IMAGE_PROVIDER env var: 'openai' (default) | 'gemini'
+  IMAGE_PROVIDER env var: 'gemini' (default) | 'openai'
   --image-provider CLI flag overrides the env var.
   Video always uses Gemini Veo regardless of IMAGE_PROVIDER.
 
@@ -454,7 +454,7 @@ def main():
         "--image-provider",
         default=None,
         choices=["openai", "gemini"],
-        help="Override IMAGE_PROVIDER env var. Default: 'openai' (May 2026 migration).",
+        help="Override IMAGE_PROVIDER env var. Default: 'gemini'. Set 'openai' to use gpt-image-1.",
     )
 
     args = parser.parse_args()
@@ -463,7 +463,7 @@ def main():
 
     # Provider routing for images. Video stays on Gemini Veo regardless —
     # OpenAI has no public video model yet.
-    image_provider = (args.image_provider or os.environ.get("IMAGE_PROVIDER") or "openai").lower()
+    image_provider = (args.image_provider or os.environ.get("IMAGE_PROVIDER") or "gemini").lower()
     if image_provider not in ("openai", "gemini"):
         print(f"Error: IMAGE_PROVIDER must be 'openai' or 'gemini' (got '{image_provider}')", file=sys.stderr)
         sys.exit(1)

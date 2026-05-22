@@ -11,10 +11,9 @@
  *   4. Open http://localhost:8080 in Chrome and click Connect
  *
  * Environment:
- *   GEMINI_API_KEY       — Optional unless VOICE_PROVIDER=gemini or SUBAGENT_PROVIDER=gemini.
- *                          When set, used for vision + STT fallback. As of May 2026
- *                          subagent text generation defaults to OpenAI, so a Gemini
- *                          key is no longer strictly required for voice.
+ *   GEMINI_API_KEY       — Required (text LLM + vision + STT fallback). Used by the
+ *                          default voice transport, subagent LLM, vision pipelines,
+ *                          and image gen unless the matching *_PROVIDER env opts out.
  *   GEMINI_VOICE_API_KEY — Optional: separate key for the Gemini Live voice session.
  *                          Falls back to GEMINI_API_KEY. Useful for isolating voice
  *                          (free-tier eligible) from paid-tier spend on a single key.
@@ -23,12 +22,11 @@
  *                          server-side compression; OpenAI Realtime offers in-place
  *                          session updates and lower-latency tool turns but runs at
  *                          24 kHz (vs Gemini's 16 kHz) and has no resumption.
- *   SUBAGENT_PROVIDER    — Optional: 'openai' (default, May 2026 migration) | 'gemini'.
- *                          Selects the LLM used for background subagent text generation
- *                          (Vercel AI SDK calls fired from voice tool execution).
- *                          Independent from VOICE_PROVIDER — mix-and-match supported.
- *   OPENAI_API_KEY       — Required when VOICE_PROVIDER=openai or SUBAGENT_PROVIDER=openai
- *                          (the latter is the default).
+ *   SUBAGENT_PROVIDER    — Optional: 'gemini' (default) | 'openai'. Selects the LLM
+ *                          used for background subagent text generation (Vercel AI SDK
+ *                          calls fired from voice tool execution). Independent from
+ *                          VOICE_PROVIDER — mix-and-match supported.
+ *   OPENAI_API_KEY       — Required only when any *_PROVIDER env is set to 'openai'.
  *   OPENAI_VOICE_MODEL   — Optional: OpenAI Realtime model id (default: 'gpt-realtime').
  *   OPENAI_VOICE_NAME    — Optional: OpenAI Realtime voice (default: 'coral').
  *   SUBAGENT_OPENAI_MODEL— Optional: OpenAI chat model for subagents (default: 'gpt-4.1-mini').
@@ -137,11 +135,10 @@ const OPENAI_VOICE_NAME = process.env.OPENAI_VOICE_NAME || 'coral';
 
 // SUBAGENT_PROVIDER picks the LLM that powers background subagents (the
 // `model:` field on VoiceSession — Vercel AI SDK calls, not the realtime
-// transport). Default 'openai' as of the May 2026 migration; set to 'gemini'
-// to keep the previous Google subagent. Independent from VOICE_PROVIDER so
-// users can mix-and-match (e.g. OpenAI Realtime voice + Gemini subagents,
-// or vice versa).
-const SUBAGENT_PROVIDER = (process.env.SUBAGENT_PROVIDER || 'openai').toLowerCase() as 'gemini' | 'openai';
+// transport). Default 'gemini' (no behavior change for existing setups);
+// set to 'openai' to route subagent text through gpt-4.1-mini instead.
+// Independent from VOICE_PROVIDER so users can mix-and-match.
+const SUBAGENT_PROVIDER = (process.env.SUBAGENT_PROVIDER || 'gemini').toLowerCase() as 'gemini' | 'openai';
 if (SUBAGENT_PROVIDER !== 'gemini' && SUBAGENT_PROVIDER !== 'openai') {
 	console.error(`Error: SUBAGENT_PROVIDER must be 'gemini' or 'openai' (got "${SUBAGENT_PROVIDER}")`);
 	process.exit(1);
@@ -257,8 +254,7 @@ if (CARTESIA_API_KEY) {
 const google = createGoogleGenerativeAI({ apiKey: GEMINI_VOICE_API_KEY_ENV || 'BYOK_MISSING_managed_voice_only' });
 
 if (SUBAGENT_PROVIDER === 'openai' && !OPENAI_API_KEY) {
-	console.error(`Error: OPENAI_API_KEY is required when SUBAGENT_PROVIDER=openai (default).`);
-	console.error(`Set OPENAI_API_KEY in .env or set SUBAGENT_PROVIDER=gemini to keep the previous behavior.`);
+	console.error(`Error: OPENAI_API_KEY is required when SUBAGENT_PROVIDER=openai.`);
 	process.exit(1);
 }
 const openai = SUBAGENT_PROVIDER === 'openai'

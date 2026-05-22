@@ -20,8 +20,16 @@
  *
  * ## Env
  *   DISCORD_BOT_TOKEN  — bot token (~/.claude/channels/discord/.env)
- *   GEMINI_API_KEY     — required
+ *   GEMINI_API_KEY     — required (default voice transport + subagent LLM are Gemini)
  *   VOICE_MODEL / VOICE_NATIVE_AUDIO_MODEL — mirrors voice-agent.ts
+ *   VOICE_PROVIDER     — 'gemini' (default) | 'openai'. Realtime transport.
+ *   SUBAGENT_PROVIDER  — 'gemini' (default) | 'openai'. Subagent text LLM.
+ *   STT_PROVIDER       — 'auto' (default, transport built-in) | 'openai' | 'gemini'.
+ *   OPENAI_API_KEY     — required when any *_PROVIDER=openai (subagent default).
+ *   OPENAI_VOICE_MODEL — OpenAI Realtime model id (default: 'gpt-realtime').
+ *   OPENAI_VOICE_NAME  — OpenAI Realtime voice (default: 'coral').
+ *   SUBAGENT_OPENAI_MODEL — OpenAI chat model for subagents (default: 'gpt-4.1-mini').
+ *   STT_OPENAI_MODEL   — OpenAI transcription model (default: 'gpt-4o-mini-transcribe').
  *   SUTANDO_WORKSPACE  — workspace root for tasks/results/data
  */
 
@@ -35,8 +43,10 @@ _dotenvConfig({ path: join(process.env.HOME ?? '', '.claude/channels/discord/.en
 
 import { fileURLToPath } from 'node:url';
 import { execSync, spawn } from 'node:child_process';
-import { VoiceSession, type ToolDefinition, type MainAgent } from 'bodhi-realtime-agent';
+import { VoiceSession, OpenAIRealtimeTransport, type ToolDefinition, type MainAgent, type LLMTransport } from 'bodhi-realtime-agent';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { createOpenAI } from '@ai-sdk/openai';
+import { OpenAIWhisperSTTProvider } from '../../../src/openai-whisper-stt-provider.js';
 import { z } from 'zod';
 import { Client, GatewayIntentBits, ChannelType } from 'discord.js';
 import {
@@ -77,6 +87,27 @@ const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
 const VOICE_NATIVE_AUDIO_MODEL =
 	process.env.VOICE_NATIVE_AUDIO_MODEL || 'gemini-3.1-flash-live-preview';
 
+// Provider switches — same shape as voice-agent.ts. VOICE_PROVIDER picks the
+// realtime transport; SUBAGENT_PROVIDER picks the text-LLM for subagents;
+// STT_PROVIDER picks the transcription path. Defaults match voice-agent.ts.
+const VOICE_PROVIDER = (process.env.VOICE_PROVIDER || 'gemini').toLowerCase() as 'gemini' | 'openai';
+if (VOICE_PROVIDER !== 'gemini' && VOICE_PROVIDER !== 'openai') {
+	console.error(`Error: VOICE_PROVIDER must be 'gemini' or 'openai' (got "${VOICE_PROVIDER}")`); process.exit(1);
+}
+const SUBAGENT_PROVIDER = (process.env.SUBAGENT_PROVIDER || 'gemini').toLowerCase() as 'gemini' | 'openai';
+if (SUBAGENT_PROVIDER !== 'gemini' && SUBAGENT_PROVIDER !== 'openai') {
+	console.error(`Error: SUBAGENT_PROVIDER must be 'gemini' or 'openai' (got "${SUBAGENT_PROVIDER}")`); process.exit(1);
+}
+const STT_PROVIDER = (process.env.STT_PROVIDER || 'auto').toLowerCase() as 'auto' | 'openai' | 'gemini';
+if (!['auto', 'openai', 'gemini'].includes(STT_PROVIDER)) {
+	console.error(`Error: STT_PROVIDER must be 'auto', 'openai', or 'gemini' (got "${STT_PROVIDER}")`); process.exit(1);
+}
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? '';
+const OPENAI_VOICE_MODEL = process.env.OPENAI_VOICE_MODEL || 'gpt-realtime';
+const OPENAI_VOICE_NAME = process.env.OPENAI_VOICE_NAME || 'coral';
+const SUBAGENT_OPENAI_MODEL = process.env.SUBAGENT_OPENAI_MODEL || 'gpt-4.1-mini';
+const STT_OPENAI_MODEL = process.env.STT_OPENAI_MODEL || 'gpt-4o-mini-transcribe';
+
 const TREAT_AS_OWNER = (process.env.DISCORD_VOICE_OWNER ?? 'true') !== 'false';
 
 // CLI: --guild <id> --channel <voice_channel_id>
@@ -87,7 +118,21 @@ function getArg(name: string): string | undefined {
 const GUILD_ID = getArg('guild');
 const CHANNEL_ID = getArg('channel');
 
-if (!GEMINI_API_KEY) { console.error('Error: GEMINI_API_KEY required'); process.exit(1); }
+if (VOICE_PROVIDER === 'gemini' && !GEMINI_API_KEY) {
+	console.error('Error: GEMINI_API_KEY required when VOICE_PROVIDER=gemini'); process.exit(1);
+}
+if (SUBAGENT_PROVIDER === 'gemini' && !GEMINI_API_KEY) {
+	console.error('Error: GEMINI_API_KEY required when SUBAGENT_PROVIDER=gemini'); process.exit(1);
+}
+const _needsOpenAI =
+	VOICE_PROVIDER === 'openai' || SUBAGENT_PROVIDER === 'openai' || STT_PROVIDER === 'openai';
+if (_needsOpenAI && !OPENAI_API_KEY) {
+	console.error(
+		`Error: OPENAI_API_KEY required (one of VOICE_PROVIDER, SUBAGENT_PROVIDER, STT_PROVIDER is 'openai').\n` +
+			`Set OPENAI_API_KEY in .env, or set the offending switches to 'gemini' to keep the old behavior.`,
+	);
+	process.exit(1);
+}
 if (!DISCORD_BOT_TOKEN) { console.error('Error: DISCORD_BOT_TOKEN required'); process.exit(1); }
 if (!GUILD_ID || !CHANNEL_ID) {
 	console.error('Error: --guild <id> --channel <voice_channel_id> required');
@@ -99,7 +144,12 @@ mkdirSync(RESULTS_DIR, { recursive: true });
 mkdirSync(TASKS_DIR, { recursive: true });
 
 const ts = () => new Date().toISOString().slice(11, 23);
-const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY });
+const google = createGoogleGenerativeAI({ apiKey: GEMINI_API_KEY || 'BYOK_MISSING_subagent_openai_only' });
+const openai = SUBAGENT_PROVIDER === 'openai' ? createOpenAI({ apiKey: OPENAI_API_KEY }) : null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const subagentModel: any = SUBAGENT_PROVIDER === 'openai'
+	? openai!(SUBAGENT_OPENAI_MODEL)
+	: google(VOICE_MODEL);
 
 // --- Lazy vision attach (mirrors conversation-server) -----------------------
 
@@ -577,18 +627,39 @@ async function createVoiceSession(connection: VoiceConnection): Promise<DiscordV
 
 	const agent = buildAgent(s);
 
+	// Realtime transport selection — Gemini Live (default) or OpenAI Realtime.
+	// apiKey on VoiceSessionConfig is ignored by bodhi when transport is provided,
+	// so a placeholder is fine for the OpenAI path.
+	const openAiTransport: LLMTransport | undefined = VOICE_PROVIDER === 'openai'
+		? new OpenAIRealtimeTransport({
+			apiKey: OPENAI_API_KEY,
+			model: OPENAI_VOICE_MODEL,
+			voice: OPENAI_VOICE_NAME,
+		})
+		: undefined;
+	const sttProvider = STT_PROVIDER === 'openai'
+		? new OpenAIWhisperSTTProvider({ apiKey: OPENAI_API_KEY, model: STT_OPENAI_MODEL })
+		: undefined;
+	console.log(
+		`${ts()} [Voice] Transport: ${VOICE_PROVIDER === 'openai' ? `OpenAI Realtime (model=${OPENAI_VOICE_MODEL})` : `Gemini Live (model=${VOICE_NATIVE_AUDIO_MODEL})`} | ` +
+			`Subagent: ${SUBAGENT_PROVIDER === 'openai' ? `OpenAI (${SUBAGENT_OPENAI_MODEL})` : `Gemini (${VOICE_MODEL})`} | ` +
+			`STT: ${STT_PROVIDER === 'openai' ? `Whisper (${STT_OPENAI_MODEL})` : STT_PROVIDER}`,
+	);
+
 	const session = new VoiceSession({
 		sessionId,
 		userId: 'discord_voice_user',
-		apiKey: GEMINI_API_KEY,
+		apiKey: openAiTransport ? 'OPENAI_TRANSPORT_PROVIDED' : GEMINI_API_KEY,
 		agents: [agent],
 		initialAgent: 'discord-voice',
 		port: bodhiPort,
 		host: '127.0.0.1',
-		model: google(VOICE_MODEL),
+		model: subagentModel,
 		geminiModel: VOICE_NATIVE_AUDIO_MODEL,
 		googleSearch: true,
 		speechConfig: { voiceName: 'Aoede' },
+		...(openAiTransport ? { transport: openAiTransport } : {}),
+		...(sttProvider ? { sttProvider } : {}),
 		hooks: {
 			onToolCall: (e) => {
 				console.log(`${ts()} [Tool] ${e.toolName} (${e.execution})`);
