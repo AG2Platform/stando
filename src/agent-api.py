@@ -387,6 +387,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     lines = section.strip().split('\n')
                     title = lines[0].strip()
                     body = '\n'.join(lines[1:])
+                    # The "## Open" section holds questions as top-level
+                    # bullet items — the format the proactive loop writes
+                    # (see CLAUDE.md / the proactive-loop skill). Surface
+                    # each bullet as its own question so loop-written
+                    # questions are not invisible to the web UI Asks panel.
+                    if title.lower() == 'open':
+                        for j, bullet in enumerate(
+                            re.findall(r'^- (.+)$', body, flags=re.MULTILINE)
+                        ):
+                            # Skip bullets already annotated fixed/resolved.
+                            if re.search(r'\b(FIXED|RESOLVED|ANSWERED)\b', bullet):
+                                continue
+                            m = re.match(r'\*\*(.+?)\*\*', bullet)
+                            b_title = m.group(1).strip() if m else bullet[:80].strip()
+                            questions.append({
+                                "id": f"Q{i}-{j}",
+                                "text": b_title,
+                                "detail": bullet.strip(),
+                            })
+                        continue
+                    # The "## Resolved" section is never surfaced.
+                    if title.lower() == 'resolved':
+                        continue
                     # Skip preamble (sections without question metadata)
                     if '**Status:**' not in body and '**Options:**' not in body:
                         continue
