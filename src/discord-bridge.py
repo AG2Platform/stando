@@ -2035,6 +2035,12 @@ client = discord.Client(intents=intents)
 @client.event
 async def on_ready():
     print(f"Discord bridge ready: {client.user}")
+    # Restart-safety: REST-catch-up missed DMs from the disconnect
+    # window. Discord gateway IDENTIFY (post-RESUME-expiry reconnect)
+    # does NOT replay `MESSAGE_CREATE` events that arrived during the
+    # gap. The 2026-05-21 incident lost the owner's 21:14 PT DM this
+    # exact way. See `_catchup_missed_dms` for the replay flow.
+    client.loop.create_task(_catchup_missed_dms())
     # Start polling loops
     client.loop.create_task(poll_results())
     client.loop.create_task(poll_approved())
@@ -2117,6 +2123,18 @@ async def _handle_discord_message(message, force=False):
     text = message.content or ""
     is_dm = isinstance(message.channel, discord.DMChannel)
     channel_name = getattr(message.channel, 'name', 'DM')
+
+    # Advance the DM checkpoint immediately for any DM we observe —
+    # whether or not we end up processing it as an owner task. The
+    # checkpoint's purpose is "REST-catch-up should not re-replay this
+    # ID on the next reconnect"; recording it now (before downstream
+    # filters drop the message) avoids the catch-up loop replaying
+    # the same out-of-allowlist / out-of-tier message forever.
+    if is_dm and hasattr(message, "id"):
+        try:
+            _update_dm_checkpoint(message.channel.id, message.id)
+        except Exception as e:
+            print(f"  [dm-checkpoint] update failed: {e}", flush=True)
 
     print(f"  [msg] #{channel_name} @{username}: {text[:80]} (mentions: {[str(m) for m in message.mentions]}, is_dm: {is_dm}, embeds: {len(message.embeds)}, type: {message.type}, ref: {message.reference is not None})", flush=True)
     # Debug: log message snapshots for forwarded messages
@@ -2733,6 +2751,130 @@ async def poll_approved():
         except Exception as e:
             print(f"  Approved poll error: {e}")
         await asyncio.sleep(3)
+
+
+# Discord gateway disconnect that outlasts the RESUME window forces
+# discord.py into a full IDENTIFY reconnect — and IDENTIFY does NOT
+# replay `MESSAGE_CREATE` events that arrived during the gap. They're
+# lost. Real incident: 2026-05-21 21:14 PT, a >75-minute disconnect
+# stranded the owner's "B + A in that order" message; the next morning
+# the bridge had no record of it at all (had to manually fetch via REST).
+#
+# The fix: track the last DM message ID we successfully processed per
+# DM channel, and on every `on_ready` (which fires on full reconnect),
+# REST-fetch messages since that checkpoint and replay them through
+# `_handle_discord_message`. Discord message IDs are Snowflake-monotonic
+# so `after=<id>` reliably returns only newer messages.
+DM_CHECKPOINT_FILE = REPO / "state" / "discord-dm-checkpoint.json"
+
+def _atomic_write_dm_checkpoint(data: dict) -> None:
+    """Write JSON atomically — same shape as _atomic_write_pending_replies."""
+    try:
+        DM_CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = DM_CHECKPOINT_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(DM_CHECKPOINT_FILE)
+    except Exception:
+        pass
+
+
+def _load_dm_checkpoint() -> dict:
+    """Read `state/discord-dm-checkpoint.json`. Maps
+    `channel_id (str) → last_processed_message_id (str)`. Returns
+    `{}` on missing/malformed file (fail-open: a missing checkpoint
+    just skips the catch-up; no data corruption)."""
+    try:
+        if not DM_CHECKPOINT_FILE.exists():
+            return {}
+        data = json.loads(DM_CHECKPOINT_FILE.read_text())
+        if not isinstance(data, dict):
+            return {}
+        # Only keep entries where both key and value are strings — defensive
+        # against a hand-edited file with bad shape.
+        return {
+            str(k): str(v)
+            for k, v in data.items()
+            if isinstance(v, (str, int))
+        }
+    except Exception:
+        return {}
+
+
+def _update_dm_checkpoint(channel_id: int, message_id: int) -> None:
+    """Atomically advance the per-channel checkpoint to `message_id`.
+    Only writes if the new id is strictly greater (handles out-of-
+    order replay during catch-up where older IDs might be processed
+    after newer ones)."""
+    current = _load_dm_checkpoint()
+    new_id_str = str(message_id)
+    channel_str = str(channel_id)
+    old_id_str = current.get(channel_str, "0")
+    try:
+        if int(new_id_str) <= int(old_id_str):
+            return  # already past this point
+    except (ValueError, TypeError):
+        pass
+    current[channel_str] = new_id_str
+    _atomic_write_dm_checkpoint(current)
+
+
+async def _catchup_missed_dms():
+    """Restart-safety: on full reconnect (after gateway IDENTIFY),
+    replay any DM messages that arrived during the disconnect window.
+
+    For each channel in the DM checkpoint, fetch messages with
+    `after=<last_seen_id>` via Discord REST and dispatch each one
+    through `_handle_discord_message`. Bot messages, already-seen
+    messages, and non-DM messages all fall through the handler's
+    existing filters naturally.
+
+    Bounded: fetches at most 50 messages per channel per pass. If
+    the disconnect was so long that more than 50 owner DMs queued
+    up, the operator can re-trigger by sending one fresh DM (which
+    advances the checkpoint and lets the next catch-up cover the
+    gap).
+    """
+    checkpoint = _load_dm_checkpoint()
+    if not checkpoint:
+        return
+    for channel_id_str, last_seen_str in checkpoint.items():
+        try:
+            channel = client.get_channel(int(channel_id_str))
+            if channel is None:
+                # discord.py may not have the channel cached — fetch it.
+                try:
+                    channel = await client.fetch_channel(int(channel_id_str))
+                except Exception as e:
+                    print(f"  [dm-catchup] could not resolve channel {channel_id_str}: {e}", flush=True)
+                    continue
+            # Skip non-DM channels — catch-up is scoped to owner DMs
+            # only. Guild channels have different routing and are out
+            # of scope for this fix.
+            if not isinstance(channel, discord.DMChannel):
+                continue
+            after_obj = discord.Object(id=int(last_seen_str))
+            replayed = 0
+            async for msg in channel.history(after=after_obj, limit=50, oldest_first=True):
+                # discord.py's history(after=...) returns messages
+                # in oldest-first order with `oldest_first=True`; we
+                # replay in arrival order so the checkpoint advances
+                # monotonically. The checkpoint update happens inside
+                # `_handle_discord_message` for any DM — no need to
+                # update it explicitly here (and doing so could
+                # double-advance if a future refactor changes either).
+                try:
+                    await _handle_discord_message(msg)
+                    replayed += 1
+                except Exception as e:
+                    print(f"  [dm-catchup] replay failed for msg {msg.id}: {e}", flush=True)
+                    # Stop on first failure to preserve ordering and
+                    # avoid advancing the checkpoint past a message
+                    # we didn't actually process.
+                    break
+            if replayed:
+                print(f"  [dm-catchup] replayed {replayed} missed DM(s) on channel {channel_id_str}", flush=True)
+        except Exception as e:
+            print(f"  [dm-catchup] channel {channel_id_str} failed: {e}", flush=True)
 
 
 PENDING_REPLIES_FILE = REPO / "state" / "discord-pending-replies.json"
