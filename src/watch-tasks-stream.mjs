@@ -15,6 +15,56 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// Restart-safety: every time the watcher emits a task file (initial
+// sweep OR new-file event), increment its `attempts:` counter. Result:
+//
+//   - First-time emit (fresh task drop) → file gets `attempts: 1`.
+//   - Watcher restart with leftover task (agent crashed mid-task,
+//     archive never ran) → counter advances. Agent reads
+//     `attempts: N (N>1)` as "this is a retry; be careful with
+//     non-idempotent side effects."
+//
+// Insertion point: BEFORE the `task:` line. Task-file parsers across
+// the codebase stop scanning at `task:` (that's the "rest is the
+// task body" delimiter), so anything after `task:` is invisible to
+// them; the counter must precede.
+//
+// Atomic write via tmp+rename — never leaves a half-written file on
+// disk. On any error, log to stderr and continue (a missed bump is
+// non-fatal; the agent just sees a slightly-stale count).
+function bumpAttemptsCounter(absPath) {
+    try {
+        const raw = fs.readFileSync(absPath, 'utf8');
+        const lines = raw.split('\n');
+        // Find the `task:` delimiter line index.
+        const taskIdx = lines.findIndex(l => l.startsWith('task:'));
+        if (taskIdx < 0) return; // not a well-formed task file — leave alone
+        // Find existing `attempts:` line BEFORE the task: delimiter.
+        let attemptsIdx = -1;
+        for (let i = 0; i < taskIdx; i++) {
+            if (lines[i].startsWith('attempts:')) {
+                attemptsIdx = i;
+                break;
+            }
+        }
+        let newCount = 1;
+        if (attemptsIdx >= 0) {
+            const m = lines[attemptsIdx].match(/^attempts:\s*(\d+)/);
+            if (m) newCount = parseInt(m[1], 10) + 1;
+            lines[attemptsIdx] = `attempts: ${newCount}`;
+        } else {
+            // Insert a new `attempts: 1` line immediately before `task:`.
+            lines.splice(taskIdx, 0, 'attempts: 1');
+        }
+        const updated = lines.join('\n');
+        const tmp = `${absPath}.tmp`;
+        fs.writeFileSync(tmp, updated);
+        fs.renameSync(tmp, absPath);
+    } catch (e) {
+        console.error(`[watch-tasks-stream] bumpAttemptsCounter(${absPath}) failed: ${e.message}`);
+    }
+}
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 // Resolve tasksDir in this order:
 //   1. argv[2] — explicit override (test harness, oddball wiring)
@@ -33,7 +83,13 @@ console.error(`[watch-tasks-stream] watching ${tasksDirAbs}`);
 for (const entry of fs.readdirSync(tasksDirAbs)) {
     if (!entry.endsWith('.txt')) continue;
     try {
-        if (fs.statSync(path.join(tasksDirAbs, entry)).isFile()) {
+        const fullPath = path.join(tasksDirAbs, entry);
+        if (fs.statSync(fullPath).isFile()) {
+            // Bump attempts counter BEFORE emit so the agent reads
+            // the updated value. Initial-sweep emissions specifically
+            // represent "either fresh-on-disk or left over from
+            // crash" — bumping conveys the retry count to the agent.
+            bumpAttemptsCounter(fullPath);
             console.log(`TASK_FILE: ${entry}`);
         }
     } catch {}
@@ -58,6 +114,10 @@ fs.watch(tasksDirAbs, { recursive: false }, (_eventType, filename) => {
     }
     if (seen.has(filename)) return;
     seen.add(filename);
+    // Bump attempts counter BEFORE emit. For new-file events this
+    // sets attempts=1 (the file just dropped); the `seen` dedupe
+    // prevents same-session double-bumps from FSEvent fan-out.
+    bumpAttemptsCounter(full);
     console.log(`TASK_FILE: ${filename}`);
 });
 
