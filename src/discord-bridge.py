@@ -55,6 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
 from util_paths import shared_personal_path  # noqa: E402
 from task_priority import default_priority_for_source  # noqa: E402
+from vault_intercept import intercept_vault_commands  # noqa: E402
 REPO = resolve_workspace()
 
 # Vision-frame helper — pushes image attachments into the active voice session
@@ -2537,6 +2538,16 @@ async def _handle_discord_message(message, force=False):
     ts = int(time.time() * 1000)
     task_id = f"task-{ts}"
     task_file = TASKS_DIR / f"{task_id}.txt"
+
+    # Intercept vault commands before any disk write — secrets go to Keychain,
+    # task file gets [STORED-IN-KEYCHAIN] placeholder.
+    if text:
+        try:
+            text, stored_keys = intercept_vault_commands(text)
+            if stored_keys:
+                print(f"  [vault] stored keys: {stored_keys}", flush=True)
+        except RuntimeError as exc:
+            print(f"  [vault] intercept error: {exc}", flush=True)
 
     # Inject tier-specific in-band instructions so the core agent cannot
     # accidentally process a non-owner task with full capabilities.
