@@ -49,10 +49,34 @@ function resizeForVision(path: string): string {
 	}
 }
 
-async function askGeminiAboutImage(
+async function askVisionAboutImage(
 	imagePath: string,
 	question: string,
 ): Promise<{ ok: true; answer: string } | { ok: false; error: string }> {
+	const { visionProvider, analyzeImageOpenAI } = await import('../../src/vision-llm-openai.js');
+	const provider = visionProvider();
+	const mimeType: 'image/png' | 'image/jpeg' = imagePath.endsWith('.jpg') ? 'image/jpeg' : 'image/png';
+	const imageData = readFileSync(imagePath).toString('base64');
+
+	const prompt = `User question about what's currently on their screen: "${question.trim()}"
+
+Answer based ONLY on what you can see in the screenshot. Keep the answer conversational and tight — this will be spoken aloud. If the answer is short, give it directly. If it requires steps, give 2-3 numbered steps. If the question can't be answered from the screen alone, say "I can see [what's visible] but I'd need [missing info] to answer that."`;
+
+	if (provider === 'openai') {
+		const apiKey = process.env.OPENAI_API_KEY;
+		if (!apiKey) {
+			return { ok: false, error: 'Vision unavailable — VISION_PROVIDER=openai but OPENAI_API_KEY not set.' };
+		}
+		const res = await analyzeImageOpenAI({ apiKey, base64Image: imageData, mimeType, prompt, maxOutputTokens: 400, temperature: 0.3 });
+		if (res.ok) {
+			try {
+				const { recordEvent: cloudRecordEvent } = await import('../../src/cloud-client.js');
+				cloudRecordEvent({ kind: 'vision.openai', units: 1, metadata: { byok: true, source: 'screenshot-explain' } });
+			} catch { /* telemetry never breaks the call */ }
+		}
+		return res.ok ? { ok: true, answer: res.text } : { ok: false, error: res.error };
+	}
+
 	const { gatewayBaseUrl } = await import('../../src/cloud-client.js');
 	const gateway = gatewayBaseUrl('llm');
 	const apiKey = process.env.GEMINI_API_KEY;
@@ -63,13 +87,6 @@ async function askGeminiAboutImage(
 				'Vision unavailable — not signed in to Sutando cloud and GEMINI_API_KEY not set. Open the Sutando menu bar → Sign in, or set GEMINI_API_KEY in your env.',
 		};
 	}
-
-	const mimeType = imagePath.endsWith('.jpg') ? 'image/jpeg' : 'image/png';
-	const imageData = readFileSync(imagePath).toString('base64');
-
-	const prompt = `User question about what's currently on their screen: "${question.trim()}"
-
-Answer based ONLY on what you can see in the screenshot. Keep the answer conversational and tight — this will be spoken aloud. If the answer is short, give it directly. If it requires steps, give 2-3 numbered steps. If the question can't be answered from the screen alone, say "I can see [what's visible] but I'd need [missing info] to answer that."`;
 
 	const body = JSON.stringify({
 		contents: [
@@ -136,7 +153,7 @@ export const screenshotExplainTool: ToolDefinition = {
 			};
 		}
 		const resized = resizeForVision(cap.path);
-		const answer = await askGeminiAboutImage(resized, question);
+		const answer = await askVisionAboutImage(resized, question);
 		if (!answer.ok) {
 			return { error: answer.error };
 		}

@@ -11,10 +11,32 @@
  *   4. Open http://localhost:8080 in Chrome and click Connect
  *
  * Environment:
- *   GEMINI_API_KEY       — Required: Google AI Studio API key (text LLM + vision + STT fallback)
+ *   GEMINI_API_KEY       — Required (text LLM + vision + STT fallback). Used by the
+ *                          default voice transport, subagent LLM, vision pipelines,
+ *                          and image gen unless the matching *_PROVIDER env opts out.
  *   GEMINI_VOICE_API_KEY — Optional: separate key for the Gemini Live voice session.
  *                          Falls back to GEMINI_API_KEY. Useful for isolating voice
  *                          (free-tier eligible) from paid-tier spend on a single key.
+ *   VOICE_PROVIDER       — Optional: 'gemini' (default) | 'openai'. Selects the realtime
+ *                          voice transport. Gemini Live keeps session resumption +
+ *                          server-side compression; OpenAI Realtime offers in-place
+ *                          session updates and lower-latency tool turns but runs at
+ *                          24 kHz (vs Gemini's 16 kHz) and has no resumption.
+ *   SUBAGENT_PROVIDER    — Optional: 'gemini' (default) | 'openai'. Selects the LLM
+ *                          used for background subagent text generation (Vercel AI SDK
+ *                          calls fired from voice tool execution). Independent from
+ *                          VOICE_PROVIDER — mix-and-match supported.
+ *   OPENAI_API_KEY       — Required only when any *_PROVIDER env is set to 'openai'.
+ *   OPENAI_VOICE_MODEL   — Optional: OpenAI Realtime model id (default: 'gpt-realtime').
+ *   OPENAI_VOICE_NAME    — Optional: OpenAI Realtime voice (default: 'coral').
+ *   SUBAGENT_OPENAI_MODEL— Optional: OpenAI chat model for subagents (default: 'gpt-4.1-mini').
+ *   STT_PROVIDER         — Optional: 'auto' (default, use transport built-in) | 'openai'
+ *                          (force OpenAI Whisper batch transcription) | 'gemini'.
+ *   STT_OPENAI_MODEL     — Optional: Whisper transcription model id
+ *                          (default: 'gpt-4o-mini-transcribe').
+ *   STT_LANGUAGE         — Optional: BCP-47 hint (e.g. 'en'). Unset = Whisper auto-detect.
+ *   OPENAI_BASE_URL      — Optional: redirect OpenAI calls to a proxy
+ *                          (LiteLLM, OpenRouter, Azure). No trailing slash.
  *   ANTHROPIC_API_KEY   — Optional: only needed if not using claude CLI subscription auth
  *   WORKSPACE_DIR       — Claude's working directory (default: sutando/)
  *   PORT                — WebSocket port (default: 9900)
@@ -23,6 +45,8 @@
 
 import './load-env.js';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { createOpenAI } from '@ai-sdk/openai';
+import { OpenAIWhisperSTTProvider } from './openai-whisper-stt-provider.js';
 import { z } from 'zod';
 import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs';
 import { execSync as execSyncTop } from 'node:child_process';
@@ -32,8 +56,8 @@ import { clearActiveArtifact } from './artifact-cache-tools.js';
 import { injectText } from './browser-tools.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { VoiceSession } from 'bodhi-realtime-agent';
-import type { MainAgent, ToolDefinition } from 'bodhi-realtime-agent';
+import { VoiceSession, OpenAIRealtimeTransport } from 'bodhi-realtime-agent';
+import type { MainAgent, ToolDefinition, LLMTransport } from 'bodhi-realtime-agent';
 function assertMacOS() { if (process.platform !== 'darwin') { console.error('Sutando requires macOS'); process.exit(1); } }
 import { workTool, startResultWatcher, startContextDropWatcher, startNoteViewingWatcher, resetNoteViewingDebounce, logConversation, logSessionBoundary, getRecentConversation, getSecondsSinceLastTurn, setTaskStatusCallback } from './task-bridge.js';
 import { recordSession } from './conversation-store.js';
@@ -93,6 +117,60 @@ function assertGeminiKey(name: string, value: string): void {
 		process.exit(1);
 	}
 }
+
+// VOICE_PROVIDER selects only the realtime transport. The subagent text LLM
+// is governed by SUBAGENT_PROVIDER below — independent switch so users can
+// run e.g. OpenAI Realtime voice with Gemini subagents (cheaper) or the
+// reverse. When VOICE_PROVIDER='openai', OPENAI_API_KEY is required for the
+// transport itself.
+const VOICE_PROVIDER = (process.env.VOICE_PROVIDER || 'gemini').toLowerCase() as 'gemini' | 'openai';
+if (VOICE_PROVIDER !== 'gemini' && VOICE_PROVIDER !== 'openai') {
+	console.error(`Error: VOICE_PROVIDER must be 'gemini' or 'openai' (got "${VOICE_PROVIDER}")`);
+	process.exit(1);
+}
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? '';
+if (VOICE_PROVIDER === 'openai' && !OPENAI_API_KEY) {
+	console.error(`Error: OPENAI_API_KEY is required when VOICE_PROVIDER=openai`);
+	process.exit(1);
+}
+const OPENAI_VOICE_MODEL = process.env.OPENAI_VOICE_MODEL || 'gpt-realtime';
+const OPENAI_VOICE_NAME = process.env.OPENAI_VOICE_NAME || 'coral';
+
+// SUBAGENT_PROVIDER picks the LLM that powers background subagents (the
+// `model:` field on VoiceSession — Vercel AI SDK calls, not the realtime
+// transport). Default 'gemini' (no behavior change for existing setups);
+// set to 'openai' to route subagent text through gpt-4.1-mini instead.
+// Independent from VOICE_PROVIDER so users can mix-and-match.
+const SUBAGENT_PROVIDER = (process.env.SUBAGENT_PROVIDER || 'gemini').toLowerCase() as 'gemini' | 'openai';
+if (SUBAGENT_PROVIDER !== 'gemini' && SUBAGENT_PROVIDER !== 'openai') {
+	console.error(`Error: SUBAGENT_PROVIDER must be 'gemini' or 'openai' (got "${SUBAGENT_PROVIDER}")`);
+	process.exit(1);
+}
+const SUBAGENT_OPENAI_MODEL = process.env.SUBAGENT_OPENAI_MODEL || 'gpt-4.1-mini';
+
+// STT_PROVIDER: 'auto' (default — use the realtime transport's built-in input
+// transcription, i.e. Gemini STT under Gemini Live or gpt-4o-mini-transcribe
+// under OpenAI Realtime) | 'openai' (force OpenAI Whisper via batch
+// transcription, decoupled from the voice transport) | 'gemini' (force the
+// transport built-in even when on OpenAI Realtime — useful for benchmarking).
+//
+// 'auto' preserves zero-config behavior. 'openai' is the migration target
+// for users who want Whisper transcription regardless of voice transport.
+const STT_PROVIDER = (process.env.STT_PROVIDER || 'auto').toLowerCase() as 'auto' | 'openai' | 'gemini';
+if (!['auto', 'openai', 'gemini'].includes(STT_PROVIDER)) {
+	console.error(`Error: STT_PROVIDER must be 'auto', 'openai', or 'gemini' (got "${STT_PROVIDER}")`);
+	process.exit(1);
+}
+if (STT_PROVIDER === 'openai' && !OPENAI_API_KEY) {
+	console.error(`Error: OPENAI_API_KEY is required when STT_PROVIDER=openai`);
+	process.exit(1);
+}
+const STT_OPENAI_MODEL = process.env.STT_OPENAI_MODEL || 'gpt-4o-mini-transcribe';
+// STT_LANGUAGE: optional BCP-47 hint (e.g. 'en', 'es', 'ja'). Empty/unset →
+// Whisper auto-detects, which is the right default for multilingual users.
+const STT_LANGUAGE = process.env.STT_LANGUAGE || '';
+// OPENAI_BASE_URL: override the OpenAI API host (LiteLLM, OpenRouter, Azure).
+const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || '';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? '';
 // Wave 4 (managed Gemini): a user who picked "Sign in to Sutando" in
@@ -167,15 +245,27 @@ if (CARTESIA_API_KEY) {
 	}
 }
 
-// Uses GEMINI_VOICE_API_KEY because the only consumer of `google()` below is
-// the VoiceSession `model:` field — voice-session subagent text LLM calls.
-// Routes with the voice key so free-tier voice setups don't leak subagent
-// traffic onto the paid GEMINI_API_KEY. Deliberate tradeoff: subagents lose
-// access to any paid-tier quota on GEMINI_API_KEY (rate-limited on free).
-// Managed-mode users without a BYOK key get a placeholder here; subagent
-// text LLM calls will fail until we route them through /api/gateway/llm
-// (Wave 4.7 follow-up). Voice itself uses ephemeral tokens, not this.
-const google = createGoogleGenerativeAI({ apiKey: GEMINI_VOICE_API_KEY_ENV || 'BYOK_MISSING_managed_voice_only' });
+// Subagent text-LLM factory. SUBAGENT_PROVIDER selects between OpenAI
+// (default) and Gemini.
+//
+// When 'gemini': uses GEMINI_VOICE_API_KEY so free-tier voice setups don't
+//   leak subagent traffic onto the paid GEMINI_API_KEY. Managed-mode users
+//   without a BYOK key get a placeholder; subagent text LLM calls fail
+//   until we route them through /api/gateway/llm.
+// When 'openai': requires OPENAI_API_KEY. No managed gateway equivalent —
+//   users must BYOK.
+//
+// Both factories are scoped to their own provider — no shared global, no
+// dead construction. The chosen factory is the only one used.
+if (SUBAGENT_PROVIDER === 'openai' && !OPENAI_API_KEY) {
+	console.error(`Error: OPENAI_API_KEY is required when SUBAGENT_PROVIDER=openai.`);
+	process.exit(1);
+}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const subagentModel: any = SUBAGENT_PROVIDER === 'openai'
+	? createOpenAI({ apiKey: OPENAI_API_KEY })(SUBAGENT_OPENAI_MODEL)
+	: createGoogleGenerativeAI({ apiKey: GEMINI_VOICE_API_KEY_ENV || 'BYOK_MISSING_managed_voice_only' })(VOICE_MODEL);
+
 let sessionRef: VoiceSession | null = null;
 
 // =============================================================================
@@ -1013,11 +1103,11 @@ async function main() {
 		const durationSeconds = durationMs / 1000;
 		if (durationSeconds >= 1) {
 			cloudRecordEvent({
-				kind: 'voice.gemini',
+				kind: VOICE_PROVIDER === 'openai' ? 'voice.openai' : 'voice.gemini',
 				units: durationSeconds,
 				metadata: {
 					sessionId: SESSION_ID,
-					model: VOICE_NATIVE_AUDIO_MODEL,
+					model: VOICE_PROVIDER === 'openai' ? OPENAI_VOICE_MODEL : VOICE_NATIVE_AUDIO_MODEL,
 					toolCalls: voiceToolCalls.length,
 				},
 			});
@@ -1028,19 +1118,59 @@ async function main() {
 		}
 	}
 
-	const resolvedKey = await resolveVoiceApiKey();
+	// Resolve the realtime-voice transport. Gemini path keeps managed-key
+	// minting + BYOK fallback unchanged. OpenAI path uses OPENAI_API_KEY
+	// directly (no equivalent of the gateway voice-key mint yet).
+	//
+	// `apiKey` on VoiceSessionConfig is the Gemini Live key — passing a
+	// non-empty placeholder when transport is provided keeps the type check
+	// happy without affecting behavior (the bodhi docs state apiKey is
+	// ignored when transport is supplied).
+	let voiceApiKey: string;
+	let openAiTransport: LLMTransport | undefined;
+	if (VOICE_PROVIDER === 'openai') {
+		openAiTransport = new OpenAIRealtimeTransport({
+			apiKey: OPENAI_API_KEY,
+			model: OPENAI_VOICE_MODEL,
+			voice: OPENAI_VOICE_NAME,
+		});
+		voiceApiKey = 'OPENAI_TRANSPORT_PROVIDED';
+		console.log(`${ts()} [Voice] Transport: OpenAI Realtime (model=${OPENAI_VOICE_MODEL}, voice=${OPENAI_VOICE_NAME})`);
+	} else {
+		const resolvedKey = await resolveVoiceApiKey();
+		voiceApiKey = resolvedKey.key;
+		console.log(`${ts()} [Voice] Transport: Gemini Live (model=${VOICE_NATIVE_AUDIO_MODEL}, mode=${resolvedKey.mode})`);
+	}
+
+	// STT_PROVIDER=openai forces OpenAI Whisper batch transcription regardless
+	// of voice transport. Setting sttProvider also auto-disables the transport's
+	// built-in transcription per bodhi (see VoiceSessionConfig.inputAudioTranscription).
+	const sttProvider = STT_PROVIDER === 'openai'
+		? new OpenAIWhisperSTTProvider({
+			apiKey: OPENAI_API_KEY,
+			model: STT_OPENAI_MODEL,
+			language: STT_LANGUAGE,
+			baseUrl: OPENAI_BASE_URL || undefined,
+		})
+		: undefined;
+	if (sttProvider) {
+		console.log(`${ts()} [Voice] STT: OpenAI Whisper (model=${STT_OPENAI_MODEL})`);
+	}
+
 	const session = new VoiceSession({
 		sessionId: SESSION_ID,
 		userId: 'user',
-		apiKey: resolvedKey.key,
+		apiKey: voiceApiKey,
 		agents: [mainAgent],
 		initialAgent: 'main',
 		port: PORT,
 		host: HOST,
-		model: google(VOICE_MODEL),
+		model: subagentModel,
 		geminiModel: VOICE_NATIVE_AUDIO_MODEL,
 		speechConfig: { voiceName: VOICE_NAME },
 		inputAudioTranscription: true,
+		...(openAiTransport ? { transport: openAiTransport } : {}),
+		...(sttProvider ? { sttProvider } : {}),
 		hooks: {
 			onSessionStart: (e) => {
 				userTurnCount = 0; userHasInterrupted = false; sessionEnding = false;
@@ -1054,7 +1184,11 @@ async function main() {
 				cloudSessionId = null;
 				cloudSessionPromise = cloudStartSession({
 					kind: 'voice',
-					metadata: { sessionId: e.sessionId, model: VOICE_NATIVE_AUDIO_MODEL },
+					metadata: {
+						sessionId: e.sessionId,
+						provider: VOICE_PROVIDER,
+						model: VOICE_PROVIDER === 'openai' ? OPENAI_VOICE_MODEL : VOICE_NATIVE_AUDIO_MODEL,
+					},
 				}).then((id) => {
 					cloudSessionId = id;
 					return id;

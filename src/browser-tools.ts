@@ -289,12 +289,14 @@ export const openUrlTool: ToolDefinition = {
 // --- Describe screen (vision) ---
 
 async function describeScreenshot(imagePath: string, previousDescs: string[] = []): Promise<string> {
+	const { visionProvider, analyzeImageOpenAI } = await import('./vision-llm-openai.js');
+	const provider = visionProvider();
 	const apiKey = process.env.GEMINI_API_KEY;
 	// Lazy-load the gateway config + telemetry — keeps this module decoupled
 	// from cloud-client when running in tools-only contexts.
 	const { gatewayBaseUrl, recordEvent: cloudRecordEvent } = await import('./cloud-client.js');
 	const gateway = gatewayBaseUrl('llm');
-	if (!apiKey && !gateway) return 'Vision description unavailable (no GEMINI_API_KEY and not signed in to cloud)';
+	if (provider === 'gemini' && !apiKey && !gateway) return 'Vision description unavailable (no GEMINI_API_KEY and not signed in to cloud)';
 	try {
 		// Fixes CodeQL #27 (js/command-line-injection): use execFileSync argv array instead of shell string
 		const safePath = imagePath.replace(/[^a-zA-Z0-9_\-./]/g, '');
@@ -303,7 +305,7 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 			execFileSync('sips', ['-Z', '800', '-s', 'format', 'jpeg', safePath, '--out', resized], { timeout: 2_000, stdio: 'ignore' });
 		} catch { /* use original if resize fails */ }
 		const actualPath = existsSync(resized) ? resized : imagePath;
-		const mimeType = actualPath.endsWith('.jpg') ? 'image/jpeg' : 'image/png';
+		const mimeType: 'image/png' | 'image/jpeg' = actualPath.endsWith('.jpg') ? 'image/jpeg' : 'image/png';
 		const imageData = readFileSync(actualPath).toString('base64');
 		// Issue #189: when continuing a narration, the vision model should build
 		// on what was already said instead of re-introducing the page every
@@ -316,6 +318,22 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 			const recent = previousDescs.slice(-3).map((d, i) => `${i + 1}. ${d}`).join(' | ');
 			prompt = `You are narrating a screen recording aloud. Already spoken: ${recent}. Describe ONLY what is NEW or has changed. Use a natural continuation ("Scrolling down...", "Next...", "Now we see...", "Further down..."). Do NOT restart with "The screen shows/displays" — the viewer already knows what page this is. 1 short sentence, max 20 words. ${guard}`;
 		}
+
+		// OpenAI vision short-circuit — bypasses gateway routing entirely.
+		// VISION_PROVIDER=openai goes direct to chat-completions with the user's
+		// OPENAI_API_KEY. No cloud-wallet billing for this path yet.
+		if (provider === 'openai') {
+			const openAiKey = process.env.OPENAI_API_KEY;
+			if (!openAiKey) return 'Vision description unavailable (VISION_PROVIDER=openai but OPENAI_API_KEY not set)';
+			const r = await analyzeImageOpenAI({ apiKey: openAiKey, base64Image: imageData, mimeType, prompt, maxOutputTokens: 40 });
+			if (!r.ok) {
+				console.log(`${new Date().toLocaleTimeString()} [DescribeScreen] OpenAI vision error: ${r.error}`);
+				return `Could not describe the screen. (${r.error})`;
+			}
+			cloudRecordEvent({ kind: 'vision.openai', units: 1, metadata: { byok: true } });
+			return r.text;
+		}
+
 		const body = JSON.stringify({
 			contents: [{
 				parts: [

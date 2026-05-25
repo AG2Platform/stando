@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-Media generation using Gemini APIs.
+Media generation.
 
 Supports:
-- Text-to-image: generate from a text prompt (Gemini Flash Image)
-- Image editing: modify an existing image with a text prompt
-- Text-to-video: generate video from a text prompt (Veo)
-- Image-to-video: generate video from reference image + prompt
+- Text-to-image: generate from a text prompt (Gemini Flash Image by default;
+  OpenAI gpt-image-1 when IMAGE_PROVIDER=openai)
+- Image editing: modify an existing image with a text prompt (both providers)
+- Text-to-video: generate video from a text prompt (Veo — Gemini only; no
+  OpenAI equivalent yet)
+- Image-to-video: generate video from reference image + prompt (Veo only)
+
+Provider selection:
+  IMAGE_PROVIDER env var: 'gemini' (default) | 'openai'
+  --image-provider CLI flag overrides the env var.
+  Video always uses Gemini Veo regardless of IMAGE_PROVIDER.
 
 Usage:
   python3 generate.py --prompt "A sunset over mountains"
@@ -84,6 +91,146 @@ def load_env():
                         val = val[1:-1]
                     # .env wins over stale shell env — see PR #416.
                     os.environ[key.strip()] = val
+
+
+def generate_image_openai(args):
+    """Generate or edit an image via OpenAI's Images API (gpt-image-1).
+
+    No google.genai dependency — uses urllib + multipart/form-data so this
+    code path works in minimal environments (matches openai-tts skill's
+    dependency footprint).
+
+    Returns the absolute output path on success; raises on failure.
+    """
+    import base64
+    import json
+    import secrets
+    from urllib import request as _urlreq
+    from urllib.error import HTTPError, URLError
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("Error: OPENAI_API_KEY not set. Add it to .env or set IMAGE_PROVIDER=gemini.", file=sys.stderr)
+        sys.exit(1)
+
+    base_url = (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com").rstrip("/")
+    model = args.model or os.environ.get("IMAGE_MODEL_OPENAI") or os.environ.get("IMAGE_MODEL", "gpt-image-1")
+    print(f"  Model: {model} (OpenAI)", file=sys.stderr)
+    print(f"  Prompt: {args.prompt[:100]}{'...' if len(args.prompt) > 100 else ''}", file=sys.stderr)
+
+    if args.output:
+        out_path = Path(args.output)
+    else:
+        ts = int(time.time() * 1000)
+        out_path = Path(f"generated-{ts}.png")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # OpenAI Images API returns PNG; if the user asked for jpg/webp we re-
+    # encode via Pillow after the fact (same path as the Gemini branch).
+    ext = out_path.suffix.lower()
+    out_format = "JPEG" if ext in (".jpg", ".jpeg") else "WEBP" if ext == ".webp" else "PNG"
+
+    # gpt-image-1 supports 1024x1024 / 1024x1536 / 1536x1024 / "auto".
+    size = os.environ.get("IMAGE_SIZE", "auto")
+
+    is_edit = bool(args.input)
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    if is_edit:
+        # Multipart upload to /v1/images/edits — supports up to 16 input
+        # images per the gpt-image-1 docs. Build the body by hand to avoid
+        # an http client dependency.
+        # Random boundary token — eliminates the (tiny) chance of a collision
+        # with payload bytes that happen to match a time-based marker.
+        boundary = "----sutando-image-edit-" + secrets.token_hex(16)
+        body = bytearray()
+        def _field(name: str, value: str) -> None:
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+            body.extend(value.encode())
+            body.extend(b"\r\n")
+        def _file(name: str, filename: str, mime: str, data: bytes) -> None:
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode())
+            body.extend(f"Content-Type: {mime}\r\n\r\n".encode())
+            body.extend(data)
+            body.extend(b"\r\n")
+        _field("model", model)
+        _field("prompt", args.prompt)
+        _field("size", size)
+        _field("n", "1")
+        for img_path in args.input:
+            img_path = os.path.expanduser(img_path)
+            if not os.path.isfile(img_path):
+                print(f"Error: Input image not found: {img_path}", file=sys.stderr)
+                sys.exit(1)
+            with open(img_path, "rb") as fh:
+                _file(
+                    "image[]" if len(args.input) > 1 else "image",
+                    os.path.basename(img_path),
+                    "image/png",
+                    fh.read(),
+                )
+            print(f"  Input: {img_path}", file=sys.stderr)
+        body.extend(f"--{boundary}--\r\n".encode())
+        headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
+        url = f"{base_url}/v1/images/edits"
+        req = _urlreq.Request(url, data=bytes(body), headers=headers, method="POST")
+    else:
+        payload = {
+            "model": model,
+            "prompt": args.prompt,
+            "size": size,
+            "n": 1,
+        }
+        headers["Content-Type"] = "application/json"
+        url = f"{base_url}/v1/images/generations"
+        req = _urlreq.Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
+
+    print(f"  Generating image...", file=sys.stderr)
+    try:
+        with _urlreq.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+    except HTTPError as e:
+        msg = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else str(e)
+        if e.code == 401:
+            print("Error: OpenAI rejected the key (401). Check OPENAI_API_KEY.", file=sys.stderr)
+        elif e.code == 429:
+            print("Error: OpenAI rate-limited image generation. Try again shortly.", file=sys.stderr)
+        else:
+            print(f"Error: OpenAI image API call failed ({e.code}): {msg[:300]}", file=sys.stderr)
+        sys.exit(1)
+    except (URLError, TimeoutError, OSError) as e:
+        print(f"Error: OpenAI image API request failed: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    items = data.get("data") or []
+    if not items or not items[0].get("b64_json"):
+        print(f"Error: OpenAI returned no image. Raw response: {json.dumps(data)[:300]}", file=sys.stderr)
+        sys.exit(1)
+
+    img_bytes = base64.b64decode(items[0]["b64_json"])
+
+    if out_format == "PNG":
+        out_path.write_bytes(img_bytes)
+        print(f"  Saved: {out_path} (PNG)", file=sys.stderr)
+    else:
+        # Re-encode for JPEG/WEBP. Pillow is already a dependency for the
+        # Gemini branch; treat it the same here.
+        try:
+            from PIL import Image
+            import io as _io
+        except ImportError:
+            print("Error: Pillow required for JPEG/WEBP output. Run: pip3 install Pillow", file=sys.stderr)
+            sys.exit(1)
+        img = Image.open(_io.BytesIO(img_bytes))
+        save_kwargs = {"quality": args.quality} if out_format in ("JPEG", "WEBP") else {}
+        if out_format == "JPEG":
+            img = img.convert("RGB")
+        img.save(str(out_path), out_format, **save_kwargs)
+        print(f"  Saved: {out_path} ({img.size[0]}x{img.size[1]}, {out_format})", file=sys.stderr)
+
+    print(str(out_path.resolve()))
 
 
 def generate_image(client, args):
@@ -298,19 +445,45 @@ def generate_video(client, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate images or videos using Gemini")
+    parser = argparse.ArgumentParser(description="Generate images (OpenAI default, Gemini optional) or videos (Gemini Veo)")
     parser.add_argument("--prompt", "-p", required=True, help="Text prompt")
     parser.add_argument("--input", "-i", action="append", default=[], help="Input image path(s)")
     parser.add_argument("--output", "-o", default=None, help="Output file path")
     parser.add_argument("--model", "-m", default=None,
-                        help="Model (default: gemini-2.5-flash-image for images, veo-3.1-generate-preview for video)")
+                        help="Model (defaults: gpt-image-1 for OpenAI images, gemini-3.1-flash-image-preview for Gemini images, veo-3.1-generate-preview for video)")
     parser.add_argument("--quality", "-q", type=int, default=90, help="JPEG quality 1-100 (default: 90)")
-    parser.add_argument("--video", "-v", action="store_true", help="Generate video instead of image")
+    parser.add_argument("--video", "-v", action="store_true", help="Generate video instead of image (always uses Gemini Veo)")
     parser.add_argument("--aspect", default=None, help="Video aspect ratio: 16:9 (default) or 9:16")
+    parser.add_argument(
+        "--image-provider",
+        default=None,
+        choices=["openai", "gemini"],
+        help="Override IMAGE_PROVIDER env var. Default: 'gemini'. Set 'openai' to use gpt-image-1.",
+    )
 
     args = parser.parse_args()
 
     load_env()
+
+    # Provider routing for images. Video stays on Gemini Veo regardless —
+    # OpenAI has no public video model yet.
+    image_provider = (args.image_provider or os.environ.get("IMAGE_PROVIDER") or "gemini").lower()
+    if image_provider not in ("openai", "gemini"):
+        print(f"Error: IMAGE_PROVIDER must be 'openai' or 'gemini' (got '{image_provider}')", file=sys.stderr)
+        sys.exit(1)
+
+    # Short-circuit for OpenAI image path — no google.genai dependency.
+    if not args.video and image_provider == "openai":
+        generate_image_openai(args)
+        # Cloud telemetry — best-effort, lazy import.
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "src"))
+            from cloud_metrics import record_event, record_onboarding
+            record_event("image.gen", units=1, metadata={"model": args.model or "gpt-image-1", "provider": "openai"})
+            record_onboarding("first_image")
+        except Exception:  # noqa: BLE001
+            pass
+        return
 
     api_key = os.environ.get("GEMINI_API_KEY")
     try:

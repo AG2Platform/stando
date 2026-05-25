@@ -273,10 +273,8 @@ function findRecording(version?: 'raw' | 'narrated' | 'subtitled'): string | nul
 // --- Vision helpers ---
 
 async function describeScreenshot(imagePath: string, previousDescs: string[] = []): Promise<string> {
-	// Prefer free-tier voice key (gemini-3.1-flash-lite-preview is free-tier eligible on REST
-	// generateContent — verified 2026-05-14). Falls back to paid GEMINI_API_KEY if voice key absent.
-	const apiKey = process.env.GEMINI_VOICE_API_KEY || process.env.GEMINI_API_KEY;
-	if (!apiKey) return 'Vision description unavailable (no GEMINI_VOICE_API_KEY or GEMINI_API_KEY)';
+	const { visionProvider, analyzeImageOpenAI } = await import('./vision-llm-openai.js');
+	const provider = visionProvider();
 	try {
 		// Fixes CodeQL #27 (js/command-line-injection): use execFileSync argv array instead of shell string
 		const safePath = imagePath.replace(/[^a-zA-Z0-9_\-./]/g, '');
@@ -285,12 +283,11 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 			execFileSync('sips', ['-Z', '800', '-s', 'format', 'jpeg', safePath, '--out', resized], { timeout: 2_000, stdio: 'ignore' });
 		} catch { /* use original if resize fails */ }
 		const actualPath = existsSync(resized) ? resized : imagePath;
-		const mimeType = actualPath.endsWith('.jpg') ? 'image/jpeg' : 'image/png';
+		const mimeType: 'image/png' | 'image/jpeg' = actualPath.endsWith('.jpg') ? 'image/jpeg' : 'image/png';
 		const imageData = readFileSync(actualPath).toString('base64');
 		// Issue #189: when continuing a narration, the vision model should build
 		// on what was already said instead of re-introducing the page every
 		// time. First call: introduce with the heading. Later calls: flow on.
-		// Vision model describes content. First call introduces; follow-ups focus on NEW content only.
 		const guard = 'ONLY describe what you SEE in the image. Do NOT use external knowledge.';
 		let prompt: string;
 		if (previousDescs.length === 0) {
@@ -299,6 +296,28 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 			const alreadyCovered = previousDescs.slice(-2).join(' ');
 			prompt = `Already described: "${alreadyCovered}". What NEW section headings or content are now visible that were NOT in the previous descriptions? Ignore anything already mentioned. 1 sentence, max 15 words, only new content. If nothing new, say "same content". ${guard}`;
 		}
+
+		if (provider === 'openai') {
+			const openAiKey = process.env.OPENAI_API_KEY;
+			if (!openAiKey) return 'Vision description unavailable (VISION_PROVIDER=openai but OPENAI_API_KEY not set)';
+			const r = await analyzeImageOpenAI({ apiKey: openAiKey, base64Image: imageData, mimeType, prompt, maxOutputTokens: 40 });
+			if (!r.ok) {
+				console.log(`${new Date().toLocaleTimeString()} [DescribeScreen] OpenAI vision error: ${r.error}`);
+				return `Could not describe the screen. (${r.error})`;
+			}
+			// Mirror the BYOK telemetry the gemini branch (browser-tools.ts)
+			// records — keeps /admin/features counts apples-to-apples.
+			try {
+				const { recordEvent: cloudRecordEvent } = await import('./cloud-client.js');
+				cloudRecordEvent({ kind: 'vision.openai', units: 1, metadata: { byok: true, source: 'recording-tools' } });
+			} catch { /* telemetry never breaks the call */ }
+			return r.text;
+		}
+
+		// Prefer free-tier voice key (gemini-3.1-flash-lite-preview is free-tier eligible on REST
+		// generateContent — verified 2026-05-14). Falls back to paid GEMINI_API_KEY if voice key absent.
+		const apiKey = process.env.GEMINI_VOICE_API_KEY || process.env.GEMINI_API_KEY;
+		if (!apiKey) return 'Vision description unavailable (no GEMINI_VOICE_API_KEY or GEMINI_API_KEY)';
 		const res = await fetch(
 			`https://generativelanguage.googleapis.com/v1beta/models/${VISION_MODEL}:generateContent?key=${apiKey}`,
 			{

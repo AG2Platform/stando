@@ -430,7 +430,7 @@ def render_slate_frame(series_title: str, episode: str, date: str, out_path: Pat
 
 def synthesize_tts(text: str, out_path: Path, provider: str = "GEMINI",
                     gemini_voice: str = "Aoede", openai_voice: str = "sage"):
-    """Render full narration to mp3. gemini-tts (free) → openai-tts fallback.
+    """Render full narration to mp3. gemini-tts (free, default) → openai-tts fallback.
 
     Voice options:
       gemini_voice: Aoede (alto/neutral, default), Charon (baritone news-anchor —
@@ -550,7 +550,7 @@ def main():
                    choices=["Aoede", "Charon", "Kore", "Puck"],
                    help="Gemini TTS voice (Charon is news-anchor baritone).")
     p.add_argument("--openai-voice", default="sage",
-                   help="OpenAI TTS voice (used only if Gemini fallback path).")
+                   help="OpenAI TTS voice (used when --tts-provider=OPENAI or as Gemini fallback).")
     p.add_argument("--series-title", default="Mini Wire",
                    help="Branded series name shown on the end-card slate (set empty to skip slate).")
     p.add_argument("--episode", default="001", help="Episode number for slate (e.g. '001')")
