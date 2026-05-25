@@ -47,6 +47,14 @@ if [ -f "$STATE_ROOT/.env" ]; then
   . "$STATE_ROOT/.env"
   set +a
 fi
+_APP_SUPPORT_ENV="$HOME/Library/Application Support/Sutando/.env"
+if [ -f "$_APP_SUPPORT_ENV" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$_APP_SUPPORT_ENV"
+  set +a
+fi
+unset _APP_SUPPORT_ENV
 
 # Auto-bootstrap: create-if-missing files and dirs that the agent + skills
 # expect to exist (logs, state, tasks, results, notes, contextual-chips.json,
@@ -339,7 +347,7 @@ fi
 # 8. Phone conversation server + ngrok (optional — needs Twilio creds, skip with SKIP_PHONE=1)
 if [ "${SKIP_PHONE:-}" = "1" ]; then
   echo "  ~ conversation server (skipped via SKIP_PHONE)"
-elif grep -q "TWILIO_ACCOUNT_SID=" .env 2>/dev/null; then
+elif [ -n "${TWILIO_ACCOUNT_SID:-}" ] || grep -q "TWILIO_ACCOUNT_SID=" .env 2>/dev/null; then
   if ! pgrep -f "conversation-server" > /dev/null 2>&1; then
     echo "  Starting conversation server..."
     npx tsx skills/phone-conversation/scripts/conversation-server.ts > /tmp/conversation-server.log 2>&1 &
@@ -393,7 +401,7 @@ echo ""
 sleep 3
 echo "Verifying services..."
 VERIFY_PORTS="9900:voice-agent 8080:voice-agent-http 7844:dashboard 7843:agent-api 7845:screen-capture"
-if [ "${SKIP_PHONE:-}" != "1" ] && grep -q "TWILIO_ACCOUNT_SID=" .env 2>/dev/null; then
+if [ "${SKIP_PHONE:-}" != "1" ] && { [ -n "${TWILIO_ACCOUNT_SID:-}" ] || grep -q "TWILIO_ACCOUNT_SID=" .env 2>/dev/null; }; then
   VERIFY_PORTS="$VERIFY_PORTS 3100:conversation-server"
 fi
 for port_name in $VERIFY_PORTS; do
