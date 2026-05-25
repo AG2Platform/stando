@@ -34,6 +34,9 @@
  *                          (force OpenAI Whisper batch transcription) | 'gemini'.
  *   STT_OPENAI_MODEL     — Optional: Whisper transcription model id
  *                          (default: 'gpt-4o-mini-transcribe').
+ *   STT_LANGUAGE         — Optional: BCP-47 hint (e.g. 'en'). Unset = Whisper auto-detect.
+ *   OPENAI_BASE_URL      — Optional: redirect OpenAI calls to a proxy
+ *                          (LiteLLM, OpenRouter, Azure). No trailing slash.
  *   ANTHROPIC_API_KEY   — Optional: only needed if not using claude CLI subscription auth
  *   WORKSPACE_DIR       — Claude's working directory (default: sutando/)
  *   PORT                — WebSocket port (default: 9900)
@@ -115,11 +118,11 @@ function assertGeminiKey(name: string, value: string): void {
 	}
 }
 
-// VOICE_PROVIDER selects the realtime transport. Subagent text LLM stays on
-// Gemini regardless — only the bidirectional audio session swaps. When
-// 'openai', OPENAI_API_KEY is required for the transport; GEMINI_API_KEY is
-// still required for subagent text generation (the `model:` field on
-// VoiceSession is unchanged).
+// VOICE_PROVIDER selects only the realtime transport. The subagent text LLM
+// is governed by SUBAGENT_PROVIDER below — independent switch so users can
+// run e.g. OpenAI Realtime voice with Gemini subagents (cheaper) or the
+// reverse. When VOICE_PROVIDER='openai', OPENAI_API_KEY is required for the
+// transport itself.
 const VOICE_PROVIDER = (process.env.VOICE_PROVIDER || 'gemini').toLowerCase() as 'gemini' | 'openai';
 if (VOICE_PROVIDER !== 'gemini' && VOICE_PROVIDER !== 'openai') {
 	console.error(`Error: VOICE_PROVIDER must be 'gemini' or 'openai' (got "${VOICE_PROVIDER}")`);
@@ -163,6 +166,11 @@ if (STT_PROVIDER === 'openai' && !OPENAI_API_KEY) {
 	process.exit(1);
 }
 const STT_OPENAI_MODEL = process.env.STT_OPENAI_MODEL || 'gpt-4o-mini-transcribe';
+// STT_LANGUAGE: optional BCP-47 hint (e.g. 'en', 'es', 'ja'). Empty/unset →
+// Whisper auto-detects, which is the right default for multilingual users.
+const STT_LANGUAGE = process.env.STT_LANGUAGE || '';
+// OPENAI_BASE_URL: override the OpenAI API host (LiteLLM, OpenRouter, Azure).
+const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || '';
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? '';
 // Wave 4 (managed Gemini): a user who picked "Sign in to Sutando" in
@@ -247,23 +255,16 @@ if (CARTESIA_API_KEY) {
 // When 'openai': requires OPENAI_API_KEY. No managed gateway equivalent —
 //   users must BYOK.
 //
-// `google` stays defined unconditionally because other code paths in this
-// file (e.g. greeting/onboarding flows) call it directly. When subagent is
-// openai, the VoiceSession `model:` field uses the openai instance below
-// and the google factory is effectively dormant for subagents.
-const google = createGoogleGenerativeAI({ apiKey: GEMINI_VOICE_API_KEY_ENV || 'BYOK_MISSING_managed_voice_only' });
-
+// Both factories are scoped to their own provider — no shared global, no
+// dead construction. The chosen factory is the only one used.
 if (SUBAGENT_PROVIDER === 'openai' && !OPENAI_API_KEY) {
 	console.error(`Error: OPENAI_API_KEY is required when SUBAGENT_PROVIDER=openai.`);
 	process.exit(1);
 }
-const openai = SUBAGENT_PROVIDER === 'openai'
-	? createOpenAI({ apiKey: OPENAI_API_KEY })
-	: null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const subagentModel: any = SUBAGENT_PROVIDER === 'openai'
-	? openai!(SUBAGENT_OPENAI_MODEL)
-	: google(VOICE_MODEL);
+	? createOpenAI({ apiKey: OPENAI_API_KEY })(SUBAGENT_OPENAI_MODEL)
+	: createGoogleGenerativeAI({ apiKey: GEMINI_VOICE_API_KEY_ENV || 'BYOK_MISSING_managed_voice_only' })(VOICE_MODEL);
 
 let sessionRef: VoiceSession | null = null;
 
@@ -1145,7 +1146,12 @@ async function main() {
 	// of voice transport. Setting sttProvider also auto-disables the transport's
 	// built-in transcription per bodhi (see VoiceSessionConfig.inputAudioTranscription).
 	const sttProvider = STT_PROVIDER === 'openai'
-		? new OpenAIWhisperSTTProvider({ apiKey: OPENAI_API_KEY, model: STT_OPENAI_MODEL })
+		? new OpenAIWhisperSTTProvider({
+			apiKey: OPENAI_API_KEY,
+			model: STT_OPENAI_MODEL,
+			language: STT_LANGUAGE,
+			baseUrl: OPENAI_BASE_URL || undefined,
+		})
 		: undefined;
 	if (sttProvider) {
 		console.log(`${ts()} [Voice] STT: OpenAI Whisper (model=${STT_OPENAI_MODEL})`);

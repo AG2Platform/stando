@@ -68,6 +68,12 @@ Answer based ONLY on what you can see in the screenshot. Keep the answer convers
 			return { ok: false, error: 'Vision unavailable — VISION_PROVIDER=openai but OPENAI_API_KEY not set.' };
 		}
 		const res = await analyzeImageOpenAI({ apiKey, base64Image: imageData, mimeType, prompt, maxOutputTokens: 400, temperature: 0.3 });
+		if (res.ok) {
+			try {
+				const { recordEvent: cloudRecordEvent } = await import('../../src/cloud-client.js');
+				cloudRecordEvent({ kind: 'vision.openai', units: 1, metadata: { byok: true, source: 'screenshot-explain' } });
+			} catch { /* telemetry never breaks the call */ }
+		}
 		return res.ok ? { ok: true, answer: res.text } : { ok: false, error: res.error };
 	}
 

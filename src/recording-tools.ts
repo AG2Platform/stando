@@ -305,6 +305,12 @@ async function describeScreenshot(imagePath: string, previousDescs: string[] = [
 				console.log(`${new Date().toLocaleTimeString()} [DescribeScreen] OpenAI vision error: ${r.error}`);
 				return `Could not describe the screen. (${r.error})`;
 			}
+			// Mirror the BYOK telemetry the gemini branch (browser-tools.ts)
+			// records — keeps /admin/features counts apples-to-apples.
+			try {
+				const { recordEvent: cloudRecordEvent } = await import('./cloud-client.js');
+				cloudRecordEvent({ kind: 'vision.openai', units: 1, metadata: { byok: true, source: 'recording-tools' } });
+			} catch { /* telemetry never breaks the call */ }
 			return r.text;
 		}
 

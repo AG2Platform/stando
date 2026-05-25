@@ -104,6 +104,7 @@ def generate_image_openai(args):
     """
     import base64
     import json
+    import secrets
     from urllib import request as _urlreq
     from urllib.error import HTTPError, URLError
 
@@ -112,6 +113,7 @@ def generate_image_openai(args):
         print("Error: OPENAI_API_KEY not set. Add it to .env or set IMAGE_PROVIDER=gemini.", file=sys.stderr)
         sys.exit(1)
 
+    base_url = (os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com").rstrip("/")
     model = args.model or os.environ.get("IMAGE_MODEL_OPENAI") or os.environ.get("IMAGE_MODEL", "gpt-image-1")
     print(f"  Model: {model} (OpenAI)", file=sys.stderr)
     print(f"  Prompt: {args.prompt[:100]}{'...' if len(args.prompt) > 100 else ''}", file=sys.stderr)
@@ -138,7 +140,9 @@ def generate_image_openai(args):
         # Multipart upload to /v1/images/edits — supports up to 16 input
         # images per the gpt-image-1 docs. Build the body by hand to avoid
         # an http client dependency.
-        boundary = "----sutando-image-edit-" + str(int(time.time() * 1000))
+        # Random boundary token — eliminates the (tiny) chance of a collision
+        # with payload bytes that happen to match a time-based marker.
+        boundary = "----sutando-image-edit-" + secrets.token_hex(16)
         body = bytearray()
         def _field(name: str, value: str) -> None:
             body.extend(f"--{boundary}\r\n".encode())
@@ -170,7 +174,7 @@ def generate_image_openai(args):
             print(f"  Input: {img_path}", file=sys.stderr)
         body.extend(f"--{boundary}--\r\n".encode())
         headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
-        url = "https://api.openai.com/v1/images/edits"
+        url = f"{base_url}/v1/images/edits"
         req = _urlreq.Request(url, data=bytes(body), headers=headers, method="POST")
     else:
         payload = {
@@ -180,7 +184,7 @@ def generate_image_openai(args):
             "n": 1,
         }
         headers["Content-Type"] = "application/json"
-        url = "https://api.openai.com/v1/images/generations"
+        url = f"{base_url}/v1/images/generations"
         req = _urlreq.Request(url, data=json.dumps(payload).encode(), headers=headers, method="POST")
 
     print(f"  Generating image...", file=sys.stderr)

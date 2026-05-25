@@ -21,6 +21,10 @@ export interface AnalyzeImageOpenAIOpts {
 	model?: string;
 	maxOutputTokens?: number;
 	temperature?: number;
+	/** API host override (default: OPENAI_BASE_URL env, then api.openai.com). */
+	baseUrl?: string;
+	/** Request timeout in ms (default: 30000). */
+	timeoutMs?: number;
 }
 
 export type AnalyzeImageOpenAIResult =
@@ -29,6 +33,8 @@ export type AnalyzeImageOpenAIResult =
 
 export async function analyzeImageOpenAI(opts: AnalyzeImageOpenAIOpts): Promise<AnalyzeImageOpenAIResult> {
 	const model = opts.model || process.env.VISION_OPENAI_MODEL || 'gpt-4.1-mini';
+	const baseUrl = (opts.baseUrl || process.env.OPENAI_BASE_URL || 'https://api.openai.com').replace(/\/+$/, '');
+	const timeoutMs = opts.timeoutMs ?? 30_000;
 	const body = JSON.stringify({
 		model,
 		messages: [
@@ -48,13 +54,14 @@ export async function analyzeImageOpenAI(opts: AnalyzeImageOpenAIOpts): Promise<
 	});
 
 	try {
-		const res = await fetch('https://api.openai.com/v1/chat/completions', {
+		const res = await fetch(`${baseUrl}/v1/chat/completions`, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
 				Authorization: `Bearer ${opts.apiKey}`,
 			},
 			body,
+			signal: AbortSignal.timeout(timeoutMs),
 		});
 		if (!res.ok) {
 			const detail = await res.text().catch(() => '');

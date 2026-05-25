@@ -107,6 +107,8 @@ const OPENAI_VOICE_MODEL = process.env.OPENAI_VOICE_MODEL || 'gpt-realtime';
 const OPENAI_VOICE_NAME = process.env.OPENAI_VOICE_NAME || 'coral';
 const SUBAGENT_OPENAI_MODEL = process.env.SUBAGENT_OPENAI_MODEL || 'gpt-4.1-mini';
 const STT_OPENAI_MODEL = process.env.STT_OPENAI_MODEL || 'gpt-4o-mini-transcribe';
+const STT_LANGUAGE = process.env.STT_LANGUAGE || '';
+const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || '';
 
 const TREAT_AS_OWNER = (process.env.DISCORD_VOICE_OWNER ?? 'true') !== 'false';
 
@@ -638,7 +640,12 @@ async function createVoiceSession(connection: VoiceConnection): Promise<DiscordV
 		})
 		: undefined;
 	const sttProvider = STT_PROVIDER === 'openai'
-		? new OpenAIWhisperSTTProvider({ apiKey: OPENAI_API_KEY, model: STT_OPENAI_MODEL })
+		? new OpenAIWhisperSTTProvider({
+			apiKey: OPENAI_API_KEY,
+			model: STT_OPENAI_MODEL,
+			language: STT_LANGUAGE,
+			baseUrl: OPENAI_BASE_URL || undefined,
+		})
 		: undefined;
 	console.log(
 		`${ts()} [Voice] Transport: ${VOICE_PROVIDER === 'openai' ? `OpenAI Realtime (model=${OPENAI_VOICE_MODEL})` : `Gemini Live (model=${VOICE_NATIVE_AUDIO_MODEL})`} | ` +
