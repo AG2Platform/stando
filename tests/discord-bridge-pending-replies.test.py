@@ -197,20 +197,23 @@ def test_load_preserves_malformed_task_id_with_unparseable_ts(path):
 
 
 @_with_temp_pending_file
-def test_load_handles_boundary_age_exactly_7_days(path):
-    """Edge: exactly 7 days. Code uses `>` not `>=`, so exactly-7d
-    survives by one tick. Confirm to nail down the boundary semantics."""
+def test_load_handles_boundary_age_near_7_days(path):
+    """Edge near 7-day boundary. Code uses `>` not `>=` so anything <=7d
+    old survives. Pinning the "inside" entry one minute *inside* 7d (vs
+    literal exactly-7d) absorbs the few-ms drift between the test's
+    now_ms snapshot and the bridge's later time.time() read — otherwise
+    a real-clock race ages the boundary entry out on slower CI."""
     now_ms = int(time.time() * 1000)
-    exactly_7d_ago_ms = now_ms - (7 * 86400 * 1000)
-    just_over_7d_ms = now_ms - (7 * 86400 * 1000) - 1  # 1ms older
+    inside_7d_ms = now_ms - (7 * 86400 * 1000) + 60_000  # 1 min inside
+    over_7d_ms = now_ms - (7 * 86400 * 1000) - 60_000     # 1 min past
     data = {
-        f"task-{exactly_7d_ago_ms}": "boundary-channel",
-        f"task-{just_over_7d_ms}": "stale-channel",
+        f"task-{inside_7d_ms}": "boundary-channel",
+        f"task-{over_7d_ms}": "stale-channel",
     }
     path.write_text(json.dumps(data))
     got = bridge.load_pending_replies_from_disk()
-    assert f"task-{exactly_7d_ago_ms}" in got, "boundary entry incorrectly aged out"
-    assert f"task-{just_over_7d_ms}" not in got, "stale entry survived"
+    assert f"task-{inside_7d_ms}" in got, "boundary entry incorrectly aged out"
+    assert f"task-{over_7d_ms}" not in got, "stale entry survived"
 
 
 @_with_temp_pending_file
@@ -233,7 +236,7 @@ def main():
     test_load_preserves_recent_entries()
     test_load_ages_out_stale_entries()
     test_load_preserves_malformed_task_id_with_unparseable_ts()
-    test_load_handles_boundary_age_exactly_7_days()
+    test_load_handles_boundary_age_near_7_days()
     test_round_trip_write_then_load()
     print("All pending_replies persistence tests passed.")
 
