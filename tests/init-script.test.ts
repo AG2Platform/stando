@@ -210,7 +210,7 @@ describe('init.sh --preflight (Tier 2: missing-env detection)', () => {
 			'NGROK_DOMAIN=n',
 		].join('\n') + '\n');
 		const out = runInit(scratch, '--preflight');
-		assert.match(out.stdout, /optional=2\/8/);
+		assert.match(out.stdout, /optional=2\/9/);
 	});
 
 	it('counts external Discord/Telegram envs at $HOME/.claude/channels/...', () => {
@@ -221,7 +221,7 @@ describe('init.sh --preflight (Tier 2: missing-env detection)', () => {
 		writeFileSync(join(fakeHome, '.claude/channels/discord/.env'), 'DISCORD_BOT_TOKEN=d\n');
 		writeFileSync(join(fakeHome, '.claude/channels/telegram/.env'), 'TELEGRAM_BOT_TOKEN=t\n');
 		const out = runInit(scratch, '--preflight');
-		assert.match(out.stdout, /optional=2\/8/);
+		assert.match(out.stdout, /optional=2\/9/);
 	});
 
 	it('always emits a single [Preflight] summary line on stdout', () => {
