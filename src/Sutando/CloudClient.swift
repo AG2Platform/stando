@@ -94,6 +94,24 @@ struct CloudCompInfo: Decodable {
     let endsAt: String               // ISO date
     let monthlyCreditGrant: Int
     let daysRemaining: Int
+
+    enum CodingKeys: String, CodingKey {
+        case active, plan, reason, startsAt, endsAt, monthlyCreditGrant, daysRemaining
+    }
+
+    init(from decoder: Decoder) throws {
+        // Server (agent-universe lib/billing/effective-plan.ts) only emits
+        // active comps and omits the `active` field entirely. A missing
+        // key means "yes, active" — see PRODUCT.md spec ("comp: null | {…}").
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.active = try c.decodeIfPresent(Bool.self, forKey: .active) ?? true
+        self.plan = try c.decode(String.self, forKey: .plan)
+        self.reason = try c.decode(String.self, forKey: .reason)
+        self.startsAt = try c.decode(String.self, forKey: .startsAt)
+        self.endsAt = try c.decode(String.self, forKey: .endsAt)
+        self.monthlyCreditGrant = try c.decode(Int.self, forKey: .monthlyCreditGrant)
+        self.daysRemaining = try c.decode(Int.self, forKey: .daysRemaining)
+    }
 }
 
 /// Current-user snapshot returned by GET /api/me.
