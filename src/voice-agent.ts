@@ -217,14 +217,13 @@ const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
 const VOICE_NATIVE_AUDIO_MODEL = process.env.VOICE_NATIVE_AUDIO_MODEL || 'gemini-3.1-flash-live-preview';
 const VOICE_NAME = process.env.VOICE_NAME || 'Puck';
 // Google Search grounding — MUST be false under gemini-3.1-flash-live-preview
-// native audio. Combining googleSearch: true + 3.1 native audio causes the
-// transport to reject setup with close code 1011 "exceeded your current
-// quota" (misleading error text — actual cause is the unsupported combo;
-// 2.5 silently accepted it). Verified 2026-04-09 by flipping the flag and
-// re-running setup — 3.1 connects cleanly with googleSearch=false.
-// Default true preserves existing 2.5 behavior. Set VOICE_GOOGLE_SEARCH=false
-// in .env when unpinning VOICE_NATIVE_AUDIO_MODEL to 3.1.
-const VOICE_GOOGLE_SEARCH = (process.env.VOICE_GOOGLE_SEARCH ?? 'true').toLowerCase() !== 'false';
+// native audio (the current default). Combining googleSearch: true + 3.1
+// native audio causes the transport to reject setup with close code 1011
+// "exceeded your current quota" (misleading error text — actual cause is
+// the unsupported combo; 2.5 silently accepted it). Set
+// VOICE_GOOGLE_SEARCH=true in .env only if you also pin
+// VOICE_NATIVE_AUDIO_MODEL back to a 2.5 model that supports grounding.
+const VOICE_GOOGLE_SEARCH = (process.env.VOICE_GOOGLE_SEARCH ?? 'false').toLowerCase() !== 'false';
 const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY || '';
 
 // Lazy-load Cartesia TTS only when a key is set. This means Gemini-only
