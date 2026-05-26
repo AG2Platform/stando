@@ -198,6 +198,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if OnboardingWindowController.forceWizardRequested {
                 logToFile("Onboarding force sentinel present — showing wizard, deferring bootstrap until Done")
                 showOnboardingWindow()
+            } else if OnboardingWindowController.isTrueFirstLaunch {
+                // Brand-new install: no onboarding markers, no firstrun
+                // marker, no cloud-auth. Brand-new users deserve the
+                // guided 5-step flow. Returning users with partial state
+                // still take the closable Settings path below so a
+                // hung step can't lock them out.
+                logToFile("True first launch detected — showing onboarding wizard")
+                showOnboardingWindow()
             } else {
                 if OnboardingWindowController.needsOnboarding {
                     logToFile("Onboarding gate bypassed — writing sentinel, routing to first-launch Settings flow")

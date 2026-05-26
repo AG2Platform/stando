@@ -87,6 +87,23 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         !FileManager.default.fileExists(atPath: onboardingCompleteMarker())
     }
 
+    /// True iff this is the user's very first launch on this Mac — no
+    /// onboarding/firstrun markers AND no prior cloud-auth.json. When
+    /// this is true the wizard shows; returning users (any state
+    /// present) take the closable Settings path so a transient
+    /// permission/install failure doesn't lock them out — see the
+    /// main.swift cold-launch branch comment for the historical
+    /// rationale. The dev `--reset-onboarding` flow still wins via
+    /// `forceWizardRequested` even if `cloud-auth.json` survived a
+    /// reset (which it does — the dev script doesn't touch it).
+    static var isTrueFirstLaunch: Bool {
+        let home = sutandoHomePathForOnboarding()
+        let fm = FileManager.default
+        return !fm.fileExists(atPath: home + "/.onboarding-complete")
+            && !fm.fileExists(atPath: home + "/.firstrun-complete")
+            && !fm.fileExists(atPath: home + "/cloud-auth.json")
+    }
+
     /// True iff the force-wizard sentinel is present. Set by
     /// `app/rebuild.sh --reset-onboarding` (and anything else that
     /// explicitly wants the guided flow). AppDelegate consults this
