@@ -151,6 +151,7 @@ struct ChannelConfig {
     let helpURL: URL?
     let helpText: String
     let launchdLabel: String
+    let docsURL: URL?           // Sutando-hosted setup guide on sutando.ag2.ai/docs
 
     var envPath: String {
         NSHomeDirectory() + "/.claude/channels/\(id)/.env"
@@ -163,7 +164,8 @@ struct ChannelConfig {
                                placeholder: "stored at ~/.claude/channels/discord/.env (mode 0600)")],
         helpURL: URL(string: "https://discord.com/developers/applications"),
         helpText: "Create an app in Discord's developer portal, add a bot, copy the token here.",
-        launchdLabel: "com.sutando.discord-bridge"
+        launchdLabel: "com.sutando.discord-bridge",
+        docsURL: URL(string: "https://sutando.ag2.ai/docs/integrations/discord")
     )
 
     static let telegram = ChannelConfig(
@@ -173,7 +175,8 @@ struct ChannelConfig {
                                placeholder: "stored at ~/.claude/channels/telegram/.env (mode 0600)")],
         helpURL: URL(string: "https://t.me/BotFather"),
         helpText: "Message @BotFather on Telegram → /newbot → copy the HTTP API token here.",
-        launchdLabel: "com.sutando.telegram-bridge"
+        launchdLabel: "com.sutando.telegram-bridge",
+        docsURL: URL(string: "https://sutando.ag2.ai/docs/integrations/telegram")
     )
 
     static let slack = ChannelConfig(
@@ -185,7 +188,8 @@ struct ChannelConfig {
         ],
         helpURL: URL(string: "https://api.slack.com/apps"),
         helpText: "Create a Slack app with Socket Mode enabled. Bot token (xoxb-) is on OAuth & Permissions; app-level token (xapp-) is on Basic Information.",
-        launchdLabel: "com.sutando.slack-bridge"
+        launchdLabel: "com.sutando.slack-bridge",
+        docsURL: URL(string: "https://sutando.ag2.ai/docs/integrations/slack")
     )
 
     static let all: [ChannelConfig] = [.discord, .telegram, .slack]
@@ -388,6 +392,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         advancedStack.spacing = 14
         advancedStack.translatesAutoresizingMaskIntoConstraints = false
         for field in SettingsField.advanced {
+            // Insert a labelled "Setup guide →" header before each integration
+            // sub-group inside Advanced. Discord/Telegram/Slack get their docs
+            // link directly on the channel row; Phone (Twilio+ngrok) and X
+            // span multiple flat fields here, so we precede them with a
+            // sub-header that carries the docs link.
+            if field == .TWILIO_ACCOUNT_SID {
+                advancedStack.addArrangedSubview(subsectionDocsLink(
+                    title: "Phone (Twilio + ngrok)",
+                    docsURL: URL(string: "https://sutando.ag2.ai/docs/integrations/phone")!
+                ))
+            } else if field == .X_BEARER_TOKEN {
+                advancedStack.addArrangedSubview(subsectionDocsLink(
+                    title: "X (Twitter)",
+                    docsURL: URL(string: "https://sutando.ag2.ai/docs/integrations/x")!
+                ))
+            }
             advancedStack.addArrangedSubview(fieldRow(field))
         }
         advancedStack.isHidden = true
@@ -523,6 +543,36 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         hr.widthAnchor.constraint(equalToConstant: 504).isActive = true
         wrap.addArrangedSubview(hr)
         return wrap
+    }
+
+    /// Inline subsection title + "Setup guide →" link, used inside the
+    /// Advanced integrations container so a multi-field group (Twilio, X)
+    /// can carry one Sutando-docs link without inflating the row layout.
+    private func subsectionDocsLink(title: String, docsURL: URL) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = 8
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        row.addArrangedSubview(label)
+
+        let link = NSButton()
+        link.title = "Setup guide →"
+        link.bezelStyle = .recessed
+        link.font = .systemFont(ofSize: 11)
+        link.target = self
+        link.action = #selector(openHelpLink(_:))
+        link.identifier = NSUserInterfaceItemIdentifier(docsURL.absoluteString)
+        row.addArrangedSubview(link)
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+        row.addArrangedSubview(spacer)
+        return row
     }
 
     private func cloudAccountRow() -> NSView {
@@ -1031,10 +1081,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         channelStatusLabels[channel.id] = status
         labelRow.addArrangedSubview(status)
 
-        if let url = channel.helpURL {
+        if channel.helpURL != nil || channel.docsURL != nil {
             let spacer = NSView()
             spacer.translatesAutoresizingMaskIntoConstraints = false
             labelRow.addArrangedSubview(spacer)
+        }
+        if let url = channel.docsURL {
+            let link = NSButton()
+            link.title = "Setup guide →"
+            link.bezelStyle = .recessed
+            link.font = .systemFont(ofSize: 11)
+            link.target = self
+            link.action = #selector(openHelpLink(_:))
+            link.identifier = NSUserInterfaceItemIdentifier(url.absoluteString)
+            labelRow.addArrangedSubview(link)
+        }
+        if let url = channel.helpURL {
             let link = NSButton()
             link.title = "Get token →"
             link.bezelStyle = .recessed
