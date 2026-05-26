@@ -52,6 +52,7 @@ enum SettingsField: String, CaseIterable {
     case TWILIO_ACCOUNT_SID
     case TWILIO_AUTH_TOKEN
     case TWILIO_PHONE_NUMBER
+    case NGROK_AUTHTOKEN
     case NGROK_DOMAIN
     case OWNER_NUMBER
     case VERIFIED_CALLERS
@@ -70,6 +71,7 @@ enum SettingsField: String, CaseIterable {
         case .TWILIO_ACCOUNT_SID: return "Twilio Account SID"
         case .TWILIO_AUTH_TOKEN: return "Twilio Auth Token"
         case .TWILIO_PHONE_NUMBER: return "Twilio phone number"
+        case .NGROK_AUTHTOKEN: return "ngrok auth token"
         case .NGROK_DOMAIN: return "ngrok reserved domain"
         case .OWNER_NUMBER: return "Owner phone number"
         case .VERIFIED_CALLERS: return "Verified callers (comma-separated)"
@@ -87,6 +89,7 @@ enum SettingsField: String, CaseIterable {
         case .CARTESIA_API_KEY: return "Optional — premium TTS for task results."
         case .NOTIFICATION_EMAIL: return "Optional — alerts when health checks fail."
         case .TWILIO_ACCOUNT_SID: return "Optional — phone calls. Free trial available."
+        case .NGROK_AUTHTOKEN: return "Required for phone calls. Falls back to global ngrok config if unset."
         case .NGROK_DOMAIN: return "Optional — reserved domain for stable Twilio webhooks."
         case .OWNER_NUMBER: return "Your phone number, e.g. +14155551234. Full phone access."
         case .VERIFIED_CALLERS: return "Numbers granted limited access. Comma-separated."
@@ -98,6 +101,7 @@ enum SettingsField: String, CaseIterable {
     var isSecret: Bool {
         switch self {
         case .GEMINI_API_KEY, .CARTESIA_API_KEY, .TWILIO_AUTH_TOKEN,
+             .NGROK_AUTHTOKEN,
              .X_BEARER_TOKEN, .X_API_KEY, .X_API_SECRET,
              .X_ACCESS_TOKEN, .X_ACCESS_TOKEN_SECRET:
             return true
@@ -112,6 +116,7 @@ enum SettingsField: String, CaseIterable {
         case .CARTESIA_API_KEY: return URL(string: "https://cartesia.ai")
         case .TWILIO_ACCOUNT_SID, .TWILIO_AUTH_TOKEN, .TWILIO_PHONE_NUMBER:
             return URL(string: "https://www.twilio.com/")
+        case .NGROK_AUTHTOKEN: return URL(string: "https://dashboard.ngrok.com/get-started/your-authtoken")
         case .NGROK_DOMAIN: return URL(string: "https://dashboard.ngrok.com/domains")
         default: return nil
         }
@@ -120,8 +125,8 @@ enum SettingsField: String, CaseIterable {
     static var basic: [SettingsField] { [.GEMINI_API_KEY, .CARTESIA_API_KEY, .NOTIFICATION_EMAIL] }
     static var advanced: [SettingsField] {
         [.CARTESIA_VOICE_ID, .TWILIO_ACCOUNT_SID, .TWILIO_AUTH_TOKEN, .TWILIO_PHONE_NUMBER,
-         .NGROK_DOMAIN, .OWNER_NUMBER, .VERIFIED_CALLERS, .X_BEARER_TOKEN, .X_API_KEY,
-         .X_API_SECRET, .X_ACCESS_TOKEN, .X_ACCESS_TOKEN_SECRET]
+         .NGROK_AUTHTOKEN, .NGROK_DOMAIN, .OWNER_NUMBER, .VERIFIED_CALLERS,
+         .X_BEARER_TOKEN, .X_API_KEY, .X_API_SECRET, .X_ACCESS_TOKEN, .X_ACCESS_TOKEN_SECRET]
     }
 }
 

@@ -166,8 +166,7 @@ if (SUBAGENT_PROVIDER === 'openai' && !OPENAI_API_KEY) {
 	process.exit(1);
 }
 if (!NGROK_AUTHTOKEN) {
-	console.error('Error: NGROK_AUTHTOKEN required for auto-tunnel');
-	process.exit(1);
+	console.warn('Warning: NGROK_AUTHTOKEN not set — relying on global ngrok config (~/Library/Application Support/ngrok/ngrok.yml)');
 }
 
 const CALLS_DIR = join(RESULTS_DIR, 'calls');

@@ -206,7 +206,7 @@ preflight() {
   fi
 
   # .env optional keys — count what's set in the repo .env
-  local optional_keys="TWILIO_ACCOUNT_SID NGROK_DOMAIN CARTESIA_API_KEY X_API_KEY ANTHROPIC_API_KEY GOOGLE_APPLICATION_CREDENTIALS"
+  local optional_keys="TWILIO_ACCOUNT_SID NGROK_AUTHTOKEN NGROK_DOMAIN CARTESIA_API_KEY X_API_KEY ANTHROPIC_API_KEY GOOGLE_APPLICATION_CREDENTIALS"
   for key in $optional_keys; do
     optional_total=$((optional_total + 1))
     if [ -f "$REPO/.env" ] && grep -qE "^${key}=.+" "$REPO/.env"; then
