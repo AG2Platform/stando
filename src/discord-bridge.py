@@ -2735,6 +2735,68 @@ async def poll_approved():
         await asyncio.sleep(3)
 
 
+# Delivery-idempotency sentinels. Pre-fix: if the bridge crashed
+# BETWEEN `channel.send(reply_text)` returning success and the
+# subsequent `archive_file(result_file, ...)` call, on restart the
+# result file still exists in `results/` and would be re-sent —
+# producing a duplicate. With these sentinels:
+#
+#   1. Right BEFORE the send, check if
+#      `<DELIVERED_DIR>/<task_id>.sentinel` exists. If yes, the
+#      previous run already attempted to deliver this task — skip
+#      the send, archive the files, remove sentinel.
+#   2. Right AFTER the send returns successfully, touch the sentinel.
+#      Then archive. Then remove sentinel.
+#
+# The crash-between-send-and-sentinel window remains a narrow
+# double-send vector (Discord nonce-based dedup would close that
+# tighter; deferred to follow-up). The crash-between-sentinel-and-
+# archive window produces a no-op on restart (sentinel + result file
+# → archive both, no send) — the common and correct behavior.
+#
+# Scope of THIS PR: poll_results main-path only. Channel-redirect,
+# proactive, and dm-fallback paths are scoped follow-ups.
+DELIVERED_DIR = REPO / "state" / "discord-delivered"
+
+
+def _delivered_sentinel_path(task_id: str) -> Path:
+    return DELIVERED_DIR / f"{task_id}.sentinel"
+
+
+def _mark_delivered(task_id: str) -> None:
+    """Touch the delivery sentinel for `task_id`. Called immediately
+    after a successful `channel.send`. Used by poll_results to skip
+    re-sending the same result on restart. Failure to write is non-
+    fatal (worst case: duplicate send on the next restart) — don't
+    let it block the bridge."""
+    try:
+        DELIVERED_DIR.mkdir(parents=True, exist_ok=True)
+        _delivered_sentinel_path(task_id).touch()
+    except Exception as e:
+        print(f"  [delivered] sentinel write failed for {task_id}: {e}", flush=True)
+
+
+def _is_delivered(task_id: str) -> bool:
+    """True iff the sentinel for `task_id` exists. Called before
+    every send to short-circuit duplicates after a crash."""
+    try:
+        return _delivered_sentinel_path(task_id).exists()
+    except Exception:
+        return False
+
+
+def _clear_delivered(task_id: str) -> None:
+    """Remove the sentinel — called during archive cleanup. Without
+    this, `state/discord-delivered/` would accumulate sentinels for
+    every task ever delivered. The sentinel's purpose is bounded:
+    detect post-send crash before archive. Once archive completes,
+    the sentinel is no longer load-bearing."""
+    try:
+        _delivered_sentinel_path(task_id).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 PENDING_REPLIES_FILE = REPO / "state" / "discord-pending-replies.json"
 
 def _atomic_write_pending_replies(data: dict) -> None:
@@ -2845,6 +2907,21 @@ async def poll_results():
                     task_file = TASKS_DIR / f"{task_id}.txt"
                     archive_file(task_file, "tasks", task_id)
                     continue
+
+                # Idempotency check: if the previous run already sent
+                # this reply (sentinel present) but crashed BEFORE the
+                # archive completed, skip the send + archive normally.
+                # Avoids the double-delivery vector when the bridge
+                # restarts between channel.send() returning and
+                # archive_file() finishing. See DELIVERED_DIR docstring.
+                if _is_delivered(task_id):
+                    print(f"  Skipped (already delivered per sentinel): {task_id}", flush=True)
+                    archive_file(result_file, "results", task_id)
+                    task_file = TASKS_DIR / f"{task_id}.txt"
+                    archive_file(task_file, "tasks", task_id)
+                    _clear_delivered(task_id)
+                    continue
+
                 try:
                     # Extract optional [reply: <message_id>] directive — the
                     # agent signals "this result is a reply to that message"
@@ -2961,6 +3038,13 @@ async def poll_results():
                             await channel.send(f"(file not allowed: {fpath})")
                             print(f"  REJECTED file (not in allowlist): {fpath}", flush=True)
 
+                    # Mark delivered BEFORE the archive runs. If we
+                    # crash between channel.send returning and archive,
+                    # on restart the sentinel + result-file combo
+                    # triggers the skip-block above (archive + clear,
+                    # no re-send). Without this, the result file
+                    # would re-send on restart producing a duplicate.
+                    _mark_delivered(task_id)
                     print(f"  Replied: {reply_text[:80]}...", flush=True)
                     _emit_channel_metric(
                         "out",
@@ -2977,6 +3061,10 @@ async def poll_results():
                 archive_file(result_file, "results", task_id)
                 task_file = TASKS_DIR / f"{task_id}.txt"
                 archive_file(task_file, "tasks", task_id)
+                # Delivery succeeded + archived — sentinel has served
+                # its purpose, remove to bound `discord-delivered/`
+                # directory growth.
+                _clear_delivered(task_id)
         await asyncio.sleep(1)
 
 
