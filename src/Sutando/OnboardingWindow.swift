@@ -558,7 +558,13 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         if CloudAuth.shared.isSignedIn {
             refreshManagedSnapshot()
         } else {
-            applyManagedSnapshot(nil)
+            // Defer: applyManagedSnapshot → updateContinueButton IUO-unwraps
+            // `continueButton`, which isn't assigned until later in buildUI().
+            // Mirrors the async path refreshManagedSnapshot() takes via its
+            // network callback.
+            DispatchQueue.main.async { [weak self] in
+                self?.applyManagedSnapshot(nil)
+            }
         }
 
         return stack
