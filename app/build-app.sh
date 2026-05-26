@@ -139,9 +139,20 @@ case "$SUTANDO_LAUNCHER_ARCH" in
         ;;
 esac
 
-# 2. Copy Info.plist + entitlements into the bundle
+# 2. Copy Info.plist + entitlements into the bundle. CI bumps
+# CFBundleShortVersionString from the release tag (see release.yml
+# "Bump CFBundleShortVersionString" step); for local rebuilds we mirror
+# that by reading the most recent v* tag so Sparkle doesn't see the
+# committed-but-stale 0.2.9 placeholder and prompt "you're behind."
+# Override with SUTANDO_VERSION=… if you need a specific value.
 echo "  Copying Info.plist..."
 cp "$REPO/app/Info.plist" "$APP/Contents/Info.plist"
+SUTANDO_VERSION="${SUTANDO_VERSION:-$(git -C "$REPO" describe --tags --abbrev=0 --match 'v*' 2>/dev/null | sed 's/^v//' || true)}"
+if [ -n "$SUTANDO_VERSION" ]; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $SUTANDO_VERSION" "$APP/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $SUTANDO_VERSION" "$APP/Contents/Info.plist"
+    echo "    CFBundleShortVersionString → $SUTANDO_VERSION"
+fi
 
 # 3. Copy LaunchAgent templates
 echo "  Copying LaunchAgent templates..."
