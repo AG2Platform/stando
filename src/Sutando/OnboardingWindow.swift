@@ -910,7 +910,13 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
                 managedStatusLabel?.textColor = .systemGreen
             } else {
                 managedCompCardContainer?.isHidden = true
-                managedStatusLabel?.stringValue = "Signed in, but your beta application isn't approved yet. Switch to \"Bring my own Gemini key\" to keep going, or wait for the approval email."
+                // Desktop sign-in already gates on beta_status='approved'
+                // (cli-login won't mint a token otherwise), so reaching
+                // this branch means the user IS approved but has no
+                // active comp — usually a pre-comp-code approval that
+                // never got backfilled. Don't tell them to "wait for
+                // the approval email" — they already got it.
+                managedStatusLabel?.stringValue = "Signed in on the Free plan with no active comp. Switch to \"Bring my own Gemini key\" to keep going, or contact support if you expected a 2-month Max comp."
                 managedStatusLabel?.textColor = .systemOrange
             }
         }
