@@ -818,7 +818,7 @@ def run_all_checks() -> list[dict]:
     # Messaging bridges (optional — only check if configured and not skipped)
     skip_telegram = (env_path.exists() and "SKIP_TELEGRAM=1" in env_path.read_text()) or os.environ.get("SKIP_TELEGRAM") == "1"
     channels_dir = Path.home() / ".claude" / "channels"
-    for name, proc_name in [("telegram-bridge", "telegram-bridge"), ("discord-bridge", "discord-bridge")]:
+    for name, proc_name in [("telegram-bridge", "telegram-bridge"), ("discord-bridge", "discord-bridge"), ("slack-bridge", "slack-bridge")]:
         channel_name = name.replace("-bridge", "")
         if channel_name == "telegram" and skip_telegram:
             continue
@@ -1267,7 +1267,7 @@ def main():
                 if c["name"].startswith("com.sutando."):
                     result = fix_launchd(c["name"])
                     print(f"  {c['name']}: {result}")
-                elif c["name"] in ("telegram-bridge", "discord-bridge"):
+                elif c["name"] in ("telegram-bridge", "discord-bridge", "slack-bridge"):
                     # If stale (process older than source code), kill old PID first
                     # so the new process doesn't conflict with a still-running zombie.
                     if c["status"] == "stale":
