@@ -81,7 +81,7 @@ def main() -> int:
     # (the `user_id not in allowed` gate); the budget only needs to be
     # large enough to terminate at the next `\ndef ` boundary.
     write_match = re.search(
-        r"def _write_task\([^)]*\)[^:]*:\s*\n([\s\S]{0,6000}?)(?=\n\ndef |\Z)",
+        r"def _write_task\([^)]*\)[^:]*:\s*\n([\s\S]{0,8000}?)(?=\n\ndef |\Z)",
         src,
     )
     if not write_match:
