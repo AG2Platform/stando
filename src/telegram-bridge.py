@@ -454,8 +454,49 @@ def send_reply(chat_id, text):
             },
         )
 
+def _recover_orphan_sending_files() -> int:
+    """Restart-safety: rename any orphan `results/proactive-*.sending`
+    files back to `*.txt` so they get re-claimed on the next poll.
+
+    Atomic-claim-by-rename (`proactive-*.txt` → `.sending`) prevents
+    same-tick double-deliveries between concurrent poll iterations.
+    But if the bridge crashes BETWEEN the rename and delivery, the
+    `.sending` file sits orphaned in `results/` — no poll iteration
+    ever looks at `.sending` suffixes, so the proactive is silently
+    dropped. Mirrors `_recover_orphan_sending_files` in discord-bridge.py.
+    """
+    if not RESULTS_DIR.exists():
+        return 0
+    recovered = 0
+    for f in RESULTS_DIR.iterdir():
+        if not (f.name.startswith("proactive-") and f.suffix == ".sending"):
+            continue
+        target = f.with_suffix(".txt")
+        try:
+            if target.exists():
+                print(
+                    f"  [startup] skipping orphan recovery: {target.name} "
+                    f"already exists (collision with {f.name})",
+                    flush=True,
+                )
+                continue
+            f.rename(target)
+            recovered += 1
+            print(f"  [startup] recovered orphan {f.name} → {target.name}", flush=True)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"  [startup] failed to recover {f.name}: {e}", flush=True)
+    if recovered:
+        print(f"  [startup] recovered {recovered} orphan .sending file(s)", flush=True)
+    return recovered
+
+
 def main():
     print(f"Telegram bridge started. Polling for messages...", flush=True)
+    # Restart-safety: sweep orphan `.sending` files before the poll
+    # loop starts. See _recover_orphan_sending_files for rationale.
+    _recover_orphan_sending_files()
     offset = None
     allowed = load_allowed()
     pending_replies = {}  # task_id -> chat_id
