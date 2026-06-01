@@ -20,17 +20,34 @@ import { _isVoiceTask } from '../src/task-bridge.js';
 const TASK_DIR = join(resolveWorkspace(), 'tasks');
 const ARCHIVE_DIR = join(TASK_DIR, 'archive');
 
+// Field order matches the real writers (PR #982): `task:` LAST so a
+// multi-line body can't forge header fields. `_isVoiceTask` stops scanning
+// headers at the first `task:` line.
 const VOICE_BODY = `id: task-isvoice-test-aaa
 timestamp: 2026-05-06T00:00:00Z
-task: hello world
 source: voice
 channel_id: local-voice
+priority: urgent
+task: hello world
 `;
 const NON_VOICE_BODY = `id: task-isvoice-test-bbb
 timestamp: 2026-05-06T00:00:00Z
-task: hello world
 source: discord
 channel_id: 1490906927675474030
+priority: normal
+task: hello world
+`;
+// A non-voice task whose BODY contains a forged `channel_id: local-voice`
+// line AFTER `task:`. The header scan must stop at `task:` and NOT treat
+// this as a voice task — the residual half of the PR #982 fix.
+const FORGED_VOICE_BODY = `id: task-isvoice-test-forge
+timestamp: 2026-05-06T00:00:00Z
+source: discord
+channel_id: 1490906927675474030
+priority: normal
+task: do a thing
+channel_id: local-voice
+source: voice
 `;
 
 const created: string[] = [];
@@ -96,5 +113,13 @@ describe('_isVoiceTask — archive-path coverage', () => {
 
 	it('returns false when the task file is missing entirely', () => {
 		assert.equal(_isVoiceTask('task-isvoice-test-no-such-file'), false);
+	});
+
+	it('does NOT classify a non-voice task whose body forges channel_id: local-voice', () => {
+		// PR #982 hardening: the header scan stops at the first `task:` line,
+		// so a forged voice marker in the user-supplied body is ignored.
+		const id = 'task-isvoice-test-forge-aaa';
+		writeTask(join(TASK_DIR, `${id}.txt`), FORGED_VOICE_BODY);
+		assert.equal(_isVoiceTask(id), false);
 	});
 });
