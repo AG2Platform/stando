@@ -8,6 +8,12 @@
  *                             without `pnpm build:client` returns 503 with a
  *                             pointer to the build command (no longer falls
  *                             back to inline HTML — PR-C step 6 deleted it).
+ *
+ *                             Pluggable UI: export CLIENT_DIST_DIR=/abs/path
+ *                             to swap in a different bundle (e.g. the private
+ *                             stando UI, or a fork's UI). The fork only needs
+ *                             to honor the wire contract documented in
+ *                             AG2Platform/sutando-client's WIRE.md.
  *   GET  /sse               — Server-Sent Events: `agent-state`, `toggle-voice`,
  *                             `toggle-mute` — consumed by the page.
  *   GET  /sse-status        — JSON snapshot { muted, voiceConnected, state, label, clients }.
@@ -29,16 +35,37 @@
 
 import { createServer } from 'node:http';
 import { writeFileSync, readFileSync, statSync } from 'node:fs';
-import { extname, normalize, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { extname, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTmuxStatus } from './tmux-status.js';
 import { statePath } from './state-paths.js';
 
-// Dist directory for the React bundle (`client/`). Resolved once at module
-// load — web-server.ts lives in `src/`, so `../client/dist` lands at the
-// workspace root. PR-C step 6 retired the inline HTML fallback; `pnpm
-// build:client` must run for `/` to render anything.
-const CLIENT_DIST_DIR = fileURLToPath(new URL('../client/dist/', import.meta.url));
+// Dist directory for the React bundle (`client/`). Default lives at
+// `../client/dist/` relative to this file (stando's bundled UI). A
+// downstream build can swap in its own UI by exporting
+// `CLIENT_DIST_DIR=/abs/path/to/dist` before launching the voice agent —
+// useful for white-labeled builds, a private branded UI, or running a
+// different framework's output entirely. The fork only has to honor the
+// wire contract (see AG2Platform/sutando-client's WIRE.md).
+//
+// Re-resolved on every startWebServer() call so tests can flip the env var
+// between calls without re-importing the module.
+function resolveClientDistDir(): string {
+	const override = process.env.CLIENT_DIST_DIR?.trim();
+	if (override) {
+		// Tilde expansion for convenience (~/.sutando-ui/dist) — `resolve()`
+		// alone wouldn't expand it and would silently look under the cwd.
+		const expanded = override.startsWith('~/') || override === '~'
+			? override.replace(/^~/, homedir())
+			: override;
+		const abs = resolve(expanded);
+		return abs.endsWith(sep) ? abs : abs + sep;
+	}
+	return fileURLToPath(new URL('../client/dist/', import.meta.url));
+}
+
+let CLIENT_DIST_DIR = resolveClientDistDir();
 
 const STATIC_MIME_TYPES: Record<string, string> = {
 	'.html': 'text/html; charset=utf-8',
@@ -139,6 +166,10 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 	const HTTP_PORT = opts.port;
 	const HTTP_HOST = opts.host;
 	const WS_PORT = opts.wsPort;
+
+	// Re-resolve the client dist dir per call so tests (and any caller that
+	// flips $CLIENT_DIST_DIR between invocations) see the latest override.
+	CLIENT_DIST_DIR = resolveClientDistDir();
 
 	// SSE clients for remote toggle
 	const sseClients: import('node:http').ServerResponse[] = [];
