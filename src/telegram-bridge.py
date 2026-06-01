@@ -29,6 +29,7 @@ from task_priority import default_priority_for_source  # noqa: E402
 from result_markers import parse_markers  # noqa: E402
 
 from workspace_default import resolve_workspace  # noqa: E402
+from single_instance import acquire as _single_instance_acquire  # noqa: E402
 REPO = resolve_workspace()
 TASKS_DIR = REPO / "tasks"
 RESULTS_DIR = REPO / "results"
@@ -455,6 +456,7 @@ def send_reply(chat_id, text):
         )
 
 def main():
+    _single_instance_acquire("telegram-bridge")
     print(f"Telegram bridge started. Polling for messages...", flush=True)
     offset = None
     allowed = load_allowed()

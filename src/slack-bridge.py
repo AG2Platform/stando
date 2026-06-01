@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from task_priority import default_priority_for_source  # noqa: E402
 from result_markers import parse_markers  # noqa: E402
 from workspace_default import resolve_workspace  # noqa: E402
+from single_instance import acquire as _single_instance_acquire  # noqa: E402
 
 try:
     from slack_bolt import App
@@ -678,6 +679,7 @@ def _no_events_hint_thread():
 
 
 def main():
+    _single_instance_acquire("slack-bridge")
     print("Slack bridge started. Socket Mode connecting...", flush=True)
     threading.Thread(target=result_watcher, name="slack-result-watcher", daemon=True).start()
     threading.Thread(target=_no_events_hint_thread, name="slack-no-events-hint", daemon=True).start()
