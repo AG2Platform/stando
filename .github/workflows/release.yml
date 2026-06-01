@@ -143,16 +143,34 @@ jobs:
           fi
 
       - name: Install pnpm workspace dependencies
-        # build-app.sh runs `pnpm --filter @sutando/client build`, which needs
-        # client/node_modules populated. `npm ci` above only handles the root
-        # (no npm workspaces), so we install the pnpm workspace explicitly.
         run: pnpm install --frozen-lockfile
+
+      # The conversation UI lives in the private AG2Platform/stando-ui repo
+      # (extracted from client/). build-app.sh stages a built dist into the
+      # bundle; we check the UI repo out here and build it. Requires a PAT
+      # with read access to stando-ui in secrets.STANDO_UI_TOKEN — the
+      # default GITHUB_TOKEN only reaches this repo.
+      - name: Check out stando-ui (private UI repo)
+        uses: actions/checkout@v4
+        with:
+          repository: AG2Platform/stando-ui
+          token: ${{ secrets.STANDO_UI_TOKEN }}
+          path: stando-ui-src
+
+      - name: Build stando-ui
+        working-directory: stando-ui-src
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
 
       - name: Build Sutando.app
         env:
           ENABLE_SPARKLE: "1"
           SPARKLE_FRAMEWORK: ${{ github.workspace }}/app/vendor/Sparkle.framework
           ARCH: universal
+          # build-app.sh prefers a prebuilt CLIENT_DIST_DIR over a sibling
+          # checkout; point it at the dist we just built above.
+          CLIENT_DIST_DIR: ${{ github.workspace }}/stando-ui-src/dist
         run: bash app/build-app.sh
 
       - name: Notarize Sutando.app

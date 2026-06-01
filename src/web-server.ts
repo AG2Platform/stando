@@ -2,18 +2,20 @@
  * HTTP server for the Sutando desktop + remote browser conversation page.
  *
  * Endpoints:
- *   GET  /, /v2[/*]         — Vite-built React bundle (client/dist). The two
- *                             roots serve the same SPA so existing bookmarks
- *                             pointing at /v2 keep working. A fresh checkout
- *                             without `pnpm build:client` returns 503 with a
- *                             pointer to the build command (no longer falls
- *                             back to inline HTML — PR-C step 6 deleted it).
+ *   GET  /, /v2[/*]         — Vite-built React bundle. The two roots serve
+ *                             the same SPA so existing bookmarks pointing at
+ *                             /v2 keep working.
  *
- *                             Pluggable UI: export CLIENT_DIST_DIR=/abs/path
- *                             to swap in a different bundle (e.g. the private
- *                             stando UI, or a fork's UI). The fork only needs
- *                             to honor the wire contract documented in
- *                             AG2Platform/sutando-client's WIRE.md.
+ *                             The UI no longer lives in this repo. It was
+ *                             extracted to the private AG2Platform/stando-ui
+ *                             repo and plugs back in via CLIENT_DIST_DIR:
+ *                             export CLIENT_DIST_DIR=/abs/path/to/stando-ui/dist
+ *                             before launching. The packaged macOS app stages
+ *                             that dist at ../client/dist/ (the default), so
+ *                             the shipped bundle works with no env var. A dev
+ *                             checkout that sets neither returns 503 with a
+ *                             pointer (see docs/WIRE.md for the contract any
+ *                             UI must honor).
  *   GET  /sse               — Server-Sent Events: `agent-state`, `toggle-voice`,
  *                             `toggle-mute` — consumed by the page.
  *   GET  /sse-status        — JSON snapshot { muted, voiceConnected, state, label, clients }.
@@ -41,20 +43,21 @@ import { fileURLToPath } from 'node:url';
 import { readTmuxStatus } from './tmux-status.js';
 import { statePath } from './state-paths.js';
 
-// Dist directory for the React bundle (`client/`). Default lives at
-// `../client/dist/` relative to this file (stando's bundled UI). A
-// downstream build can swap in its own UI by exporting
-// `CLIENT_DIST_DIR=/abs/path/to/dist` before launching the voice agent —
-// useful for white-labeled builds, a private branded UI, or running a
-// different framework's output entirely. The fork only has to honor the
-// wire contract (see AG2Platform/sutando-client's WIRE.md).
+// Dist directory for the React bundle. The UI lives in the private
+// AG2Platform/stando-ui repo, not in this tree — it plugs back in via
+// `CLIENT_DIST_DIR=/abs/path/to/stando-ui/dist`. The default fallback,
+// `../client/dist/` relative to this file, only exists inside the packaged
+// macOS app (app/build-app.sh stages stando-ui's dist there), so the
+// shipped bundle works with no env var. A dev checkout MUST set
+// CLIENT_DIST_DIR or it'll 503 — there's no in-repo client/ anymore. Any
+// UI that honors docs/WIRE.md can be pointed at via this env var.
 //
 // Re-resolved on every startWebServer() call so tests can flip the env var
 // between calls without re-importing the module.
 function resolveClientDistDir(): string {
 	const override = process.env.CLIENT_DIST_DIR?.trim();
 	if (override) {
-		// Tilde expansion for convenience (~/.sutando-ui/dist) — `resolve()`
+		// Tilde expansion for convenience (~/stando-ui/dist) — `resolve()`
 		// alone wouldn't expand it and would silently look under the cwd.
 		const expanded = override.startsWith('~/') || override === '~'
 			? override.replace(/^~/, homedir())
@@ -571,8 +574,9 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 		//      index.html for a missing .js file produces "Unexpected
 		//      token '<'" in the console and a blank page — the exact
 		//      symptom we hit after PR-C step 5.
-		//   4. Return a 503 with build hint when client/dist/index.html
-		//      itself is missing (fresh checkout, no `pnpm build:client`).
+		//   4. Return a 503 with a hint when index.html is missing — i.e.
+		//      CLIENT_DIST_DIR is unset/empty (the UI lives in the private
+		//      stando-ui repo now; a dev checkout must point at its dist).
 		const isV2Path = url.pathname === '/v2' || url.pathname.startsWith('/v2/');
 		let rel: string;
 		if (isV2Path) {
@@ -600,8 +604,14 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 		res.end(
 			`<!doctype html><meta charset="utf-8"><title>Sutando — build required</title>` +
 				`<style>body{font-family:-apple-system,sans-serif;max-width:560px;margin:80px auto;padding:0 20px;color:#222}</style>` +
-				`<h1>Sutando client not built</h1>` +
-				`<p>Run <code>pnpm install && pnpm build:client</code> from the repo root, then refresh this page.</p>`
+				`<h1>Sutando UI not found</h1>` +
+				`<p>The UI lives in the private <code>stando-ui</code> repo. Build it and point this server at it:</p>` +
+				`<pre style="background:#f4f4f4;padding:12px;border-radius:6px;overflow:auto"># in a stando-ui checkout
+pnpm install && pnpm build
+
+# then relaunch stando with
+CLIENT_DIST_DIR=/abs/path/to/stando-ui/dist bash src/startup.sh</pre>` +
+				`<p>See <code>docs/WIRE.md</code> for the contract any UI must honor.</p>`
 		);
 	});
 
