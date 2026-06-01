@@ -19,6 +19,9 @@
  *   GET  /sse               — Server-Sent Events: `agent-state`, `toggle-voice`,
  *                             `toggle-mute` — consumed by the page.
  *   GET  /sse-status        — JSON snapshot { muted, voiceConnected, state, label, clients }.
+ *   GET  /presenter         — JSON { active, expiresAt } from the presenter-mode
+ *                             sentinel (state/presenter-mode.sentinel). Drives
+ *                             the UI presenter badge; same file the bridges poll.
  *   GET  /voice-mode        — JSON { mode: 'active' | 'meeting' }.
  *   GET  /mute-state        — Read/write the browser + tool agent-state tracks.
  *                             Used by main.swift, voice-agent.ts tool hooks, and the page.
@@ -377,6 +380,30 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 				state: eff,
 				label,
 			}));
+			return;
+		}
+
+		// Presenter-mode sentinel (state/presenter-mode.sentinel, written by
+		// scripts/presenter-mode.sh — same file the Discord/Slack/Telegram
+		// bridges poll to suppress notifications during a talk). The body is
+		// an ISO-8601 expiry; treat any unparseable or past timestamp as
+		// inactive (matches the bridges' is_active checks). The React badge
+		// polls this for the composite 3-mode badge.
+		if (url.pathname === '/presenter') {
+			let active = false;
+			let expiresAt: string | null = null;
+			try {
+				const raw = readFileSync(statePath('state/presenter-mode.sentinel'), 'utf-8').trim();
+				if (raw) {
+					const expiry = Date.parse(raw);
+					if (!Number.isNaN(expiry) && expiry > Date.now()) {
+						active = true;
+						expiresAt = raw;
+					}
+				}
+			} catch { /* sentinel missing → inactive */ }
+			res.writeHead(200, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ active, expiresAt }));
 			return;
 		}
 
