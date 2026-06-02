@@ -9,6 +9,7 @@ or channel. Used by:
   - ``src/dm-result.py`` — REST-only fallback when the bridge isn't
     available (``multipart/form-data`` upload, see PR #1029).
   - ``src/slack-bridge.py`` — Slack Socket Mode bridge (Phase 5.14).
+  - ``src/telegram-bridge.py`` — Telegram polling bridge (Phase 5.15).
 
 Per @liususan091219 review on PR #1029: keeping the policy as a copy
 in each file *will* drift even with the "keep in sync" comment, so

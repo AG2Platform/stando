@@ -86,36 +86,16 @@ def _cap_hit_reply_text(reason: str | None) -> str:
     )
 
 # Allowlist for paths that may be sent via Telegram [file: /path] markers.
-# Mirrors _is_path_sendable() in discord-bridge.py.
-SEND_ALLOWED_ROOTS = (
-    str(REPO / "results"),
-    str(REPO / "notes"),
-    str(REPO / "docs"),
-)
-SEND_ALLOWED_PREFIXES = (
-    "/tmp/sutando-",
-    "/private/tmp/sutando-",
-    "/tmp/echo-",
-    "/private/tmp/echo-",
+# Single source of truth is src/send_allowlist.py — shared with
+# discord-bridge.py, dm-result.py, and slack-bridge.py (Phase 5.15).
+from send_allowlist import (  # noqa: E402
+    SEND_ALLOWED_PREFIXES,
+    SEND_ALLOWED_ROOTS,
+    is_path_sendable as _is_path_sendable_shared,
 )
 
-
-def _is_path_sendable(fpath: str) -> bool:
-    """True iff `fpath` is a real file AND resolves under an allowed root."""
-    if not os.path.isfile(fpath):
-        return False
-    try:
-        real = os.path.realpath(fpath)
-    except OSError:
-        return False
-    for root in SEND_ALLOWED_ROOTS:
-        root_real = os.path.realpath(root)
-        if real == root_real or real.startswith(root_real + os.sep):
-            return True
-    for prefix in SEND_ALLOWED_PREFIXES:
-        if real.startswith(prefix):
-            return True
-    return False
+# Public name preserved so all existing call sites remain unchanged.
+_is_path_sendable = _is_path_sendable_shared
 
 
 # --- Config loading (independent of _is_path_sendable above) ---
