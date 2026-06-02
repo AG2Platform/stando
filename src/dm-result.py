@@ -442,6 +442,29 @@ def send_dm(text: str) -> bool:
         f"dm-result: sent to DM ({len(clean_text)} chars in {len(chunks)} chunk(s)"
         f"{file_summary}) via channel {channel_id}"
     )
+    # Record to outbox audit log so the dashboard's Outbox card can
+    # surface the delivery. Best-effort — never block the return path.
+    # This is the REST fallback used when the live discord bridge is
+    # offline; without this write, an offline-bridge owner DM would
+    # land but never appear in the dashboard alongside live-bridge
+    # deliveries from discord-bridge.py (Phase 5.16). Ported in
+    # Phase 5.18 of the OSS → private sync.
+    #
+    # Note the `recipient_label` differs from discord-bridge: that one
+    # uses the fetched Discord username (e.g. "alice DM"); we don't
+    # have that locally without an extra REST call, so we emit a
+    # constant label that's unambiguous for operators reading the card
+    # ("which path delivered this?").
+    try:
+        import outbox_log
+        outbox_log.append(
+            channel_type="discord_dm",
+            recipient=str(owner_id),
+            body=text,
+            recipient_label="owner DM (via dm-result.py)",
+        )
+    except Exception:
+        pass
     return True
 
 
