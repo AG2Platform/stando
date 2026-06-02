@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for `_recover_orphan_sending_files` in both bridges.
+"""Tests for `_recover_orphan_sending_files` in all three bridges.
 
 Atomic-claim-by-rename in the proactive-delivery path
 (`results/proactive-*.txt` -> `proactive-*.sending`) prevents same-tick
@@ -10,17 +10,17 @@ file sits orphaned in `results/` forever, because no poll iteration
 looks at `.sending` suffixes. The owner's proactive notification is
 silently dropped until manual intervention.
 
-Phase 5.11 ports OSS's startup-time recovery sweep to both bridges:
-on bridge start, scan `results/` for orphan `.sending` files and
-rename them back to `*.txt` so the next poll iteration picks them up.
+Phase 5.11 ported OSS's startup-time recovery sweep to discord-bridge +
+telegram-bridge. Phase 5.12 extends it to slack-bridge so the bug
+class is closed symmetrically across every proactive-delivery surface.
 
 Tests cover four concerns:
 
-  1. Behavior parity — both bridges have identical recovery semantics
-     (`proactive-*.sending` -> `proactive-*.txt`, idempotent, fail-open
-     on per-file errors, collision-aware).
-  2. Drift guards — both bridges DEFINE the function AND call it from
-     their startup paths. Each consumer must run the sweep before
+  1. Behavior parity — all three bridges have identical recovery
+     semantics (`proactive-*.sending` -> `proactive-*.txt`, idempotent,
+     fail-open on per-file errors, collision-aware).
+  2. Drift guards — all three bridges DEFINE the function AND call it
+     from their startup paths. Each consumer must run the sweep before
      poll loops start; a future PR that removes the call but keeps
      the function would silently regress the bug class.
   3. Selectivity — only `proactive-*.sending` files are touched.
@@ -61,12 +61,30 @@ if "discord" not in sys.modules:
     stub.Message = type("Message", (), {})
     sys.modules["discord"] = stub
 
+# Stub `slack_bolt` so loading slack-bridge.py doesn't require the lib.
+# Phase 5.12 adds slack to the recovery-sweep family.
+if "slack_bolt" not in sys.modules:
+    sb = types.ModuleType("slack_bolt")
+    sb.App = type("App", (), {"__init__": lambda self, **kw: None,
+                                 "event": staticmethod(lambda *a, **k: lambda fn: fn),
+                                 "message": staticmethod(lambda *a, **k: lambda fn: fn)})
+    sys.modules["slack_bolt"] = sb
+    adapter = types.ModuleType("slack_bolt.adapter")
+    sys.modules["slack_bolt.adapter"] = adapter
+    sm = types.ModuleType("slack_bolt.adapter.socket_mode")
+    sm.SocketModeHandler = type(
+        "SocketModeHandler", (), {"__init__": lambda self, *a, **k: None}
+    )
+    sys.modules["slack_bolt.adapter.socket_mode"] = sm
+
 # Materialize a placeholder .env so token loaders succeed.
 _channels_env = Path.home() / ".claude" / "channels" / "discord" / ".env"
 if not _channels_env.exists():
     _channels_env.parent.mkdir(parents=True, exist_ok=True)
     _channels_env.write_text("DISCORD_BOT_TOKEN=test-token-not-real\n")
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token-not-real")
+os.environ.setdefault("SLACK_BOT_TOKEN", "xoxb-test-not-real")
+os.environ.setdefault("SLACK_APP_TOKEN", "xapp-test-not-real")
 
 
 def _load(name: str, path: Path):
@@ -78,6 +96,7 @@ def _load(name: str, path: Path):
 
 tbridge = _load("tbridge", REPO / "src" / "telegram-bridge.py")
 dbridge = _load("dbridge", REPO / "src" / "discord-bridge.py")
+sbridge = _load("sbridge", REPO / "src" / "slack-bridge.py")
 
 
 def _isolate_results_dir(module, fn):
@@ -135,30 +154,38 @@ def test_discord_recovers_orphan_sending_files():
     _check_basic_recovery(dbridge, "discord")
 
 
+def test_slack_recovers_orphan_sending_files():
+    _check_basic_recovery(sbridge, "slack")
+
+
 # -----------------------------------------------------------------------
 # 2. Drift guards — both bridges DEFINE the function AND call it
 # -----------------------------------------------------------------------
 
 
-def test_both_bridges_define_recovery_function():
-    """Bug class is closed only if the function exists in both
+def test_all_bridges_define_recovery_function():
+    """Bug class is closed only if the function exists in all three
     bridges. Catch a future PR that drops one side."""
     assert callable(getattr(tbridge, "_recover_orphan_sending_files", None)), \
         "telegram-bridge.py missing _recover_orphan_sending_files"
     assert callable(getattr(dbridge, "_recover_orphan_sending_files", None)), \
         "discord-bridge.py missing _recover_orphan_sending_files"
+    assert callable(getattr(sbridge, "_recover_orphan_sending_files", None)), \
+        "slack-bridge.py missing _recover_orphan_sending_files"
 
 
-def test_both_bridges_call_recovery_at_startup():
-    """The function is useless unless invoked. Verify both bridges
-    call it from their startup paths.
+def test_all_bridges_call_recovery_at_startup():
+    """The function is useless unless invoked. Verify each bridge
+    calls it from its startup path.
 
-    Structural source check (not runtime) — both startup paths run
+    Structural source check (not runtime) — all startup paths run
     only when the process is launched, which we don't do in tests.
     The regex pins that a bare `_recover_orphan_sending_files()`
-    call exists in `main()` (telegram) and `on_ready()` (discord)."""
+    call exists in `main()` (telegram, slack) and `on_ready()`
+    (discord)."""
     tsrc = (REPO / "src" / "telegram-bridge.py").read_text()
     dsrc = (REPO / "src" / "discord-bridge.py").read_text()
+    ssrc = (REPO / "src" / "slack-bridge.py").read_text()
 
     # Telegram: call inside main()
     main_block = re.search(
@@ -181,6 +208,18 @@ def test_both_bridges_call_recovery_at_startup():
     assert on_ready_block, "discord-bridge.py on_ready() not found"
     assert "_recover_orphan_sending_files(" in on_ready_block.group(0), (
         "discord-bridge.py on_ready() does NOT call "
+        "_recover_orphan_sending_files at startup — drift hazard"
+    )
+
+    # Slack: call inside main()
+    slack_main_block = re.search(
+        r"^def main\(\)[\s\S]+?(?=^def |\Z)",
+        ssrc,
+        flags=re.MULTILINE,
+    )
+    assert slack_main_block, "slack-bridge.py main() not found"
+    assert "_recover_orphan_sending_files(" in slack_main_block.group(0), (
+        "slack-bridge.py main() does NOT call "
         "_recover_orphan_sending_files at startup — drift hazard"
     )
 
@@ -237,6 +276,10 @@ def test_discord_recovery_is_selective():
     _check_selectivity(dbridge, "discord")
 
 
+def test_slack_recovery_is_selective():
+    _check_selectivity(sbridge, "slack")
+
+
 # -----------------------------------------------------------------------
 # 4. Collision safety — leave both in place if .txt already exists
 # -----------------------------------------------------------------------
@@ -269,6 +312,10 @@ def test_discord_recovery_collision_safe():
     _check_collision_safety(dbridge, "discord")
 
 
+def test_slack_recovery_collision_safe():
+    _check_collision_safety(sbridge, "slack")
+
+
 # -----------------------------------------------------------------------
 # 5. Idempotency — running twice is safe + missing dir is safe
 # -----------------------------------------------------------------------
@@ -282,14 +329,16 @@ def test_recovery_idempotent_and_dir_missing_safe():
         # First call: empty dir, returns 0
         assert tbridge._recover_orphan_sending_files() == 0
         assert dbridge._recover_orphan_sending_files() == 0
+        assert sbridge._recover_orphan_sending_files() == 0
         # Drop one orphan, first call recovers it
         (tmp / "proactive-9.sending").write_text("x")
         assert tbridge._recover_orphan_sending_files() == 1
         # Second call: nothing to do
         assert tbridge._recover_orphan_sending_files() == 0
-        # And the same applies to discord (since we just renamed it,
-        # there are no more .sending files)
+        # And the same applies to discord + slack (since we just
+        # renamed it, there are no more .sending files)
         assert dbridge._recover_orphan_sending_files() == 0
+        assert sbridge._recover_orphan_sending_files() == 0
         # Clean up the .txt before _isolate_results_dir rmdirs the tmp
         (tmp / "proactive-9.txt").unlink()
     _isolate_results_dir(tbridge, run)
@@ -297,26 +346,33 @@ def test_recovery_idempotent_and_dir_missing_safe():
     # Missing dir branch
     original_t = tbridge.RESULTS_DIR
     original_d = dbridge.RESULTS_DIR
+    original_s = sbridge.RESULTS_DIR
     missing = Path("/tmp/sutando-orphan-test-missing-dir-99999")
     tbridge.RESULTS_DIR = missing
     dbridge.RESULTS_DIR = missing
+    sbridge.RESULTS_DIR = missing
     try:
         assert tbridge._recover_orphan_sending_files() == 0
         assert dbridge._recover_orphan_sending_files() == 0
+        assert sbridge._recover_orphan_sending_files() == 0
     finally:
         tbridge.RESULTS_DIR = original_t
         dbridge.RESULTS_DIR = original_d
+        sbridge.RESULTS_DIR = original_s
 
 
 def main():
     test_telegram_recovers_orphan_sending_files()
     test_discord_recovers_orphan_sending_files()
-    test_both_bridges_define_recovery_function()
-    test_both_bridges_call_recovery_at_startup()
+    test_slack_recovers_orphan_sending_files()
+    test_all_bridges_define_recovery_function()
+    test_all_bridges_call_recovery_at_startup()
     test_telegram_recovery_is_selective()
     test_discord_recovery_is_selective()
+    test_slack_recovery_is_selective()
     test_telegram_recovery_collision_safe()
     test_discord_recovery_collision_safe()
+    test_slack_recovery_collision_safe()
     test_recovery_idempotent_and_dir_missing_safe()
     print("All bridge-orphan-sending-recovery tests passed.")
 
