@@ -57,6 +57,7 @@ from workspace_default import resolve_workspace  # noqa: E402
 from single_instance import acquire as _single_instance_acquire  # noqa: E402
 from util_paths import shared_personal_path  # noqa: E402
 from task_priority import default_priority_for_source  # noqa: E402
+from task_archive import find_task_file  # noqa: E402
 REPO = resolve_workspace()
 
 # Lazy import for cloud telemetry — guarded so a missing cloud_metrics.py
@@ -2900,7 +2901,7 @@ async def poll_results():
                     # post — same UX as [no-send] / [REPLIED].
                     print(f"  Skipped (already replied or deduped): {task_id}")
                     archive_file(result_file, "results", task_id)
-                    task_file = TASKS_DIR / f"{task_id}.txt"
+                    task_file = find_task_file(TASKS_DIR, task_id) or TASKS_DIR / f"{task_id}.txt"
                     archive_file(task_file, "tasks", task_id)
                     continue
                 try:
@@ -3056,7 +3057,7 @@ async def poll_results():
                     print(f"  Reply failed: {e}", flush=True)
                 # Archive (not delete) so we can mine patterns later.
                 archive_file(result_file, "results", task_id)
-                task_file = TASKS_DIR / f"{task_id}.txt"
+                task_file = find_task_file(TASKS_DIR, task_id) or TASKS_DIR / f"{task_id}.txt"
                 archive_file(task_file, "tasks", task_id)
         await asyncio.sleep(1)
 
@@ -3264,8 +3265,8 @@ async def poll_dm_fallback():
                     # Archive matching task file so audit_orphan_tasks sees
                     # the task as processed (even if drop-without-reply).
                     _task_id = f.stem
-                    _task_file = TASKS_DIR / f"{_task_id}.txt"
-                    if _task_file.exists():
+                    _task_file = find_task_file(TASKS_DIR, _task_id)
+                    if _task_file:
                         archive_file(_task_file, "tasks", _task_id)
                     continue
                 # Stop retrying after 24h. Without this cap, a permanent
@@ -3277,8 +3278,8 @@ async def poll_dm_fallback():
                     print(f"  [dm-fallback] dropping stale {f.name} (age={int(age)}s)", flush=True)
                     f.unlink(missing_ok=True)
                     _task_id = f.stem
-                    _task_file = TASKS_DIR / f"{_task_id}.txt"
-                    if _task_file.exists():
+                    _task_file = find_task_file(TASKS_DIR, _task_id)
+                    if _task_file:
                         archive_file(_task_file, "tasks", _task_id)
                     continue
                 # Honor result-body suppression markers (parity with the
@@ -3293,8 +3294,8 @@ async def poll_dm_fallback():
                 if _peek.startswith('[no-send]') or _peek.startswith('[REPLIED]') or _peek.startswith('[deduped:'):
                     print(f"  [dm-fallback] skipped (suppression marker): {f.name}", flush=True)
                     _task_id = f.stem
-                    _task_file = TASKS_DIR / f"{_task_id}.txt"
-                    if _task_file.exists():
+                    _task_file = find_task_file(TASKS_DIR, _task_id)
+                    if _task_file:
                         archive_file(_task_file, "tasks", _task_id)
                     archive_file(f, "results", _task_id)
                     continue
@@ -3374,8 +3375,8 @@ async def poll_dm_fallback():
                                     # send. Log only.
                                     print(f"  [dm-fallback channel-redirect] file marker, file not found: {fpath}", file=sys.stderr, flush=True)
                             print(f"  [dm-fallback channel-redirect] sent {f.name} to channel {target_channel_id}", flush=True)
-                            _task_file = TASKS_DIR / f"{_task_id}.txt"
-                            if _task_file.exists():
+                            _task_file = find_task_file(TASKS_DIR, _task_id)
+                            if _task_file:
                                 archive_file(_task_file, "tasks", _task_id)
                             archive_file(f, "results", _task_id)
                             continue
@@ -3445,8 +3446,8 @@ async def poll_dm_fallback():
                     except OSError:
                         _result_text = ""
                     archive_file(f, "results", _task_id)
-                    _task_file = TASKS_DIR / f"{_task_id}.txt"
-                    if _task_file.exists():
+                    _task_file = find_task_file(TASKS_DIR, _task_id)
+                    if _task_file:
                         archive_file(_task_file, "tasks", _task_id)
                     if _result_text and _task_id.startswith("task-"):
                         # urlopen is blocking — run in thread so we don't stall
