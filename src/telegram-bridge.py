@@ -416,7 +416,7 @@ def send_file(chat_id, file_path, caption=""):
         print(f"  Send file failed: {e}")
         return {"ok": False}
 
-def send_reply(chat_id, text):
+def send_reply(chat_id, text, task_id: str | None = None):
     import re
     # Extract file paths: [file: /path/to/file] or [send: /path/to/file]
     file_pattern = re.compile(r'\[(?:file|send|attach):\s*([^\]]+)\]')
@@ -427,6 +427,22 @@ def send_reply(chat_id, text):
     if clean_text:
         for i in range(0, len(clean_text), 4000):
             api("sendMessage", chat_id=chat_id, text=clean_text[i:i+4000])
+        # Record to outbox audit log so the dashboard's Outbox card
+        # can surface the delivery. Best-effort: any failure here must
+        # NOT block the reply or its downstream archival (telemetry is
+        # never load-bearing). Ported in Phase 5.17 of the OSS → private
+        # sync — Phase 5.15 added the reader, Phase 5.16 added discord
+        # writes, this closes bridge-family symmetry.
+        try:
+            import outbox_log
+            outbox_log.append(
+                channel_type="telegram",
+                recipient=str(chat_id),
+                body=clean_text,
+                task_id=task_id,
+            )
+        except Exception:
+            pass
 
     # Send files (allowlist-gated; see _is_path_sendable)
     for fpath in files:
@@ -740,7 +756,7 @@ def main():
                     archive_file(task_file, "tasks", task_id)
                     continue
                 try:
-                    send_reply(chat_id, reply_text)
+                    send_reply(chat_id, reply_text, task_id=task_id)
                     print(f"  Replied to {chat_id}: {reply_text[:80]}...", flush=True)
                 except Exception as e:
                     print(f"[Telegram] Reply error: {e}", flush=True)
