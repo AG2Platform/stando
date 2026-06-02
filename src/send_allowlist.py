@@ -1,13 +1,14 @@
 """Shared file-attachment allowlist for `[file:|send:|attach:]` markers.
 
 Single source of truth for the policy that decides whether an agent-
-emitted file marker can be delivered to the owner's Discord DM /
-channel. Used by:
+emitted file marker can be delivered to the owner's Discord / Slack DM
+or channel. Used by:
 
   - ``src/discord-bridge.py`` — live WS-connected bridge
     (``discord.File(path)``).
   - ``src/dm-result.py`` — REST-only fallback when the bridge isn't
     available (``multipart/form-data`` upload, see PR #1029).
+  - ``src/slack-bridge.py`` — Slack Socket Mode bridge (Phase 5.14).
 
 Per @liususan091219 review on PR #1029: keeping the policy as a copy
 in each file *will* drift even with the "keep in sync" comment, so
@@ -54,7 +55,7 @@ from util_paths import shared_personal_path  # noqa: E402
 _REPO = resolve_workspace()
 
 # Owner-relative + machine-local roots. Files under these roots are
-# delivered to Discord as attachments without further checks.
+# delivered to Discord/Slack as attachments without further checks.
 SEND_ALLOWED_ROOTS: tuple[str, ...] = (
     str(_REPO / "results"),
     str(_REPO / "notes"),
@@ -63,6 +64,9 @@ SEND_ALLOWED_ROOTS: tuple[str, ...] = (
     # allowed during the transition; resolver picks whichever exists.
     str(shared_personal_path("notes", _REPO)),
     str(_REPO / "docs"),
+    # Channel inboxes — files downloaded from Slack (workspace-relative,
+    # not /tmp, so covered by root not prefix).
+    str(_REPO / "slack-inbox"),
     str(Path.home() / "Desktop" / "iclr-backups"),
     str(Path.home() / "Documents" / "sutando-launch-assets"),
 )
