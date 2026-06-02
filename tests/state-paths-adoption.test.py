@@ -159,6 +159,11 @@ ALLOWLIST = {
     # runtime-state.
     "src/util_paths.py",
     "src/util_paths.ts",
+    # task_archive.py is a pure locator helper — it takes tasks_dir as a
+    # parameter from the caller and never resolves workspace itself. The
+    # flagged token appears only in the module docstring (example usage),
+    # not in runnable code.
+    "src/task_archive.py",
     # core_heartbeat is intentionally dep-free per its own comment —
     # must run before any other Sutando module is loaded, so it inlines
     # the workspace resolution rather than importing workspace_default.
