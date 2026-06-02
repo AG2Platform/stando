@@ -455,9 +455,65 @@ def send_reply(chat_id, text):
             },
         )
 
+def _recover_orphan_sending_files() -> int:
+    """Restart-safety: rename any orphan `results/proactive-*.sending`
+    files back to `*.txt` so they get re-claimed on the next poll.
+    Returns the number of files recovered.
+
+    Atomic-claim-by-rename (`proactive-*.txt` → `.sending`) prevents
+    same-tick double-deliveries between concurrent poll iterations.
+    But if the bridge crashes BETWEEN the rename and the delivery,
+    the `.sending` file sits orphaned in `results/` — no poll
+    iteration ever looks at `.sending` suffixes, so the owner
+    notification is silently dropped until next manual intervention.
+
+    This function runs on startup to bring orphans back into the
+    polling stream. Idempotent: a second call sees no `.sending`
+    files and is a no-op. Fail-open: any per-file error is logged
+    but doesn't block the bridge from starting.
+
+    Mirrors `_recover_orphan_sending_files` in `discord-bridge.py`
+    so the same bug class is closed on both proactive-delivery
+    surfaces; ported in Phase 5.11 of the OSS→private sync.
+    """
+    if not RESULTS_DIR.exists():
+        return 0
+    recovered = 0
+    for f in RESULTS_DIR.iterdir():
+        if not (f.name.startswith("proactive-") and f.suffix == ".sending"):
+            continue
+        target = f.with_suffix(".txt")
+        try:
+            # Don't clobber a same-named .txt that somehow re-appeared
+            # (e.g. an operator manually re-dropped the file). The
+            # atomic-claim invariant guarantees they don't normally
+            # coexist, but be defensive on startup.
+            if target.exists():
+                print(
+                    f"  [startup] skipping orphan recovery: {target.name} "
+                    f"already exists (collision with {f.name})",
+                    flush=True,
+                )
+                continue
+            f.rename(target)
+            recovered += 1
+            print(f"  [startup] recovered orphan {f.name} → {target.name}", flush=True)
+        except FileNotFoundError:
+            # Lost the race to another process; that's fine.
+            pass
+        except Exception as e:
+            print(f"  [startup] failed to recover {f.name}: {e}", flush=True)
+    if recovered:
+        print(f"  [startup] recovered {recovered} orphan .sending file(s)", flush=True)
+    return recovered
+
+
 def main():
     _single_instance_acquire("telegram-bridge")
     print(f"Telegram bridge started. Polling for messages...", flush=True)
+    # Restart-safety: sweep orphan `.sending` files before the poll
+    # loop starts. See _recover_orphan_sending_files for rationale.
+    _recover_orphan_sending_files()
     offset = None
     allowed = load_allowed()
     pending_replies = {}  # task_id -> chat_id
