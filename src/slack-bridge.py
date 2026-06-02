@@ -801,6 +801,11 @@ def main():
     # watcher thread starts. See _recover_orphan_sending_files for the
     # bug class this closes.
     _recover_orphan_sending_files()
+    # Prime the in-memory access cache so tofu_onboard() can detect external
+    # deletions even on the very first inbound message after a restart (#899).
+    # Without this priming the cache stays None until the first DM, by which
+    # point an external deletion would silently re-TOFU the new sender.
+    load_allowed()
     threading.Thread(target=result_watcher, name="slack-result-watcher", daemon=True).start()
     threading.Thread(target=_no_events_hint_thread, name="slack-no-events-hint", daemon=True).start()
     handler = SocketModeHandler(app, APP_TOKEN)
