@@ -152,6 +152,14 @@ from send_allowlist import (  # noqa: E402
     is_path_sendable as _is_path_sendable_shared,
 )
 
+# Workspace-local Sutando-specific Discord configuration (Phase 5.10).
+# Single source of truth for owner-id resolution — shared with
+# `src/dm-result.py`. Pre-extract, both files inlined the same
+# resolution chain (env -> tierMap -> bot-filter walk); the drift
+# class that bit #846 was one site getting the read and the other
+# not. The shared helper prevents that recurring.
+import discord_config  # noqa: E402
+
 
 _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*([^\s`~][^`~]*)?\s*$")
 
@@ -2013,6 +2021,19 @@ client = discord.Client(intents=intents)
 @client.event
 async def on_ready():
     print(f"Discord bridge ready: {client.user}")
+    # Phase 5.10: auto-seed workspace `state/discord-config.json` from the
+    # legacy access.json heuristic on first boot. Idempotent (no-op if
+    # file exists). Emits a WARN to stderr if the seed had to fall back
+    # to `allowFrom[0]` so the operator catches a mis-seed before it
+    # routes the first proactive DM to the wrong user.
+    try:
+        _initial_access = json.loads(ACCESS_FILE.read_text())
+    except Exception:
+        _initial_access = {}
+    try:
+        discord_config.auto_seed_if_missing(_initial_access)
+    except Exception as _seed_exc:
+        print(f"  [discord-config] auto-seed failed (non-fatal): {_seed_exc}")
     # Start polling loops
     client.loop.create_task(poll_results())
     client.loop.create_task(poll_approved())
@@ -3019,48 +3040,45 @@ async def poll_proactive():
                     if not text:
                         f.unlink(missing_ok=True)
                         continue
-                    # Resolve the DM recipient. Priority (mirrors
-                    # src/dm-result.py:_resolve_owner_id, modulo the
-                    # async/event-loop shape):
-                    #   1. $SUTANDO_DM_OWNER_ID env override.
-                    #   2. tierMap[uid] == "owner" — the unique tier-tagged
-                    #      owner from access.json.
-                    #   3. First non-bot user from allowFrom IN LIST ORDER.
+                    # Resolve the DM recipient via discord_config.resolve_owner_id
+                    # (Phase 5.10 — same chain that dm-result.py uses, so the
+                    # live bridge and the REST-fallback path never disagree on
+                    # who the owner is).
                     #
-                    # Pre-fix used `load_allowed()` which returns a SET, so
-                    # iteration was insertion/hash-ordered — on 2026-05-18
-                    # this picked a team-tier user (msze_) over the
-                    # owner-tier user (qingyunwu) because the set yielded
-                    # msze_ first. allowFrom is a *list* in access.json with
-                    # a meaningful first-entry-wins convention; preserving
-                    # that order fixes the routing.
-                    owner_id = os.environ.get("SUTANDO_DM_OWNER_ID", "").strip() or None
-                    if not owner_id:
-                        try:
-                            access_data = json.loads(ACCESS_FILE.read_text())
-                        except Exception:
-                            access_data = {}
+                    # Helper handles steps 1-5 (env override / workspace owner
+                    # / workspace tierMap / legacy owner / legacy tierMap).
+                    # Step 6 (async bot-filter walk via client.fetch_user)
+                    # stays here because the helper is sync-only — keeps it
+                    # shareable between this async bridge and dm-result's sync
+                    # REST path.
+                    #
+                    # Pre-Phase-5.10 the chain was inlined here AND in
+                    # dm-result.py — the drift class @liususan091219 flagged
+                    # on OSS PR #1029 and what bit #846. Funneling both sites
+                    # through the same helper closes that recurrence.
+                    try:
+                        access_data = json.loads(ACCESS_FILE.read_text())
+                    except Exception:
+                        access_data = {}
+                    owner_id = discord_config.resolve_owner_id(access_data)
+                    if owner_id is None:
                         allow_list = access_data.get("allowFrom") or []
-                        tier_map = access_data.get("tierMap") or {}
                         if not allow_list:
                             print(f"  [proactive] no owner in allowFrom, skipping {f.name}")
                             f.unlink(missing_ok=True)
                             continue
-                        # Preferred: the tier-tagged owner if one exists in allowFrom.
-                        owner_id = next(
-                            (uid for uid in allow_list if tier_map.get(uid) == "owner"),
-                            None,
-                        )
-                        # Fallback: first non-bot user, list order preserved.
-                        if owner_id is None:
-                            for uid in allow_list:
-                                try:
-                                    u = await client.fetch_user(int(uid))
-                                    if not u.bot:
-                                        owner_id = str(uid)
-                                        break
-                                except Exception:
-                                    continue
+                        # Step 6: async bot-filter walk. First non-bot user
+                        # in allowFrom (list order preserved, which fixes
+                        # the 2026-05-18 set-ordering bug where msze_ was
+                        # picked over qingyunwu).
+                        for uid in allow_list:
+                            try:
+                                u = await client.fetch_user(int(uid))
+                                if not u.bot:
+                                    owner_id = str(uid)
+                                    break
+                            except Exception:
+                                continue
                     if owner_id is None:
                         print(f"  [proactive] no human user in allowFrom, skipping {f.name}")
                         f.unlink(missing_ok=True)

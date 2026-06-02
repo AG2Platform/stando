@@ -34,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
+import discord_config  # noqa: E402  — workspace-local Sutando discord config (Phase 5.10)
 REPO = resolve_workspace()
 ACCESS_JSON = Path.home() / ".claude" / "channels" / "discord" / "access.json"
 SSE_STATUS_URL = "http://localhost:8080/sse-status"
@@ -286,52 +287,54 @@ def _send_message_with_files(channel_id: str, token: str, content: str,
 def _resolve_owner_id(token):
     """Return the Discord user ID for the human owner.
 
-    Priority order (mirrors `src/discord-bridge.py:poll_proactive` so
-    the fallback delivery path and the live bridge agree on who the
-    owner is — drift here caused proactive-DM misroutes on the live
-    bridge prior to PR #846, and dm-result.py carried the matching
-    drift uncovered):
+    Delegates the config-driven resolution chain to
+    `discord_config.resolve_owner_id` (Phase 5.10) so this fallback
+    delivery path and the live bridge (`discord-bridge.py:_poll_proactive`)
+    agree on a single owner. Drift between the two sites was the failure
+    mode #846 created; the shared helper prevents it from recurring.
 
-      1. ``$SUTANDO_DM_OWNER_ID`` env var — explicit override.
-      2. ``tierMap[uid] == "owner"`` from access.json. Explicit admin
-         tier tag; preferred over the bot-lookup fallback because it
-         doesn't require a Discord API call AND it survives the
-         degraded-network case (lookup fails → fall through to bot-
-         filter, which returns the first ID even if it's a bot).
-      3. First non-bot ID in ``allowFrom`` per ``GET /users/{id}.bot``.
-         allowFrom often contains multiple bots (MacBook, Mac Mini)
-         plus the human owner.
+    The bot-filtering step (walk `allowFrom`, skip Discord bot accounts)
+    stays here because it requires `GET /users/{id}` REST calls. Keeping
+    the helper pure-Python lets both callers (this sync REST path and
+    the bridge's async discord.py path) share the same chain.
 
-    Set SUTANDO_DM_OWNER_ID in .env if you want to skip the per-id
-    /users lookup (saves 1 API call per dm-result invocation)."""
-    env_override = os.environ.get("SUTANDO_DM_OWNER_ID", "").strip()
-    if env_override:
-        return env_override
+    Resolution order (encoded in discord_config.resolve_owner_id):
+      1. ``$SUTANDO_DM_OWNER_ID`` env var (explicit override).
+      2. ``discord-config.json["owner"]`` (workspace, Sutando-owned).
+      3. ``discord-config.json["tierMap"][uid] == "owner"`` (workspace).
+      4. ``access.json["owner"]`` (legacy plugin-territory).
+      5. ``access.json["tierMap"][uid] == "owner"`` (legacy #846 path).
+      6. (HERE, not helper) First non-bot ID in ``allowFrom`` per
+         ``GET /users/{id}.bot``. allowFrom often contains multiple
+         bots (MacBook, Mac Mini) plus the human owner.
 
-    if not ACCESS_JSON.exists():
-        return ""
-    try:
-        data = json.loads(ACCESS_JSON.read_text())
-    except Exception:
-        return ""
+    Set SUTANDO_DM_OWNER_ID in .env to skip even the helper's lookup
+    (saves 1 API call per dm-result invocation); the env var is honored
+    inside the helper as the first resolution step."""
+    # access_data may be absent (no plugin file). Still let the helper
+    # check env-override + workspace owner/tierMap; if those also miss,
+    # there's nothing the bot-filter walk can do without an allowFrom,
+    # so an empty-string return matches the pre-port behavior.
+    if ACCESS_JSON.exists():
+        try:
+            data = json.loads(ACCESS_JSON.read_text())
+        except Exception:
+            data = {}
+    else:
+        data = {}
+
+    owner = discord_config.resolve_owner_id(data)
+    if owner:
+        return owner
+
     allow = data.get("allowFrom") or []
     if not allow:
         return ""
 
-    # Honor the explicit `tierMap[uid] == "owner"` admin tag IF the
-    # tagged user is still in allowFrom. Defensive: a stale tier-tag
-    # for a removed user must not resolve a delisted owner.
-    tier_map = data.get("tierMap") or {}
-    tier_owner = next(
-        (uid for uid in allow if tier_map.get(uid) == "owner"),
-        None,
-    )
-    if tier_owner is not None:
-        return str(tier_owner)
-
-    # Query each user's is-bot flag. The first human wins. If lookups all
-    # fail (rate limit, network, bad token), fall through to allow[0] as
-    # a degraded default so send_dm() can produce an honest error later.
+    # Step 6: bot-filter walk. Helper intentionally omits this step
+    # (REST-bound). The first non-bot wins. If lookups all fail (rate
+    # limit, network, bad token), fall through to allow[0] as a
+    # degraded default so send_dm() produces an honest error later.
     for uid in allow:
         try:
             user = _discord_api("GET", f"/users/{uid}", token)
