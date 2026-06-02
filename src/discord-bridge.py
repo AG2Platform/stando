@@ -2998,6 +2998,29 @@ async def poll_results():
                             await channel.send(chunk, reference=ref)
                             first = False
                             reply_chunks += 1
+                        # Record to outbox audit log so the dashboard's Outbox
+                        # card can surface the delivery. Best-effort: any
+                        # failure here must NOT block the reply or its
+                        # downstream archival. Ported in Phase 5.16 of the
+                        # OSS → private sync (Phase 5.15 added the reader).
+                        try:
+                            import outbox_log
+                            ch_type = "discord_dm" if isinstance(channel, discord.DMChannel) else "discord_channel"
+                            if isinstance(channel, discord.DMChannel):
+                                _recipient = getattr(channel.recipient, "name", None)
+                                _label = f"{_recipient} DM" if _recipient else "DM"
+                            else:
+                                _ch_name = getattr(channel, "name", None)
+                                _label = f"#{_ch_name}" if _ch_name else None
+                            outbox_log.append(
+                                channel_type=ch_type,
+                                recipient=str(channel.id),
+                                recipient_label=_label,
+                                body=clean_text,
+                                task_id=task_id,
+                            )
+                        except Exception:
+                            pass
 
                     # Send files (allowlist-gated; see _is_path_sendable).
                     # Missing-file case: the regex eagerly extracts every
@@ -3150,6 +3173,21 @@ async def poll_proactive():
                         if clean_text:
                             for chunk in _chunk_for_discord(clean_text):
                                 await dm.send(chunk)
+                            # Outbox audit. Same shape as poll_results;
+                            # see Phase 5.16 port note above.
+                            try:
+                                import outbox_log
+                                _user_name = getattr(user, "name", None)
+                                _label = f"{_user_name} DM" if _user_name else None
+                                outbox_log.append(
+                                    channel_type="discord_dm",
+                                    recipient=str(owner_id),
+                                    recipient_label=_label,
+                                    body=clean_text,
+                                    task_id=f.stem,
+                                )
+                            except Exception:
+                                pass
                         for fpath in files:
                             fpath = os.path.expanduser(fpath.strip())
                             if _is_path_sendable(fpath):
@@ -3306,6 +3344,25 @@ async def poll_dm_fallback():
                             if text_only:
                                 for chunk in _chunk_for_discord(text_only):
                                     await target_channel.send(chunk)
+                                # Outbox audit (Phase 5.16). The dm-fallback
+                                # channel-redirect path delivers to a routed
+                                # channel rather than the originating DM;
+                                # record under the resolved channel id, not
+                                # the owner_id, so the dashboard reflects
+                                # where the message actually landed.
+                                try:
+                                    import outbox_log
+                                    _ch_name = getattr(target_channel, "name", None)
+                                    _label = f"#{_ch_name}" if _ch_name else None
+                                    outbox_log.append(
+                                        channel_type="discord_channel",
+                                        recipient=str(target_channel_id),
+                                        recipient_label=_label,
+                                        body=text_only,
+                                        task_id=_task_id,
+                                    )
+                                except Exception:
+                                    pass
                             for fpath in file_list:
                                 fpath = os.path.expanduser(fpath.strip())
                                 if _is_path_sendable(fpath):
