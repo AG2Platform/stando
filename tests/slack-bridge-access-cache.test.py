@@ -390,6 +390,43 @@ def test_source_wires_cache_into_call_sites():
     )
 
 
+def test_main_primes_access_cache_at_startup():
+    """The cache machinery only protects against external deletion if
+    it's populated. Across a bridge restart with no prior in-process
+    state, the cache is None until the first successful `load_allowed`
+    call. If that first call happens to be the access check for an
+    inbound DM that arrives AFTER an external deletion, the cache is
+    still None — `_restore_access_from_cache` returns False — and
+    `tofu_onboard` silently overwrites the prior owner.
+
+    `main()` must call `load_allowed()` immediately after the orphan
+    recovery sweep (and before any threads spin up) to prime the
+    cache from disk while access.json is still intact. Phase 5.14
+    of the OSS → private sync ports this 1-line pairing that was
+    missed in the Phase 5.13 cache port."""
+    src = (REPO / "src" / "slack-bridge.py").read_text()
+    main_block_m = re.search(
+        r"^def main\(\)[\s\S]+?(?=^def |\Z)",
+        src,
+        flags=re.MULTILINE,
+    )
+    assert main_block_m, "slack-bridge.py main() not found"
+    main_block = main_block_m.group(0)
+    assert "load_allowed()" in main_block, (
+        "main() does NOT call load_allowed() to prime the cache — "
+        "regresses the #899 fix across bridge restarts"
+    )
+    # And it must come AFTER the orphan sweep so the bridge isn't
+    # blocked on a network/IO error during recovery.
+    recovery_idx = main_block.find("_recover_orphan_sending_files(")
+    prime_idx = main_block.find("load_allowed()")
+    assert recovery_idx >= 0, "main() missing _recover_orphan_sending_files() call"
+    assert prime_idx > recovery_idx, (
+        "load_allowed() priming must come AFTER _recover_orphan_sending_files() "
+        "(see OSS slack-bridge main() ordering)"
+    )
+
+
 def main():
     test_load_allowed_populates_cache()
     test_load_tier_map_uses_cache_when_mtime_matches()
@@ -401,6 +438,7 @@ def main():
     test_tofu_onboard_genuine_first_time_when_cache_empty()
     test_module_exposes_cache_surface()
     test_source_wires_cache_into_call_sites()
+    test_main_primes_access_cache_at_startup()
     print("All slack-bridge-access-cache tests passed.")
 
 
