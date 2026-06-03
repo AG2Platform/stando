@@ -336,6 +336,21 @@ else
   python3 src/register-station-mcp.py 2>&1 | sed 's/^/  /' || true
 fi
 
+# 7.8 Slack bridge (optional — needs SLACK_BOT_TOKEN + SLACK_APP_TOKEN in ~/.claude/channels/slack/.env)
+if [ -f "$HOME/.claude/channels/slack/.env" ] && grep -q "SLACK_BOT_TOKEN=" "$HOME/.claude/channels/slack/.env" 2>/dev/null; then
+  if ! python3 -c "import slack_bolt" 2>/dev/null; then
+    echo "  ~ slack bridge (needs: pip3 install slack_bolt)"
+  elif ! pgrep -f "slack-bridge" > /dev/null 2>&1; then
+    echo "  Starting Slack bridge..."
+    python3 src/slack-bridge.py > "$LOGS_DIR/slack-bridge.log" 2>&1 &
+    echo "  ✓ slack bridge"
+  else
+    echo "  ✓ slack bridge (already running)"
+  fi
+else
+  echo "  ~ slack bridge (no token — optional)"
+fi
+
 # 8. Phone conversation server + ngrok (optional — needs Twilio creds, skip with SKIP_PHONE=1)
 if [ "${SKIP_PHONE:-}" = "1" ]; then
   echo "  ~ conversation server (skipped via SKIP_PHONE)"
