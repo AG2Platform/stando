@@ -159,8 +159,14 @@ jobs:
 
       - name: Build stando-ui
         working-directory: stando-ui-src
+        # --ignore-workspace is required: stando-ui-src is checked out INSIDE
+        # this repo, whose pnpm-workspace.yaml (packages: ['.']) makes pnpm
+        # attach to stando's already-installed workspace and skip stando-ui's
+        # own deps. `tsc -b` would then run stando's TypeScript 6 (where
+        # baseUrl is a fatal TS5101) with no vite installed. Ignoring the
+        # workspace installs stando-ui's own lockfile (TS 5.6 + vite) instead.
         run: |
-          pnpm install --frozen-lockfile
+          pnpm install --frozen-lockfile --ignore-workspace
           pnpm build
 
       - name: Build Sutando.app
