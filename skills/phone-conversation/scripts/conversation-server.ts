@@ -97,7 +97,9 @@ const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN ?? '';
 const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER ?? '';
 const NGROK_AUTHTOKEN = process.env.NGROK_AUTHTOKEN ?? '';
 const PORT = Number(process.env.PHONE_PORT) || 3100;
-const WORKSPACE_DIR = process.env.SUTANDO_WORKSPACE || join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+import { resolveWorkspace } from '../../../src/workspace_default.js';
+const REPO_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+const WORKSPACE_DIR = resolveWorkspace();
 const RESULTS_DIR = process.env.PHONE_RESULTS_DIR || join(WORKSPACE_DIR, 'results');
 const TASKS_DIR = join(WORKSPACE_DIR, 'tasks');
 const TASK_POLL_INTERVAL_MS = 500;
@@ -1023,7 +1025,7 @@ function cleanupCall(callSid: string): void {
 
 	// Auto-scan the latest call for issues (async, best effort)
 	try {
-		const scanScript = join(WORKSPACE_DIR, 'src', 'scan-call-logs.py');
+		const scanScript = join(REPO_DIR, 'src', 'scan-call-logs.py');
 		spawn('python3', [scanScript, '--last', '1', '--json'], { stdio: 'pipe', detached: true })
 			.on('close', (code) => { if (code === 0) console.log(`${ts()} [Phone] call scan complete`); });
 	} catch { /* best effort */ }
