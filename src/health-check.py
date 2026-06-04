@@ -1324,7 +1324,7 @@ def main():
                                     domain_arg = [f"--domain={domain}"]
                                 break
                     subprocess.Popen(["ngrok", "http", "3100"] + domain_arg,
-                                     stdout=open("/tmp/ngrok.log", "a"),
+                                     stdout=open(str(WORKSPACE_DIR / "logs" / "ngrok.log"), "a"),
                                      stderr=subprocess.STDOUT, start_new_session=True)
                     print(f"  {c['name']}: restarted")
                 elif c["name"] == "tailscale-funnel":
@@ -1350,7 +1350,7 @@ def main():
                             pass
                     subprocess.Popen(["npx", "tsx", "skills/phone-conversation/scripts/conversation-server.ts"],
                                      cwd=str(REPO_DIR),
-                                     stdout=open("/tmp/conversation-server.log", "a"),
+                                     stdout=open(str(WORKSPACE_DIR / "logs" / "conversation-server.log"), "a"),
                                      stderr=subprocess.STDOUT, start_new_session=True)
                     print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
 
