@@ -128,7 +128,8 @@ if channels_env.exists():
 
 if not TOKEN:
     print("DISCORD_BOT_TOKEN not set in ~/.claude/channels/discord/.env")
-    exit(1)
+    if __name__ == "__main__":
+        sys.exit(1)
 
 TASKS_DIR = REPO / "tasks"
 RESULTS_DIR = REPO / "results"
