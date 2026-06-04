@@ -1,16 +1,16 @@
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { getCoreStatusTool } from '../src/inline-tools.js';
+import { resolveWorkspace } from '../src/workspace_default.js';
 
 // Unit tests for the get_core_status inline tool (PR #467).
-// The tool is an async fn that reads core-status.json via a hardcoded
-// relative path (repo-root). Tests stash + restore any live value on the
-// disk so a concurrent /proactive-loop pass doesn't corrupt the fixtures.
+// The tool reads from resolveWorkspace()/state/core-status.json.
+// Tests stash + restore any live value on disk so a concurrent
+// /proactive-loop pass doesn't corrupt the fixtures.
 
-const CORE_STATUS_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', 'core-status.json');
+const CORE_STATUS_PATH = join(resolveWorkspace(), 'state', 'core-status.json');
 let saved: string | null = null;
 
 // Tool execute returns a plain object. Use any here because ToolDefinition
@@ -22,6 +22,7 @@ async function invoke(): Promise<any> {
 
 describe('get_core_status inline tool', () => {
 	before(() => {
+		mkdirSync(join(resolveWorkspace(), 'state'), { recursive: true });
 		if (existsSync(CORE_STATUS_PATH)) {
 			saved = readFileSync(CORE_STATUS_PATH, 'utf-8');
 		}

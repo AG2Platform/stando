@@ -611,8 +611,7 @@ export const getCoreStatusTool: ToolDefinition = {
 	execution: 'inline',
 	async execute() {
 		try {
-			const repoDir = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
-			const statusPath = join(repoDir, 'core-status.json');
+			const statusPath = join(resolveWorkspace(), 'state', 'core-status.json');
 			if (!existsSync(statusPath)) {
 				return { status: 'idle', description: 'Core agent is not currently running.' };
 			}
