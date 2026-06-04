@@ -108,10 +108,13 @@ def _make_tarball(out_path: Path) -> bool:
         args += ["-C", str(ndir.parent), ndir.name]
 
     try:
-        subprocess.run(args, check=True, capture_output=True)
+        subprocess.run(args, check=True, capture_output=True, timeout=120)
         return True
     except subprocess.CalledProcessError as e:
         _log(f"tar failed: {e.stderr.decode('utf-8', errors='replace')[:200]}")
+        return False
+    except subprocess.TimeoutExpired:
+        _log("tar timed out after 120s — skipping upload")
         return False
 
 
@@ -228,9 +231,13 @@ def cmd_hydrate() -> int:
                 ["tar", "-xzf", str(tarball), "-C", str(target_root)],
                 check=True,
                 capture_output=True,
+                timeout=120,
             )
         except subprocess.CalledProcessError as e:
             _log(f"extract failed: {e.stderr.decode('utf-8', errors='replace')[:200]}")
+            return 3
+        except subprocess.TimeoutExpired:
+            _log("tar extract timed out after 120s")
             return 3
 
     _log("hydrate complete")
