@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 Telegram bridge for Sutando — polls bot messages, writes to tasks/, sends replies from results/.
 Works alongside the voice task bridge. Runs as a background daemon.
