@@ -1545,7 +1545,7 @@ async function main() {
 				console.log(`${ts()} [TaskBridge] Voice not active after 3s — falling back to Discord DM${CARTESIA_API_KEY && generateSpeech ? ' + Cartesia' : ''}`);
 				try {
 					const proactiveTs = Math.floor(Date.now() / 1000);
-					const proactivePath = join(WORKSPACE_DIR, 'results', `proactive-voice-stuck-${proactiveTs}.txt`);
+					const proactivePath = join(stateDir('results'), `proactive-voice-stuck-${proactiveTs}.txt`);
 					const dmBody = `🎤 Voice session was stuck — couldn't speak this. Task result:\n\n${result}`;
 					writeFileSync(proactivePath, dmBody);
 				} catch (e) {
@@ -1557,7 +1557,7 @@ async function main() {
 						const relativeSrc = audioPath.startsWith(WORKSPACE_DIR)
 							? audioPath.slice(WORKSPACE_DIR.replace(/\/$/, '').length + 1)
 							: audioPath;
-						writeFileSync(join(WORKSPACE_DIR, 'dynamic-content.json'), JSON.stringify({
+						writeFileSync(statePath('dynamic-content.json'), JSON.stringify({
 							type: 'audio', src: relativeSrc, title: 'Task Complete',
 						}));
 						console.log(`${ts()} [CartesiaTTS] Audio generated: ${audioPath}`);
