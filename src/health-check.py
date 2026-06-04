@@ -836,7 +836,7 @@ def run_all_checks() -> list[dict]:
             result = subprocess.run(["/usr/bin/pgrep", "-f", f"{proc_name}\\.py$"], capture_output=True, text=True)
             pids = result.stdout.strip().split("\n") if result.returncode == 0 else []
             pids = [p for p in pids if p]
-        except:
+        except Exception:
             pids = []
 
         if not pids:
