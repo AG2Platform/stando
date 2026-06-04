@@ -37,7 +37,7 @@ REPO_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from cloud_metrics import load_cloud_auth  # noqa: E402
 from workspace_default import resolve_workspace  # noqa: E402
-from util_paths import shared_personal_path  # noqa: E402
+from util_paths import claude_home_path, shared_personal_path  # noqa: E402
 
 
 PAID_PLANS = {"plus", "pro", "max"}
@@ -45,13 +45,14 @@ TIMEOUT_SECONDS = 30.0
 
 
 def memory_dir() -> Path:
-    """Return the canonical $SUTANDO_MEMORY_DIR (or the default Claude
-    project directory). Created if missing."""
-    explicit = os.environ.get("SUTANDO_MEMORY_DIR")
+    """Return the canonical $SUTANDO_MEMORY_DIR (or the derived Claude project memory directory).
+    Created if missing."""
+    explicit = os.environ.get("SUTANDO_MEMORY_DIR") or os.environ.get("SUTANDO_PRIVATE_DIR")
     if explicit:
         p = Path(os.path.expanduser(explicit))
     else:
-        p = Path.home() / ".claude" / "projects" / "-Users-lianghaochen-stando" / "memory"
+        slug = str(REPO_DIR).replace("/", "-")
+        p = claude_home_path("projects", slug, "memory")
     p.mkdir(parents=True, exist_ok=True)
     return p
 
