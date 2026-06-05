@@ -2,15 +2,26 @@
  * HTTP server for the Sutando desktop + remote browser conversation page.
  *
  * Endpoints:
- *   GET  /, /v2[/*]         — Vite-built React bundle (client/dist). The two
- *                             roots serve the same SPA so existing bookmarks
- *                             pointing at /v2 keep working. A fresh checkout
- *                             without `pnpm build:client` returns 503 with a
- *                             pointer to the build command (no longer falls
- *                             back to inline HTML — PR-C step 6 deleted it).
+ *   GET  /, /v2[/*]         — Vite-built React bundle. The two roots serve
+ *                             the same SPA so existing bookmarks pointing at
+ *                             /v2 keep working.
+ *
+ *                             The UI no longer lives in this repo. It was
+ *                             extracted to the private AG2Platform/stando-ui
+ *                             repo and plugs back in via CLIENT_DIST_DIR:
+ *                             export CLIENT_DIST_DIR=/abs/path/to/stando-ui/dist
+ *                             before launching. The packaged macOS app stages
+ *                             that dist at ../client/dist/ (the default), so
+ *                             the shipped bundle works with no env var. A dev
+ *                             checkout that sets neither returns 503 with a
+ *                             pointer (see docs/WIRE.md for the contract any
+ *                             UI must honor).
  *   GET  /sse               — Server-Sent Events: `agent-state`, `toggle-voice`,
  *                             `toggle-mute` — consumed by the page.
  *   GET  /sse-status        — JSON snapshot { muted, voiceConnected, state, label, clients }.
+ *   GET  /presenter         — JSON { active, expiresAt } from the presenter-mode
+ *                             sentinel (state/presenter-mode.sentinel). Drives
+ *                             the UI presenter badge; same file the bridges poll.
  *   GET  /voice-mode        — JSON { mode: 'active' | 'meeting' }.
  *   GET  /mute-state        — Read/write the browser + tool agent-state tracks.
  *                             Used by main.swift, voice-agent.ts tool hooks, and the page.
@@ -29,16 +40,38 @@
 
 import { createServer } from 'node:http';
 import { writeFileSync, readFileSync, statSync } from 'node:fs';
-import { extname, normalize, sep } from 'node:path';
+import { homedir } from 'node:os';
+import { extname, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTmuxStatus } from './tmux-status.js';
 import { statePath } from './state-paths.js';
 
-// Dist directory for the React bundle (`client/`). Resolved once at module
-// load — web-server.ts lives in `src/`, so `../client/dist` lands at the
-// workspace root. PR-C step 6 retired the inline HTML fallback; `pnpm
-// build:client` must run for `/` to render anything.
-const CLIENT_DIST_DIR = fileURLToPath(new URL('../client/dist/', import.meta.url));
+// Dist directory for the React bundle. The UI lives in the private
+// AG2Platform/stando-ui repo, not in this tree — it plugs back in via
+// `CLIENT_DIST_DIR=/abs/path/to/stando-ui/dist`. The default fallback,
+// `../client/dist/` relative to this file, only exists inside the packaged
+// macOS app (app/build-app.sh stages stando-ui's dist there), so the
+// shipped bundle works with no env var. A dev checkout MUST set
+// CLIENT_DIST_DIR or it'll 503 — there's no in-repo client/ anymore. Any
+// UI that honors docs/WIRE.md can be pointed at via this env var.
+//
+// Re-resolved on every startWebServer() call so tests can flip the env var
+// between calls without re-importing the module.
+function resolveClientDistDir(): string {
+	const override = process.env.CLIENT_DIST_DIR?.trim();
+	if (override) {
+		// Tilde expansion for convenience (~/stando-ui/dist) — `resolve()`
+		// alone wouldn't expand it and would silently look under the cwd.
+		const expanded = override.startsWith('~/') || override === '~'
+			? override.replace(/^~/, homedir())
+			: override;
+		const abs = resolve(expanded);
+		return abs.endsWith(sep) ? abs : abs + sep;
+	}
+	return fileURLToPath(new URL('../client/dist/', import.meta.url));
+}
+
+let CLIENT_DIST_DIR = resolveClientDistDir();
 
 const STATIC_MIME_TYPES: Record<string, string> = {
 	'.html': 'text/html; charset=utf-8',
@@ -139,6 +172,10 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 	const HTTP_PORT = opts.port;
 	const HTTP_HOST = opts.host;
 	const WS_PORT = opts.wsPort;
+
+	// Re-resolve the client dist dir per call so tests (and any caller that
+	// flips $CLIENT_DIST_DIR between invocations) see the latest override.
+	CLIENT_DIST_DIR = resolveClientDistDir();
 
 	// SSE clients for remote toggle
 	const sseClients: import('node:http').ServerResponse[] = [];
@@ -346,6 +383,30 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 			return;
 		}
 
+		// Presenter-mode sentinel (state/presenter-mode.sentinel, written by
+		// scripts/presenter-mode.sh — same file the Discord/Slack/Telegram
+		// bridges poll to suppress notifications during a talk). The body is
+		// an ISO-8601 expiry; treat any unparseable or past timestamp as
+		// inactive (matches the bridges' is_active checks). The React badge
+		// polls this for the composite 3-mode badge.
+		if (url.pathname === '/presenter') {
+			let active = false;
+			let expiresAt: string | null = null;
+			try {
+				const raw = readFileSync(statePath('state/presenter-mode.sentinel'), 'utf-8').trim();
+				if (raw) {
+					const expiry = Date.parse(raw);
+					if (!Number.isNaN(expiry) && expiry > Date.now()) {
+						active = true;
+						expiresAt = raw;
+					}
+				}
+			} catch { /* sentinel missing → inactive */ }
+			res.writeHead(200, { 'Content-Type': 'application/json' });
+			res.end(JSON.stringify({ active, expiresAt }));
+			return;
+		}
+
 		// Voice-agent mode sentinel (state/voice-mode.txt written by voice-agent
 		// on switch_mode / zoom-auto-flip). Returns "active" or "meeting".
 		// Falls back to "active" if the file is missing. Combined with the
@@ -540,8 +601,9 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 		//      index.html for a missing .js file produces "Unexpected
 		//      token '<'" in the console and a blank page — the exact
 		//      symptom we hit after PR-C step 5.
-		//   4. Return a 503 with build hint when client/dist/index.html
-		//      itself is missing (fresh checkout, no `pnpm build:client`).
+		//   4. Return a 503 with a hint when index.html is missing — i.e.
+		//      CLIENT_DIST_DIR is unset/empty (the UI lives in the private
+		//      stando-ui repo now; a dev checkout must point at its dist).
 		const isV2Path = url.pathname === '/v2' || url.pathname.startsWith('/v2/');
 		let rel: string;
 		if (isV2Path) {
@@ -569,8 +631,14 @@ export function startWebServer(opts: WebServerOptions): import('node:http').Serv
 		res.end(
 			`<!doctype html><meta charset="utf-8"><title>Sutando — build required</title>` +
 				`<style>body{font-family:-apple-system,sans-serif;max-width:560px;margin:80px auto;padding:0 20px;color:#222}</style>` +
-				`<h1>Sutando client not built</h1>` +
-				`<p>Run <code>pnpm install && pnpm build:client</code> from the repo root, then refresh this page.</p>`
+				`<h1>Sutando UI not found</h1>` +
+				`<p>The UI lives in the private <code>stando-ui</code> repo. Build it and point this server at it:</p>` +
+				`<pre style="background:#f4f4f4;padding:12px;border-radius:6px;overflow:auto"># in a stando-ui checkout
+pnpm install && pnpm build
+
+# then relaunch stando with
+CLIENT_DIST_DIR=/abs/path/to/stando-ui/dist bash src/startup.sh</pre>` +
+				`<p>See <code>docs/WIRE.md</code> for the contract any UI must honor.</p>`
 		);
 	});
 

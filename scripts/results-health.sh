@@ -28,7 +28,10 @@ for arg in "$@"; do
 done
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-RESULTS="$REPO/results"
+# Runtime results live in the workspace, not the repo root.
+# Mirrors workspace_default.resolve_workspace(): $SUTANDO_WORKSPACE → ~/.sutando/workspace/.
+WORKSPACE="${SUTANDO_WORKSPACE:-$HOME/.sutando/workspace}"
+RESULTS="$WORKSPACE/results"
 
 if [ ! -d "$RESULTS" ]; then
 	[ "$QUIET" -eq 0 ] && echo "results/ missing — nothing to check"

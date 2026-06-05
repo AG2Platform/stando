@@ -46,7 +46,7 @@ See existing skills for examples. Install with `bash skills/install.sh`.
 - **Python**: standard library preferred, no frameworks. Python 3.9+ compatible (avoid `str | None` union syntax — use `Optional[str]`).
 - **TypeScript**: ESM modules, strict mode. Run `npx tsc --noEmit` before submitting.
 - **Shell**: bash, `set -e`, use `$REPO` for paths
-- **Web client**: `GET /` serves the Vite + React bundle from `client/` (see `client/README.md`). Run `pnpm install && pnpm build:client` from the repo root before starting the server; the conversation page returns a 503 with a build hint when `client/dist/` is missing. New conversation features land under `client/src/` per the frontend-conventions skill; HTTP endpoints (`/sse`, `/sse-status`, `/voice-mode`, `/mute-state`, …) live in `web-server.ts` (hosted in the `voice-agent.ts` process).
+- **Web client**: `GET /` serves the Vite + React bundle from the private [stando-ui](https://github.com/AG2Platform/stando-ui) repo — it no longer lives in this tree. Build it there (`pnpm install && pnpm build`) and point this server at it with `CLIENT_DIST_DIR=/abs/path/to/stando-ui/dist`; the conversation page returns a 503 with a hint when that's unset. New conversation features land in the stando-ui repo per the frontend-conventions skill. The wire contract any UI must honor is documented in `docs/WIRE.md`. HTTP endpoints (`/sse`, `/sse-status`, `/voice-mode`, `/mute-state`, …) live in `web-server.ts` (hosted in the `voice-agent.ts` process).
 - All scripts should work from a fresh clone with minimal setup
 
 ## Pull requests

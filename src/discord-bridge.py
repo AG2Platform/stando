@@ -54,6 +54,7 @@ except ModuleNotFoundError:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
+from single_instance import acquire as _single_instance_acquire  # noqa: E402
 from util_paths import shared_personal_path  # noqa: E402
 from task_priority import default_priority_for_source  # noqa: E402
 REPO = resolve_workspace()
@@ -137,27 +138,27 @@ ARCHIVE_TASKS_DIR = REPO / "tasks" / "archive"
 ARCHIVE_RESULTS_DIR = REPO / "results" / "archive"
 OWNER_ACTIVITY_FILE = STATE_DIR / "last-owner-activity.json"
 
-# Allowlist for paths that may be attached to outgoing Discord messages.
-# Result text can embed `[file: /path]` / `[send: /path]` / `[attach: /path]`
-# markers; we only forward paths that resolve under one of these roots.
-# Fail-closed: a non-matching path is reported inline rather than sent.
-SEND_ALLOWED_ROOTS = (
-    str(REPO / "results"),
-    str(REPO / "notes"),
-    # Notes canonical home (private dir) — once saved by save_note, paths
-    # reference the private location. Both old and new paths allowed during
-    # the transition; the resolver picks whichever exists.
-    str(shared_personal_path("notes", REPO)),
-    str(REPO / "docs"),
-    str(Path.home() / "Desktop" / "iclr-backups"),
-    str(Path.home() / "Documents" / "sutando-launch-assets"),
+# Allowlist for paths attached via `[file:|send:|attach:]` markers.
+# Single source of truth is `src/send_allowlist.py` — shared with
+# `src/dm-result.py`'s REST-fallback delivery path. Per the OSS
+# liususan091219 review on PR #1029: keeping the policy as a copy in
+# each file will drift even with "keep in sync" comments. The extract
+# removes that hazard at the boundary. The policy values are byte-
+# identical to the pre-extract inline copy here (this is a pure
+# refactor, not a tightening/loosening of allowed roots).
+from send_allowlist import (  # noqa: E402
+    SEND_ALLOWED_PREFIXES,
+    SEND_ALLOWED_ROOTS,
+    is_path_sendable as _is_path_sendable_shared,
 )
-SEND_ALLOWED_PREFIXES = (
-    "/tmp/sutando-",
-    "/private/tmp/sutando-",
-    "/tmp/echo-",
-    "/private/tmp/echo-",
-)
+
+# Workspace-local Sutando-specific Discord configuration (Phase 5.10).
+# Single source of truth for owner-id resolution — shared with
+# `src/dm-result.py`. Pre-extract, both files inlined the same
+# resolution chain (env -> tierMap -> bot-filter walk); the drift
+# class that bit #846 was one site getting the read and the other
+# not. The shared helper prevents that recurring.
+import discord_config  # noqa: E402
 
 
 _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*([^\s`~][^`~]*)?\s*$")
@@ -346,27 +347,12 @@ def _split_file_markers(text: str) -> tuple[str, list[str]]:
     return clean_text, files
 
 
-def _is_path_sendable(fpath: str) -> bool:
-    """True iff `fpath` is a real file AND resolves under an allowed root.
-
-    Uses os.path.realpath to collapse symlinks / `..` segments before the
-    prefix comparison, matching the sanitizer pattern used across the
-    codebase for CodeQL py/path-injection resolution.
-    """
-    if not os.path.isfile(fpath):
-        return False
-    try:
-        real = os.path.realpath(fpath)
-    except OSError:
-        return False
-    for root in SEND_ALLOWED_ROOTS:
-        root_real = os.path.realpath(root)
-        if real == root_real or real.startswith(root_real + os.sep):
-            return True
-    for prefix in SEND_ALLOWED_PREFIXES:
-        if real.startswith(prefix):
-            return True
-    return False
+# Public name preserved (`_is_path_sendable`) so all existing call sites
+# in this bridge (write_owner_activity downstream + the four send paths)
+# continue to work unchanged. The shared helper lives in
+# `src/send_allowlist.py`; this alias is the single boundary between the
+# bridge and the shared policy module.
+_is_path_sendable = _is_path_sendable_shared
 
 
 def write_owner_activity(channel: str, summary: str) -> None:
@@ -2032,9 +2018,81 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 
 
+def _recover_orphan_sending_files() -> int:
+    """Restart-safety: rename any orphan `results/proactive-*.sending`
+    files back to `*.txt` so they get re-claimed on the next poll.
+    Returns the number of files recovered.
+
+    Atomic-claim-by-rename (`proactive-*.txt` → `.sending`) prevents
+    same-tick double-deliveries between concurrent poll iterations.
+    But if the bridge crashes BETWEEN the rename and the delivery,
+    the `.sending` file sits orphaned in `results/` — no poll
+    iteration ever looks at `.sending` suffixes, so the owner
+    notification is silently dropped until next manual intervention.
+
+    This function runs on startup to bring orphans back into the
+    polling stream. Idempotent: a second call sees no `.sending`
+    files and is a no-op. Fail-open: any per-file error is logged
+    but doesn't block the bridge from starting.
+
+    Mirrors `_recover_orphan_sending_files` in `telegram-bridge.py`
+    (and `slack-bridge.py` if/when ported) so the same bug class is
+    closed on every proactive-delivery surface. Ported in Phase 5.11
+    of the OSS→private sync.
+    """
+    if not RESULTS_DIR.exists():
+        return 0
+    recovered = 0
+    for f in RESULTS_DIR.iterdir():
+        if not (f.name.startswith("proactive-") and f.suffix == ".sending"):
+            continue
+        target = f.with_suffix(".txt")
+        try:
+            # Don't clobber a same-named .txt that somehow re-appeared
+            # (e.g. an operator manually re-dropped the file). The
+            # atomic-claim invariant guarantees they don't normally
+            # coexist, but be defensive on startup.
+            if target.exists():
+                print(
+                    f"  [startup] skipping orphan recovery: {target.name} "
+                    f"already exists (collision with {f.name})",
+                    flush=True,
+                )
+                continue
+            f.rename(target)
+            recovered += 1
+            print(f"  [startup] recovered orphan {f.name} → {target.name}", flush=True)
+        except FileNotFoundError:
+            # Lost the race to another process; that's fine.
+            pass
+        except Exception as e:
+            print(f"  [startup] failed to recover {f.name}: {e}", flush=True)
+    if recovered:
+        print(f"  [startup] recovered {recovered} orphan .sending file(s)", flush=True)
+    return recovered
+
+
 @client.event
 async def on_ready():
     print(f"Discord bridge ready: {client.user}")
+    # Phase 5.10: auto-seed workspace `state/discord-config.json` from the
+    # legacy access.json heuristic on first boot. Idempotent (no-op if
+    # file exists). Emits a WARN to stderr if the seed had to fall back
+    # to `allowFrom[0]` so the operator catches a mis-seed before it
+    # routes the first proactive DM to the wrong user.
+    try:
+        _initial_access = json.loads(ACCESS_FILE.read_text())
+    except Exception:
+        _initial_access = {}
+    try:
+        discord_config.auto_seed_if_missing(_initial_access)
+    except Exception as _seed_exc:
+        print(f"  [discord-config] auto-seed failed (non-fatal): {_seed_exc}")
+    # Phase 5.11: restart-safety sweep — recover orphan `.sending` files
+    # left behind by a previous crashed/killed bridge process before
+    # the poll loops start. See _recover_orphan_sending_files for the
+    # bug class this closes.
+    _recover_orphan_sending_files()
     # Start polling loops
     client.loop.create_task(poll_results())
     client.loop.create_task(poll_approved())
@@ -2940,6 +2998,29 @@ async def poll_results():
                             await channel.send(chunk, reference=ref)
                             first = False
                             reply_chunks += 1
+                        # Record to outbox audit log so the dashboard's Outbox
+                        # card can surface the delivery. Best-effort: any
+                        # failure here must NOT block the reply or its
+                        # downstream archival. Ported in Phase 5.16 of the
+                        # OSS → private sync (Phase 5.15 added the reader).
+                        try:
+                            import outbox_log
+                            ch_type = "discord_dm" if isinstance(channel, discord.DMChannel) else "discord_channel"
+                            if isinstance(channel, discord.DMChannel):
+                                _recipient = getattr(channel.recipient, "name", None)
+                                _label = f"{_recipient} DM" if _recipient else "DM"
+                            else:
+                                _ch_name = getattr(channel, "name", None)
+                                _label = f"#{_ch_name}" if _ch_name else None
+                            outbox_log.append(
+                                channel_type=ch_type,
+                                recipient=str(channel.id),
+                                recipient_label=_label,
+                                body=clean_text,
+                                task_id=task_id,
+                            )
+                        except Exception:
+                            pass
 
                     # Send files (allowlist-gated; see _is_path_sendable).
                     # Missing-file case: the regex eagerly extracts every
@@ -3041,48 +3122,45 @@ async def poll_proactive():
                     if not text:
                         f.unlink(missing_ok=True)
                         continue
-                    # Resolve the DM recipient. Priority (mirrors
-                    # src/dm-result.py:_resolve_owner_id, modulo the
-                    # async/event-loop shape):
-                    #   1. $SUTANDO_DM_OWNER_ID env override.
-                    #   2. tierMap[uid] == "owner" — the unique tier-tagged
-                    #      owner from access.json.
-                    #   3. First non-bot user from allowFrom IN LIST ORDER.
+                    # Resolve the DM recipient via discord_config.resolve_owner_id
+                    # (Phase 5.10 — same chain that dm-result.py uses, so the
+                    # live bridge and the REST-fallback path never disagree on
+                    # who the owner is).
                     #
-                    # Pre-fix used `load_allowed()` which returns a SET, so
-                    # iteration was insertion/hash-ordered — on 2026-05-18
-                    # this picked a team-tier user (msze_) over the
-                    # owner-tier user (qingyunwu) because the set yielded
-                    # msze_ first. allowFrom is a *list* in access.json with
-                    # a meaningful first-entry-wins convention; preserving
-                    # that order fixes the routing.
-                    owner_id = os.environ.get("SUTANDO_DM_OWNER_ID", "").strip() or None
-                    if not owner_id:
-                        try:
-                            access_data = json.loads(ACCESS_FILE.read_text())
-                        except Exception:
-                            access_data = {}
+                    # Helper handles steps 1-5 (env override / workspace owner
+                    # / workspace tierMap / legacy owner / legacy tierMap).
+                    # Step 6 (async bot-filter walk via client.fetch_user)
+                    # stays here because the helper is sync-only — keeps it
+                    # shareable between this async bridge and dm-result's sync
+                    # REST path.
+                    #
+                    # Pre-Phase-5.10 the chain was inlined here AND in
+                    # dm-result.py — the drift class @liususan091219 flagged
+                    # on OSS PR #1029 and what bit #846. Funneling both sites
+                    # through the same helper closes that recurrence.
+                    try:
+                        access_data = json.loads(ACCESS_FILE.read_text())
+                    except Exception:
+                        access_data = {}
+                    owner_id = discord_config.resolve_owner_id(access_data)
+                    if owner_id is None:
                         allow_list = access_data.get("allowFrom") or []
-                        tier_map = access_data.get("tierMap") or {}
                         if not allow_list:
                             print(f"  [proactive] no owner in allowFrom, skipping {f.name}")
                             f.unlink(missing_ok=True)
                             continue
-                        # Preferred: the tier-tagged owner if one exists in allowFrom.
-                        owner_id = next(
-                            (uid for uid in allow_list if tier_map.get(uid) == "owner"),
-                            None,
-                        )
-                        # Fallback: first non-bot user, list order preserved.
-                        if owner_id is None:
-                            for uid in allow_list:
-                                try:
-                                    u = await client.fetch_user(int(uid))
-                                    if not u.bot:
-                                        owner_id = str(uid)
-                                        break
-                                except Exception:
-                                    continue
+                        # Step 6: async bot-filter walk. First non-bot user
+                        # in allowFrom (list order preserved, which fixes
+                        # the 2026-05-18 set-ordering bug where msze_ was
+                        # picked over qingyunwu).
+                        for uid in allow_list:
+                            try:
+                                u = await client.fetch_user(int(uid))
+                                if not u.bot:
+                                    owner_id = str(uid)
+                                    break
+                            except Exception:
+                                continue
                     if owner_id is None:
                         print(f"  [proactive] no human user in allowFrom, skipping {f.name}")
                         f.unlink(missing_ok=True)
@@ -3095,6 +3173,21 @@ async def poll_proactive():
                         if clean_text:
                             for chunk in _chunk_for_discord(clean_text):
                                 await dm.send(chunk)
+                            # Outbox audit. Same shape as poll_results;
+                            # see Phase 5.16 port note above.
+                            try:
+                                import outbox_log
+                                _user_name = getattr(user, "name", None)
+                                _label = f"{_user_name} DM" if _user_name else None
+                                outbox_log.append(
+                                    channel_type="discord_dm",
+                                    recipient=str(owner_id),
+                                    recipient_label=_label,
+                                    body=clean_text,
+                                    task_id=f.stem,
+                                )
+                            except Exception:
+                                pass
                         for fpath in files:
                             fpath = os.path.expanduser(fpath.strip())
                             if _is_path_sendable(fpath):
@@ -3251,6 +3344,25 @@ async def poll_dm_fallback():
                             if text_only:
                                 for chunk in _chunk_for_discord(text_only):
                                     await target_channel.send(chunk)
+                                # Outbox audit (Phase 5.16). The dm-fallback
+                                # channel-redirect path delivers to a routed
+                                # channel rather than the originating DM;
+                                # record under the resolved channel id, not
+                                # the owner_id, so the dashboard reflects
+                                # where the message actually landed.
+                                try:
+                                    import outbox_log
+                                    _ch_name = getattr(target_channel, "name", None)
+                                    _label = f"#{_ch_name}" if _ch_name else None
+                                    outbox_log.append(
+                                        channel_type="discord_channel",
+                                        recipient=str(target_channel_id),
+                                        recipient_label=_label,
+                                        body=text_only,
+                                        task_id=_task_id,
+                                    )
+                                except Exception:
+                                    pass
                             for fpath in file_list:
                                 fpath = os.path.expanduser(fpath.strip())
                                 if _is_path_sendable(fpath):
@@ -3386,4 +3498,5 @@ if __name__ == "__main__":
     if len(sys.argv) >= 4 and sys.argv[1] == "send":
         _send_via_rest(sys.argv[2], " ".join(sys.argv[3:]))
     else:
+        _single_instance_acquire("discord-bridge")
         client.run(TOKEN, log_handler=None)
