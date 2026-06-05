@@ -8,7 +8,10 @@
 
 set -e
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-BUNDLE="$HOME/Desktop/sutando-migration"
+# Bundle lives under ~/.sutando/ — NOT ~/Desktop/. The bundle carries .env
+# with real secrets; ~/Desktop is synced to iCloud on many Macs, which would
+# push unscrubbed credentials to the cloud. ~/.sutando/ is not sync-backed.
+BUNDLE="$HOME/.sutando/migration-bundle"
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE"
 
@@ -95,7 +98,7 @@ fi
 # 8. Behavioral flywheel data (conversation history, call logs, build log)
 mkdir -p "$BUNDLE/flywheel"
 [ -f "$REPO/session-state.md" ] && cp "$REPO/session-state.md" "$BUNDLE/flywheel/" && echo "  ✓ session-state.md"
-[ -f "$REPO/conversation.log" ] && cp "$REPO/conversation.log" "$BUNDLE/flywheel/" && echo "  ✓ conversation.log"
+[ -f "$REPO/logs/conversation.log" ] && cp "$REPO/logs/conversation.log" "$BUNDLE/flywheel/" && echo "  ✓ conversation.log"
 [ -f "$REPO/build_log.md" ] && cp "$REPO/build_log.md" "$BUNDLE/flywheel/" && echo "  ✓ build_log.md"
 [ -d "$REPO/results/calls" ] && cp -r "$REPO/results/calls" "$BUNDLE/flywheel/calls" && echo "  ✓ call transcripts"
 # Task result history (recent)
@@ -201,8 +204,15 @@ echo ""
 # ── 6. Restore all bundle files ──
 echo "Step 6/7: Restoring files..."
 
-# Copy .env
-[ -f "$BUNDLE_DIR/.env" ] && cp "$BUNDLE_DIR/.env" "$REPO/.env" && echo "  ✓ .env restored"
+# Copy .env — non-destructive: back up any existing .env first, so a stale or
+# placeholder-key bundle .env can never silently wipe real keys (2026-05-21).
+if [ -f "$BUNDLE_DIR/.env" ]; then
+  if [ -f "$REPO/.env" ]; then
+    cp "$REPO/.env" "$REPO/.env.bak.$(date +%Y%m%d-%H%M%S)" \
+      && echo "  ✓ existing .env backed up (.env.bak.*)"
+  fi
+  cp "$BUNDLE_DIR/.env" "$REPO/.env" && echo "  ✓ .env restored"
+fi
 
 # Copy memory
 if [ -d "$BUNDLE_DIR/memory" ]; then
@@ -282,7 +292,7 @@ fi
 # Restore flywheel data
 if [ -d "$BUNDLE_DIR/flywheel" ]; then
   [ -f "$BUNDLE_DIR/flywheel/session-state.md" ] && cp "$BUNDLE_DIR/flywheel/session-state.md" "$REPO/" && echo "  ✓ session-state.md restored"
-  [ -f "$BUNDLE_DIR/flywheel/conversation.log" ] && cp "$BUNDLE_DIR/flywheel/conversation.log" "$REPO/" && echo "  ✓ conversation.log restored"
+  [ -f "$BUNDLE_DIR/flywheel/conversation.log" ] && mkdir -p "$REPO/logs" && cp "$BUNDLE_DIR/flywheel/conversation.log" "$REPO/logs/" && echo "  ✓ conversation.log restored"
   [ -f "$BUNDLE_DIR/flywheel/build_log.md" ] && cp "$BUNDLE_DIR/flywheel/build_log.md" "$REPO/" && echo "  ✓ build_log.md restored"
   [ -d "$BUNDLE_DIR/flywheel/calls" ] && mkdir -p "$REPO/results" && cp -r "$BUNDLE_DIR/flywheel/calls" "$REPO/results/calls" && echo "  ✓ call transcripts restored"
   [ -d "$BUNDLE_DIR/flywheel/results" ] && mkdir -p "$REPO/results" && cp "$BUNDLE_DIR/flywheel/results/"* "$REPO/results/" 2>/dev/null && echo "  ✓ task results restored"

@@ -39,6 +39,8 @@ gws gmail +read <messageId>                     # read a message
 gws gmail users messages list --params 'q=keyword'  # search
 ```
 
+**Finding a specific email** — when the obvious query fails, invoke `/email-find <description>`. Broad-before-narrow playbook (full-inbox scan → partner-domain fanout → thread re-walk) that refuses to give up after one or two failed queries. See `skills/email-find/SKILL.md` for the workflow and rules around subject-mismatch + `get_thread` truncation. Per-user partner-domain mappings live in your own memory (the skill describes the file format).
+
 **Contacts** — look up people by name or email:
 ```bash
 python3 ~/.claude/skills/macos-tools/scripts/contacts.py search "Bob"   # find by name
@@ -118,9 +120,9 @@ mdfind "kMDItemKind == 'PDF'" -onlyin ~/Documents  # by file type in a folder
 
 **Meeting join** — join Zoom or Google Meet with computer audio:
 ```bash
-npx tsx -e "import 'dotenv/config'; import { joinZoomTool } from './src/inline-tools.ts'; joinZoomTool.execute({}, null).then(r => console.log(JSON.stringify(r)))"
+npx tsx -e "import 'dotenv/config'; import { joinZoomTool } from './skills/zoom/tools.ts'; joinZoomTool.execute({}, null).then(r => console.log(JSON.stringify(r)))"
 npx tsx -e "import 'dotenv/config'; import { joinGmeetTool } from './src/inline-tools.ts'; joinGmeetTool.execute({ meetingCode: 'abc-defg-hij' }, null).then(r => console.log(JSON.stringify(r)))"
-npx tsx -e "import 'dotenv/config'; import { summonTool } from './src/inline-tools.ts'; summonTool.execute({}, null).then(r => console.log(JSON.stringify(r)))"
+npx tsx -e "import 'dotenv/config'; import { summonTool } from './skills/zoom/tools.ts'; summonTool.execute({}, null).then(r => console.log(JSON.stringify(r)))"
 ```
 - `joinZoomTool` — Zoom desktop app + computer audio (no screen share)
 - `joinGmeetTool` — Chrome browser + computer audio + camera off

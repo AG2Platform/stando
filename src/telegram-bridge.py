@@ -312,11 +312,11 @@ def _resolve_proactive_owner_id(env_override: str | None, access_data: dict) -> 
         None,
     )
     if tier_owner is not None:
-        return tier_owner
+        return str(tier_owner)
     tofu_owner = access_data.get("tofuOwner")
     if tofu_owner is not None and tofu_owner in allow_list:
-        return tofu_owner
-    return allow_list[0]
+        return str(tofu_owner)
+    return str(allow_list[0])
 
 
 def tofu_onboard(sender_id, username):
@@ -692,8 +692,17 @@ def main():
                 not presenter_mode_active()
                 and should_claim_proactive(OWNER_ACTIVITY_FILE, "telegram")
             ):
+                # discord-bridge.poll_dm_fallback handles briefing-/insight-/
+                # friction-*.txt via FALLBACK_PREFIXES; telegram-bridge only
+                # matched `proactive-`, so morning-briefing output (which
+                # writes `results/briefing-{date}.txt` per the skill
+                # contract) was silently archived without reaching Telegram.
+                # Treat the same prefixes as proactive-equivalent so
+                # cron-originated results land in the owner's DM regardless
+                # of which bridge is the active channel.
+                PROACTIVE_PREFIXES = ("proactive-", "briefing-", "insight-", "friction-")
                 for f in RESULTS_DIR.iterdir():
-                    if f.name.startswith("proactive-") and f.suffix == ".txt":
+                    if any(f.name.startswith(p) for p in PROACTIVE_PREFIXES) and f.suffix == ".txt":
                         # Claim-by-rename: atomic move to a `.sending`
                         # suffix before reading, so a concurrent poll
                         # (same bridge, or a race with discord-bridge)
