@@ -80,6 +80,17 @@ for name in src skills node_modules package.json package-lock.json tsconfig.json
     fi
 done
 
+# Link any new skills into ~/.claude/skills/ before launching claude. Claude
+# Code loads skills by name at process start, so a skill added to the repo
+# (via upstream sync, skill-installer, or a manual add) stays invisible to the
+# core until it's symlinked — a footgun on every skill install (feedback
+# d920b18b). install.sh is idempotent (skips existing links, relinks broken
+# ones) and is the same linker startup.sh + the app installer already use, so
+# running it on every core (re)start safely picks up newly-added skills.
+if [ -f "$REPO_DIR/skills/install.sh" ]; then
+    bash "$REPO_DIR/skills/install.sh" >/dev/null 2>&1 || true
+fi
+
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 
 if ! command -v tmux >/dev/null 2>&1; then
