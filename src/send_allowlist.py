@@ -63,19 +63,22 @@ SEND_ALLOWED_ROOTS: tuple[str, ...] = (
     # allowed during the transition; resolver picks whichever exists.
     str(shared_personal_path("notes", _REPO)),
     str(_REPO / "docs"),
+    str(_REPO / "data"),
     str(Path.home() / "Desktop" / "iclr-backups"),
     str(Path.home() / "Documents" / "sutando-launch-assets"),
 )
 
 # Prefix forms — files whose realpath starts with any of these strings
-# are deliverable. Covers temp-file artifacts the agent generates
-# (`/tmp/sutando-recording-*.mov`, `/tmp/echo-screenshot-*.png`, etc.)
-# without needing to enumerate every filename.
+# are deliverable. Covers the system scratch dirs the agent writes to:
+# `/tmp/sutando-recording-*.mov` and also ad-hoc working files it exports
+# directly to /tmp (e.g. `/tmp/report.xlsx`, feedback 2033745d). macOS
+# realpath collapses /tmp → /private/tmp and uses /var/folders for the
+# per-user temp dir, so all three roots are listed. Home + system paths
+# (config, keys, browser data) stay off-limits.
 SEND_ALLOWED_PREFIXES: tuple[str, ...] = (
-    "/tmp/sutando-",
-    "/private/tmp/sutando-",
-    "/tmp/echo-",
-    "/private/tmp/echo-",
+    "/tmp/",
+    "/private/tmp/",
+    "/var/folders/",
 )
 
 

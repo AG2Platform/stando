@@ -87,17 +87,21 @@ def _cap_hit_reply_text(reason: str | None) -> str:
     )
 
 # Allowlist for paths that may be sent via Telegram [file: /path] markers.
-# Mirrors _is_path_sendable() in discord-bridge.py.
+# Mirrors src/send_allowlist.py (the shared discord/dm-result source).
 SEND_ALLOWED_ROOTS = (
     str(REPO / "results"),
     str(REPO / "notes"),
     str(REPO / "docs"),
+    str(REPO / "data"),
 )
+# Broadened from the /tmp/sutando- prefixes to the system scratch dirs so
+# ad-hoc working files (e.g. /tmp/report.xlsx) are sendable — feedback
+# 2033745d. realpath collapses /tmp → /private/tmp on macOS; /var/folders
+# is the per-user temp dir.
 SEND_ALLOWED_PREFIXES = (
-    "/tmp/sutando-",
-    "/private/tmp/sutando-",
-    "/tmp/echo-",
-    "/private/tmp/echo-",
+    "/tmp/",
+    "/private/tmp/",
+    "/var/folders/",
 )
 
 
@@ -752,6 +756,13 @@ def main():
             result_file = RESULTS_DIR / f"{task_id}.txt"
             if result_file.exists():
                 reply_text = result_file.read_text().strip()
+                # feedback 77dc1b98: a shell-redirect (`> file`) creates the
+                # result file empty before the body flushes; reading mid-write
+                # and archiving below silently drops the reply. Skip empty
+                # reads for a short grace window (retry next poll), then fall
+                # through so a genuinely empty result still gets cleaned up.
+                if not reply_text and (time.time() - result_file.stat().st_mtime) < 2.0:
+                    continue
                 chat_id = pending_replies.pop(task_id)
                 # Parse markers via the unified module (#873). Telegram
                 # honors [no-send] / [REPLIED] / [deduped: <id>] as skip

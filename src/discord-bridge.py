@@ -3250,6 +3250,13 @@ async def poll_results():
             if result_file.exists():
                 import re
                 reply_text = result_file.read_text().strip()
+                # feedback 77dc1b98: a shell-redirect (`> file`) creates the
+                # result file empty before the body flushes; reading mid-write
+                # and archiving below silently drops the reply. Skip empty
+                # reads for a short grace window (retry next poll), then fall
+                # through so a genuinely empty result still gets cleaned up.
+                if not reply_text and (time.time() - result_file.stat().st_mtime) < 2.0:
+                    continue
                 channel = pending_replies.pop(task_id)
                 # Capture anchor BEFORE pop so the auto-thread block below
                 # can use it. The previous version popped+forgot, leaving

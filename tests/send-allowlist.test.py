@@ -119,7 +119,10 @@ def test_symlink_outside_allowed_root_rejected():
     that points at an out-of-list file must reject — `realpath`
     collapses before the prefix comparison."""
     link = Path("/tmp/sutando-helper-symlink-pointer.txt")
-    outside = Path("/tmp/escaped-not-sutando-helper.txt")
+    # Target lives at the $HOME root — outside every allowed root/prefix
+    # even after the /tmp broadening (feedback 2033745d) — so this still
+    # genuinely exercises the realpath-collapse escape guard.
+    outside = Path.home() / "sutando-allowlist-escape-test-DELETEME.txt"
     outside.write_text("would be exfil")
     if link.exists() or link.is_symlink():
         link.unlink()
@@ -136,19 +139,15 @@ def test_symlink_outside_allowed_root_rejected():
 
 
 def test_path_traversal_dotdot_rejected():
-    """`..` segments that escape the allowlist must reject."""
-    rogue = Path("/tmp/passwd-not-sutando-helper-no-write")
-    if not rogue.exists():
-        rogue.write_text("not actual passwd")
-    try:
-        traversal = "/tmp/sutando-x/../passwd-not-sutando-helper-no-write"
-        assert not send_allowlist.is_path_sendable(traversal), (
-            "path traversal via .. bypassed the allowlist — "
-            "realpath collapse is broken"
-        )
-    finally:
-        if rogue.exists():
-            rogue.unlink()
+    """`..` segments that escape the allowlist must reject. Since /tmp is
+    now broadly allowed (feedback 2033745d), the traversal must escape
+    /tmp entirely — realpath collapses it to /etc/hosts (a real file
+    outside every allowed root) before the prefix check."""
+    traversal = "/tmp/sutando-x/../../../etc/hosts"
+    assert not send_allowlist.is_path_sendable(traversal), (
+        "path traversal via .. bypassed the allowlist — "
+        "realpath collapse is broken"
+    )
 
 
 # -----------------------------------------------------------------------
@@ -201,15 +200,20 @@ def test_dm_result_imports_helper_constants_by_identity():
 
 
 def test_allowed_prefixes_are_the_documented_set():
-    """Architectural assertion: the allowed prefixes must stay the
-    deliberate four-entry set. A future refactor that adds `/tmp/`
-    (no suffix) or `/Users/` would massively widen exfil; this test
-    forces a deliberate update of the documented set."""
+    """Architectural assertion: the allowed prefixes must stay a small,
+    deliberate set. Broadened 2026-06 (feedback 2033745d) from the
+    `/tmp/sutando-*`/`/tmp/echo-*` prefixes to the system scratch roots so
+    the agent can deliver ad-hoc working files it writes to /tmp (e.g.
+    /tmp/report.xlsx). This is an INTENTIONAL, owner-scoped beta exposure
+    widening — acceptable because (a) bot file-sends are owner-driven
+    (non-owner tasks run sandboxed read-only) and (b) the realpath
+    sanitizer still blocks symlink/`..` escapes to $HOME + system paths
+    (see the escape tests above). Any FURTHER widening (e.g. `/Users/`,
+    `/`) must update this set deliberately."""
     documented = {
-        "/tmp/sutando-",
-        "/private/tmp/sutando-",
-        "/tmp/echo-",
-        "/private/tmp/echo-",
+        "/tmp/",
+        "/private/tmp/",
+        "/var/folders/",
     }
     actual = set(send_allowlist.SEND_ALLOWED_PREFIXES)
     assert actual == documented, (

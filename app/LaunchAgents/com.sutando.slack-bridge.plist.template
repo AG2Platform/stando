@@ -29,11 +29,14 @@
 
     <!-- Only run while the token file exists. The bridge reads
          SLACK_BOT_TOKEN / SLACK_APP_TOKEN from ~/.claude/channels/slack/.env
-         and exits(1) when they're missing; gating on PathState avoids a
-         crash-loop on a clean install where the user hasn't configured
-         tokens yet. Settings → Channels writes that file on save. -->
+         and exits(1) when they're missing; PathState alone is the correct
+         gate. RunAtLoad is false and SuccessfulExit is intentionally
+         absent: RunAtLoad:true + KeepAlive.SuccessfulExit:false makes
+         launchd restart-on-nonzero-exit fire on every unconfigured boot,
+         crash-looping the bridge (feedback 163f8468). Settings → Channels
+         writes that file on save; PathState then starts + keeps it alive. -->
     <key>RunAtLoad</key>
-    <true/>
+    <false/>
     <key>KeepAlive</key>
     <dict>
         <key>PathState</key>
@@ -41,8 +44,6 @@
             <key>{{HOME}}/.claude/channels/slack/.env</key>
             <true/>
         </dict>
-        <key>SuccessfulExit</key>
-        <false/>
     </dict>
     <key>ThrottleInterval</key>
     <integer>10</integer>

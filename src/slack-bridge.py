@@ -90,19 +90,23 @@ if not BOT_TOKEN or not APP_TOKEN:
     sys.exit(1)
 
 
-# Outbound file-send allowlist — mirrors _is_path_sendable() in
-# discord-bridge.py + telegram-bridge.py. Fail-closed by default.
+# Outbound file-send allowlist — mirrors src/send_allowlist.py (the shared
+# discord/dm-result source) + telegram-bridge.py. Fail-closed by default.
 SEND_ALLOWED_ROOTS = (
     str(REPO / "results"),
     str(REPO / "notes"),
     str(REPO / "docs"),
+    str(REPO / "data"),
     str(INBOX_DIR),
 )
+# Broadened from the /tmp/sutando- prefixes to the system scratch dirs so
+# ad-hoc working files (e.g. /tmp/report.xlsx) are sendable — feedback
+# 2033745d. realpath collapses /tmp → /private/tmp on macOS; /var/folders
+# is the per-user temp dir.
 SEND_ALLOWED_PREFIXES = (
-    "/tmp/sutando-",
-    "/private/tmp/sutando-",
-    "/tmp/echo-",
-    "/private/tmp/echo-",
+    "/tmp/",
+    "/private/tmp/",
+    "/var/folders/",
 )
 
 
@@ -719,6 +723,14 @@ def result_watcher():
                 if not result_file.exists():
                     continue
                 reply_text = result_file.read_text().strip()
+                # feedback 77dc1b98: a shell-redirect (`> file`) creates the
+                # result file empty before the body flushes. Reading mid-write
+                # and archiving below silently drops the reply. Skip empty
+                # reads for a short grace window (retry next poll); fall
+                # through only once the file has stayed empty long enough to
+                # be a genuinely no-output result, so it can't wedge forever.
+                if not reply_text and (time.time() - result_file.stat().st_mtime) < 2.0:
+                    continue
                 with pending_replies_lock:
                     target = pending_replies.pop(task_id, None)
                 if not target:
