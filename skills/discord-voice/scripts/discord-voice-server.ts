@@ -297,11 +297,12 @@ function detachVisionFromSession(): void {
 
 // --- Conversation log -------------------------------------------------------
 // discord-voice mirrors turns into conversation.sqlite (queryable) AND the
-// shared logs/conversation.log text log — the same dual-write the phone path
+// shared conversation.log text log — the same dual-write the phone path
 // uses. conversation.log is the canonical source the reload importer rebuilds
 // the sqlite `conversation` table from, so writing it keeps discord-voice rows
-// recoverable after `import-conversation-log.py --reload`.
-const CONVERSATION_LOG = join(WORKSPACE_DIR, 'logs', 'conversation.log');
+// recoverable after `import-conversation-log.py --reload`. Lives at the
+// workspace root, matching task-bridge's statePath('conversation.log').
+const CONVERSATION_LOG = join(WORKSPACE_DIR, 'conversation.log');
 
 function appendConversationLog(role: string, text: string): void {
 	try {

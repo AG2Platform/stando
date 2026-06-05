@@ -238,9 +238,9 @@ fi
 # capturing into a variable + checking $? after the assignment is the
 # cleanest way to distinguish empty-window from parse-failure under set -u
 # (PIPESTATUS array isn't reliably present in command-substitution subshells).
-print_section "Recent chat (logs/conversation.log, last $HOURS h)"
-if [ -f "$WS/logs/conversation.log" ]; then
-  log_rows=$(tail -200 "$WS/logs/conversation.log" | python3 -c "
+print_section "Recent chat (conversation.log, last $HOURS h)"
+if [ -f "$WS/conversation.log" ]; then
+  log_rows=$(tail -200 "$WS/conversation.log" | python3 -c "
 import sys, datetime as dt
 cut = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=${HOURS})
 for line in sys.stdin:
