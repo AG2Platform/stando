@@ -67,12 +67,18 @@ function ts(): string { return new Date().toISOString().slice(11, 23); }
 // value as local time when stating ETAs (feedback c3c28b4b). A self-describing
 // `local_time:` header gives it an authoritative, zone-labeled "now". OWNER_TZ
 // overrides the system zone if the core runs in a different tz than the owner.
+// The trailing IANA zone (e.g. "Australia/Sydney") doubles as the user's
+// region/location so the agent stops inferring it from skill configs
+// (feedback fb79f790 — it had reported a Sydney user as living in California
+// after reading deal-finder's sample ZIP).
 function localTimeLine(): string {
 	const tz = process.env.OWNER_TZ || undefined; // undefined -> system local zone
-	return new Date().toLocaleString('en-US', {
+	const clock = new Date().toLocaleString('en-US', {
 		timeZone: tz, weekday: 'long', year: 'numeric', month: 'short',
 		day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
 	});
+	const ianaZone = new Intl.DateTimeFormat('en-US', { timeZone: tz }).resolvedOptions().timeZone;
+	return ianaZone ? `${clock} (${ianaZone})` : clock;
 }
 
 /**

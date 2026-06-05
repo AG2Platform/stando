@@ -31,8 +31,10 @@ tags: [ideas, projects, voice]
 Content here...
 ```
 
-**Email (Gmail)** — use the `email-triage` skill (OAuth, no app password needed):
+**Email (Gmail)** — use the `email-triage` skill (OAuth, no app password needed). Connect/verify first; the helper drives the sign-in to completion and verifies it (don't ask the user to "confirm on your end"):
 ```bash
+python3 skills/email-triage/scripts/connect-gmail.py --check  # verify connection (exit 0 = connected)
+python3 skills/email-triage/scripts/connect-gmail.py          # not connected → drive sign-in + verify
 gws gmail +send --to "to@x.com" --subject "subj" --body "body"
 gws gmail +triage                               # unread inbox summary
 gws gmail +read <messageId>                     # read a message

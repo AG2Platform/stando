@@ -1,6 +1,6 @@
 ---
 name: deal-finder
-description: Scan configured sources (Craigslist now; eBay + Facebook Marketplace planned) for used-item listings matching the owner's criteria. Currently configured for a Mac mini search (M2+, 16GB+, 512GB+, ≤$500, near 94566). Notify owner via SMS + Telegram on a match.
+description: Scan configured sources (Craigslist now; eBay + Facebook Marketplace planned) for used-item listings matching the owner's criteria. Pre-tuned for a Mac mini search (M2+, 16GB+, 512GB+, ≤$500); set your search-area ZIP in state/criteria.json before the first run. Notify owner via SMS + Telegram on a match.
 user-invocable: true
 ---
 
@@ -20,7 +20,7 @@ Current Mac Mini search criteria (from `state/criteria.json`):
 - Min RAM: `16 GB`
 - Min storage: `512 GB`
 - Max price: `$500`
-- ZIP: `94566` (Pleasanton, CA), search radius `50 mi`
+- ZIP: _unset by default_ — set `"zip"` in `state/criteria.json` to your search-area postal code; search radius `50 mi`. This ZIP is the **search origin only**, not your home location — the scan refuses to run until you set it.
 
 Edit `state/criteria.json` to retune the Mac Mini search; v2 will lift this into a per-search config.
 

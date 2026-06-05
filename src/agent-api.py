@@ -44,6 +44,31 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
+def _iana_timezone() -> str:
+    """Best-effort IANA zone name (e.g. 'Australia/Sydney') for the system.
+
+    Doubles as the user's region/location signal in task headers so the agent
+    stops inferring location from skill configs (feedback fb79f790).
+    """
+    try:
+        link = os.readlink("/etc/localtime")  # .../zoneinfo/<Area>/<City>
+        if "zoneinfo/" in link:
+            return link.split("zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    return os.environ.get("OWNER_TZ") or os.environ.get("TZ") or ""
+
+
+def _local_time_header() -> str:
+    """Zone-labeled local time + IANA zone for task `local_time:` headers.
+
+    Grounds both 'now' (feedback c3c28b4b) and the user's region (fb79f790).
+    """
+    stamp = datetime.now().astimezone().strftime("%A %Y-%m-%d %I:%M %p %Z")
+    zone = _iana_timezone()
+    return f"{stamp} ({zone})" if zone else stamp
+
+
 def _safe_id(raw: str) -> str:
     """Sanitize an ID to prevent path traversal. Only allow alphanumeric, dash, underscore, dot."""
     return re.sub(r'[^a-zA-Z0-9_\-.]', '', raw)
@@ -602,7 +627,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         task_content = (
             f"id: {task_id}\n"
             f"timestamp: {datetime.now().isoformat()}\n"
-            f"local_time: {datetime.now().astimezone().strftime('%A %Y-%m-%d %I:%M %p %Z')}\n"
+            f"local_time: {_local_time_header()}\n"
             f"task: Incoming phone call from {caller}\n"
             f"source: twilio_voice\n"
             f"from: {caller}\n"
@@ -632,7 +657,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         task_content = (
             f"id: {task_id}\n"
             f"timestamp: {datetime.now().isoformat()}\n"
-            f"local_time: {datetime.now().astimezone().strftime('%A %Y-%m-%d %I:%M %p %Z')}\n"
+            f"local_time: {_local_time_header()}\n"
             f"task: SMS from {sender}: {body}\n"
             f"source: twilio_sms\n"
             f"from: {sender}\n"
@@ -656,7 +681,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             task_content = (
                 f"id: {task_id}\n"
                 f"timestamp: {datetime.now().isoformat()}\n"
-                f"local_time: {datetime.now().astimezone().strftime('%A %Y-%m-%d %I:%M %p %Z')}\n"
+                f"local_time: {_local_time_header()}\n"
                 f"task: Voicemail from {caller}: {text}\n"
                 f"source: twilio_voicemail\n"
                 f"from: {caller}\n"
@@ -881,7 +906,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         task_content = (
             f"id: {task_id}\n"
             f"timestamp: {datetime.now().isoformat()}\n"
-            f"local_time: {datetime.now().astimezone().strftime('%A %Y-%m-%d %I:%M %p %Z')}\n"
+            f"local_time: {_local_time_header()}\n"
             f"source: api\n"
             f"from: {from_agent}\n"
             f"task: {task}\n"

@@ -358,6 +358,18 @@ def main():
         return
     criteria = json.loads(CRITERIA_PATH.read_text())
 
+    # ZIP is the search origin, NOT the user's home location. It ships empty so
+    # a fresh install can't be mistaken for living in the sample area (feedback
+    # fb79f790 — agent had read this skill's old hard-coded 94566 and reported
+    # the user as living in California). Refuse to scan until it's configured.
+    if not str(criteria.get("zip", "")).strip():
+        print(
+            "deal-finder: no search ZIP configured. Set \"zip\" in "
+            f"{CRITERIA_PATH} to the postal code you want to search near.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     if args.reset:
         SEEN_PATH.write_text(json.dumps({"urls": []}))
         print("Cleared seen.json")

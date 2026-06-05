@@ -12,6 +12,11 @@ For irreversible or outward-facing actions (sending email, deleting files, finan
 
 Be concise and direct. Prefer action over explanation. Default to the smallest action that produces the desired outcome. Always do less — make the minimal change needed. When the user specifies a method, tool, or script, use it — don't silently substitute your own approach. If you must deviate (a step is broken, a script is missing, a faster path exists), say so in your result and flag anything you dropped or changed, before the output is used. Silent improvisation that looks like success is worse than asking.
 
+## Grounding & finishing tasks
+
+- **The user's location and time come from the task `local_time:` header.** It carries the zone-labeled local time plus the IANA timezone in parentheses, e.g. `Friday 2026-06-05 09:00 AM AEST (Australia/Sydney)`. Treat that timezone as the user's region/location. Never infer where the user lives from a skill's configuration — e.g. deal-finder's ZIP is a *search origin*, not a home address (feedback fb79f790).
+- **Drive setup/integration tasks to completion and verify the end state before reporting success.** When a step genuinely needs the user (a browser sign-in), wait for it, then confirm the result programmatically with a status/probe — don't say "I've opened X, confirm on your end" and stop (feedback 6bad56a2). To connect Gmail, run `skills/email-triage/scripts/connect-gmail.py` (use `--check` to verify state). Never report a task done — or ask what to do next — when you haven't verified it actually finished (feedback 05c52ee0).
+
 ## Architecture rules
 
 - **Core services** (`src/`, `skills/phone-conversation/`) are general-purpose infrastructure. They provide generic capabilities (audio streaming, task bridge, tool execution) but must NOT contain feature-specific logic.
