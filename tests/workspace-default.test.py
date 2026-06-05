@@ -16,7 +16,12 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import workspace_default  # noqa: E402
-from workspace_default import default_workspace_dir, resolve_workspace  # noqa: E402
+from workspace_default import (  # noqa: E402
+    default_workspace_dir,
+    resolve_workspace,
+    status_path,
+    status_read_path,
+)
 
 
 class TestWorkspaceDefault(unittest.TestCase):
@@ -269,6 +274,12 @@ class TestInRepoNotesMigration(unittest.TestCase):
         self.assertTrue(moved_1)
         self.assertFalse(moved_2)  # second run finds in-repo notes/ empty (file moved)
 
+    @unittest.skip(
+        "#1169: auto-migration disabled from resolve_workspace(). "
+        "_migrate_inrepo_notes function itself is still tested directly "
+        "above; the auto-dispatch is now opt-in via the sutando-migrate CLI "
+        "(follow-up PR)."
+    )
     def test_resolve_workspace_runs_inrepo_notes_migration_when_env_set(self):
         # End-to-end: resolve_workspace called with env-set workspace, in-repo
         # has notes, migration runs on the way through.
@@ -345,6 +356,12 @@ class TestInRepoBuildLogMigration(unittest.TestCase):
         # Workspace still has the FIRST content (second run skipped via sentinel).
         self.assertEqual((self.workspace / "build_log.md").read_text(), "once")
 
+    @unittest.skip(
+        "#1169: auto-migration disabled from resolve_workspace(). "
+        "_migrate_inrepo_build_log function itself is still tested directly "
+        "above; the auto-dispatch is now opt-in via the sutando-migrate CLI "
+        "(follow-up PR)."
+    )
     def test_resolve_workspace_runs_build_log_migration_when_env_set(self):
         (self.repo_root / "build_log.md").write_text("e2e content")
         with patch.object(workspace_default, "_legacy_repo_root", return_value=self.repo_root):
@@ -353,6 +370,12 @@ class TestInRepoBuildLogMigration(unittest.TestCase):
         self.assertTrue((self.workspace / "build_log.md").exists())
         self.assertFalse((self.repo_root / "build_log.md").exists())
 
+    @unittest.skip(
+        "#1169: auto-migration disabled from resolve_workspace(). "
+        "_migrate_from_legacy + _migrate_inrepo_build_log are still tested "
+        "directly above; the env-unset auto-dispatch is now opt-in via "
+        "sutando-migrate CLI (follow-up PR)."
+    )
     def test_legacy_install_env_unset_build_log_migrates_after_dirs(self):
         """Corner case Mini flagged in PR #859 review:
           - Legacy install: repo has tasks/, results/, state/ with content
@@ -404,6 +427,265 @@ class TestInRepoBuildLogMigration(unittest.TestCase):
         finally:
             shutil.rmtree(legacy, ignore_errors=True)
             shutil.rmtree(target, ignore_errors=True)
+
+
+class TestStatusPathHelpers(unittest.TestCase):
+    """Tests for `status_path` (write location) and `status_read_path`
+    (read location with one-release legacy-root fallback)."""
+
+    def setUp(self):
+        self.workspace = Path(tempfile.mkdtemp(prefix="ws-status-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.workspace, ignore_errors=True)
+
+    def test_status_path_is_under_state(self):
+        p = status_path("core-status.json", self.workspace)
+        self.assertEqual(p, self.workspace / "state" / "core-status.json")
+
+    def test_read_path_prefers_state(self):
+        (self.workspace / "state").mkdir(parents=True)
+        (self.workspace / "state" / "core-status.json").write_text("{}")
+        (self.workspace / "core-status.json").write_text("{}")  # legacy too
+        self.assertEqual(
+            status_read_path("core-status.json", self.workspace),
+            self.workspace / "state" / "core-status.json",
+        )
+
+    def test_read_path_falls_back_to_legacy_root(self):
+        (self.workspace / "core-status.json").write_text("{}")
+        self.assertEqual(
+            status_read_path("core-status.json", self.workspace),
+            self.workspace / "core-status.json",
+        )
+
+    def test_read_path_returns_state_path_when_neither_exists(self):
+        # Caller handles the missing case; we always point at the canonical home.
+        self.assertEqual(
+            status_read_path("core-status.json", self.workspace),
+            self.workspace / "state" / "core-status.json",
+        )
+
+
+class TestRootStatusMigration(unittest.TestCase):
+    """Tests for `_migrate_root_status` — sweeps loose workspace-root status
+    .json files into `state/`. Parallel posture to `_migrate_inrepo_build_log`:
+    non-destructive on collision, sentinel-gated."""
+
+    def setUp(self):
+        self.workspace = Path(tempfile.mkdtemp(prefix="ws-rootstatus-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.workspace, ignore_errors=True)
+
+    def test_moves_root_status_files_into_state(self):
+        (self.workspace / "core-status.json").write_text('{"status":"idle"}')
+        (self.workspace / "voice-state.json").write_text('{"connected":false}')
+        moved = workspace_default._migrate_root_status(self.workspace)
+        self.assertTrue(moved)
+        self.assertEqual(
+            (self.workspace / "state" / "core-status.json").read_text(),
+            '{"status":"idle"}',
+        )
+        self.assertTrue((self.workspace / "state" / "voice-state.json").is_file())
+        # Root copies are gone (moved, not copied).
+        self.assertFalse((self.workspace / "core-status.json").exists())
+        self.assertFalse((self.workspace / "voice-state.json").exists())
+
+    def test_no_clobber_on_collision(self):
+        (self.workspace / "core-status.json").write_text("ROOT version")
+        (self.workspace / "state").mkdir()
+        (self.workspace / "state" / "core-status.json").write_text("STATE wins")
+        workspace_default._migrate_root_status(self.workspace)
+        # state/ copy untouched, root copy left in place (skipped, not moved).
+        self.assertEqual(
+            (self.workspace / "state" / "core-status.json").read_text(), "STATE wins"
+        )
+        self.assertTrue((self.workspace / "core-status.json").exists())
+
+    def test_idempotent_via_sentinel(self):
+        (self.workspace / "core-status.json").write_text("once")
+        moved_1 = workspace_default._migrate_root_status(self.workspace)
+        # Re-seed a root file; the sentinel (not a missing file) must block it.
+        (self.workspace / "voice-state.json").write_text("twice")
+        moved_2 = workspace_default._migrate_root_status(self.workspace)
+        self.assertTrue(moved_1)
+        self.assertFalse(moved_2)
+        self.assertTrue((self.workspace / ".status-migrated").exists())
+        # Second file stayed at root because the sentinel short-circuited.
+        self.assertTrue((self.workspace / "voice-state.json").exists())
+
+    def test_writes_sentinel_even_when_nothing_to_move(self):
+        moved = workspace_default._migrate_root_status(self.workspace)
+        self.assertFalse(moved)
+        self.assertTrue((self.workspace / ".status-migrated").exists())
+
+
+class TestConversationLogMigration(unittest.TestCase):
+    """Tests for `_migrate_conversation_log` — moves conversation.log from the
+    workspace root into `logs/` (it's a transcript, not a status file)."""
+
+    def setUp(self):
+        self.workspace = Path(tempfile.mkdtemp(prefix="ws-convlog-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.workspace, ignore_errors=True)
+
+    def test_moves_conversation_log_into_logs(self):
+        (self.workspace / "conversation.log").write_text("turn 1\nturn 2\n")
+        moved = workspace_default._migrate_conversation_log(self.workspace)
+        self.assertTrue(moved)
+        self.assertEqual(
+            (self.workspace / "logs" / "conversation.log").read_text(),
+            "turn 1\nturn 2\n",
+        )
+        self.assertFalse((self.workspace / "conversation.log").exists())
+
+    def test_no_clobber_on_collision(self):
+        (self.workspace / "conversation.log").write_text("ROOT log")
+        (self.workspace / "logs").mkdir()
+        (self.workspace / "logs" / "conversation.log").write_text("LOGS wins")
+        workspace_default._migrate_conversation_log(self.workspace)
+        self.assertEqual(
+            (self.workspace / "logs" / "conversation.log").read_text(), "LOGS wins"
+        )
+
+    def test_idempotent_via_sentinel(self):
+        (self.workspace / "conversation.log").write_text("once")
+        moved_1 = workspace_default._migrate_conversation_log(self.workspace)
+        (self.workspace / "conversation.log").write_text("twice")
+        moved_2 = workspace_default._migrate_conversation_log(self.workspace)
+        self.assertTrue(moved_1)
+        self.assertFalse(moved_2)
+        self.assertTrue((self.workspace / ".conversation-log-migrated").exists())
+
+
+class TestResolveWorkspaceRunsNewMigrators(unittest.TestCase):
+    """End-to-end: resolve_workspace sweeps root status files + conversation.log
+    on the way through, for both the env-set and default branches."""
+
+    def setUp(self):
+        self._saved_env = os.environ.get("SUTANDO_WORKSPACE")
+        self.workspace = Path(tempfile.mkdtemp(prefix="ws-e2e-"))
+        os.environ["SUTANDO_WORKSPACE"] = str(self.workspace)
+
+    def tearDown(self):
+        if self._saved_env is not None:
+            os.environ["SUTANDO_WORKSPACE"] = self._saved_env
+        elif "SUTANDO_WORKSPACE" in os.environ:
+            del os.environ["SUTANDO_WORKSPACE"]
+        shutil.rmtree(self.workspace, ignore_errors=True)
+
+    @unittest.skip(
+        "#1169: auto-migration disabled from resolve_workspace(). "
+        "_migrate_root_status + _migrate_conversation_log are still tested "
+        "directly above; the auto-dispatch is now opt-in via the "
+        "sutando-migrate CLI (follow-up PR)."
+    )
+    def test_env_set_resolve_runs_status_and_convlog_migration(self):
+        (self.workspace / "core-status.json").write_text('{"status":"idle"}')
+        (self.workspace / "conversation.log").write_text("a turn\n")
+        # Avoid the in-repo notes/build_log migrators touching the real repo.
+        with patch.object(workspace_default, "_legacy_repo_root", return_value=self.workspace):
+            ws = resolve_workspace(migrate=True)
+        self.assertEqual(ws, self.workspace)
+        self.assertTrue((self.workspace / "state" / "core-status.json").is_file())
+        self.assertFalse((self.workspace / "core-status.json").exists())
+        self.assertTrue((self.workspace / "logs" / "conversation.log").is_file())
+        self.assertFalse((self.workspace / "conversation.log").exists())
+
+
+class TestPostMigrationDisableBehavior(unittest.TestCase):
+    """Positive assertions on the post-#1169 contract: resolve_workspace()
+    leaves legacy sources untouched, emits the notice once when called with
+    migrate=True, and stays fully pure (no scan, no stderr) with migrate=False.
+
+    These replace the auto-dispatch tests above. The skipped ones are kept
+    for one release as ratchet documentation; this class is the canonical
+    assertion of the new behavior."""
+
+    def setUp(self):
+        self._saved_env = os.environ.get("SUTANDO_WORKSPACE")
+        if "SUTANDO_WORKSPACE" in os.environ:
+            del os.environ["SUTANDO_WORKSPACE"]
+        self.tmpdir = tempfile.mkdtemp()
+        self.workspace = Path(self.tmpdir) / "ws"
+        self.workspace.mkdir()
+        self.legacy = Path(self.tmpdir) / "legacy"
+        self.legacy.mkdir()
+        (self.legacy / "notes").mkdir()
+        (self.legacy / "notes" / "x.md").write_text("a real note\n")
+        (self.legacy / "build_log.md").write_text("# build log\n")
+        (self.legacy / "conversation.log").write_text("a turn\n")
+        os.environ["SUTANDO_WORKSPACE"] = str(self.workspace)
+        # Reset the module-level notice guard between tests so each can
+        # observe the once-per-process behavior independently.
+        workspace_default._AUTO_MIGRATE_NOTICE_PRINTED = False
+
+    def tearDown(self):
+        if self._saved_env is not None:
+            os.environ["SUTANDO_WORKSPACE"] = self._saved_env
+        elif "SUTANDO_WORKSPACE" in os.environ:
+            del os.environ["SUTANDO_WORKSPACE"]
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        workspace_default._AUTO_MIGRATE_NOTICE_PRINTED = False
+
+    def test_legacy_sources_untouched_with_migrate_true(self):
+        """resolve_workspace(migrate=True) must NOT move any legacy file."""
+        with patch.object(workspace_default, "_legacy_repo_root", return_value=self.legacy):
+            ws = resolve_workspace(migrate=True)
+        self.assertEqual(ws, self.workspace)
+        # Legacy files unchanged
+        self.assertTrue((self.legacy / "notes" / "x.md").is_file())
+        self.assertTrue((self.legacy / "build_log.md").is_file())
+        self.assertTrue((self.legacy / "conversation.log").is_file())
+        # And nothing was moved INTO the workspace
+        self.assertFalse((self.workspace / "notes").exists())
+        self.assertFalse((self.workspace / "build_log.md").exists())
+        self.assertFalse((self.workspace / "logs" / "conversation.log").exists())
+
+    def test_notice_fires_once_then_silences(self):
+        """The legacy-state stderr notice must fire exactly once per process."""
+        from io import StringIO
+        with patch.object(workspace_default, "_legacy_repo_root", return_value=self.legacy):
+            buf = StringIO()
+            with patch.object(sys, "stderr", buf):
+                resolve_workspace(migrate=True)
+            first = buf.getvalue()
+            buf = StringIO()
+            with patch.object(sys, "stderr", buf):
+                resolve_workspace(migrate=True)
+            second = buf.getvalue()
+        self.assertIn("legacy state detected", first)
+        self.assertIn("#1169", first)
+        self.assertIn("sutando-migrate.sh", first)
+        self.assertEqual("", second, "notice fired more than once")
+
+    def test_migrate_false_stays_pure(self):
+        """migrate=False must skip the scan + stderr entirely. No I/O on legacy."""
+        from io import StringIO
+        with patch.object(workspace_default, "_legacy_repo_root") as mock_repo:
+            buf = StringIO()
+            with patch.object(sys, "stderr", buf):
+                ws = resolve_workspace(migrate=False)
+            self.assertEqual(ws, self.workspace)
+            # _legacy_repo_root() must NOT be called when migrate=False
+            mock_repo.assert_not_called()
+            # No stderr output
+            self.assertEqual("", buf.getvalue())
+        # Legacy files unchanged
+        self.assertTrue((self.legacy / "notes" / "x.md").is_file())
+
+    def test_no_notice_when_no_legacy_state(self):
+        """Clean install: notice must not fire when there's nothing to migrate."""
+        from io import StringIO
+        empty = Path(self.tmpdir) / "empty"
+        empty.mkdir()
+        with patch.object(workspace_default, "_legacy_repo_root", return_value=empty):
+            buf = StringIO()
+            with patch.object(sys, "stderr", buf):
+                resolve_workspace(migrate=True)
+            self.assertEqual("", buf.getvalue())
 
 
 if __name__ == "__main__":

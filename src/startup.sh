@@ -27,8 +27,8 @@ if [ -f "$REPO/stand-identity.json" ] && command -v jq > /dev/null 2>&1; then
     git -C "$REPO" config committer.name "$_stand_name"
     git -C "$REPO" config committer.email "${_stand_machine}@noreply.sutando.local"
   fi
-  unset _stand_name _stand_machine
 fi
+if [ $missing -eq 1 ]; then echo ""; echo "Fix the above and try again."; exit 1; fi
 
 # Per-machine runtime state. Resolves $SUTANDO_WORKSPACE, defaulting to
 # ~/.sutando/workspace/ (the canonical workspace per docs/workspace-design.md).

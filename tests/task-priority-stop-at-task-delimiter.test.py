@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
-"""Closes the task-body priority-escalation vector in parse_priority_from_text.
+"""Closes the residual half of PR #982 that @qingyun-wu flagged on the
+post-merge review:
 
-Bug class:
-    Task files use a header block followed by `task:` and then the
-    user-supplied body. `parse_priority_from_text` scans line-by-line
-    for `priority:` headers. Before Phase 5.21 it stopped only on `---`
-    or a blank line — not on `task:`. Since the body follows `task:`
-    with no blank separator, a forged body line `priority: urgent`
-    was still scanned and matched, escalating priority via the same
-    injection vector the writer-side `task:`-last convention was meant
-    to close.
+> `parse_priority_from_text` breaks only on `---` or a blank line — not
+> on `task:`. Since the body follows `task:` with no blank separator,
+> a body line `priority: urgent` is still scanned and matched →
+> priority escalation via the same vector.
 
-Fix (matches OSS sutando):
-    Stop scanning at the first `task:` line so everything after it is
-    opaque body content.
-
-Run: python3 tests/task-priority-stop-at-task-delimiter.test.py
+This file pins the consumer-side fix: `parse_priority_from_text` must
+stop scanning at the first `task:` line, so a `priority:` line embedded
+in the user-supplied task body cannot escalate priority.
 """
 
 import importlib.util

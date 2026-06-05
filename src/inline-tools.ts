@@ -6,18 +6,24 @@
  */
 
 import { execSync, execFileSync } from 'node:child_process';
-import { writeFileSync, unlinkSync, readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
+import { writeFileSync, mkdirSync, unlinkSync, readdirSync, readFileSync, existsSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { homedir } from 'node:os';
 import { resolveWorkspace } from './workspace_default.js';
 import { z } from 'zod';
 import type { ToolDefinition } from 'bodhi-realtime-agent';
 
+const WORKSPACE_DIR = resolveWorkspace();
+
+// Gate slide-control + fullscreen on presenter-mode.sentinel.
+// Issue #1171: registering these globally causes Gemini to fire them on greetings.
+const _presenterActive = existsSync(join(WORKSPACE_DIR, 'state', 'presenter-mode.sentinel'));
+
 const ts = () => new Date().toLocaleTimeString('en-US', { hour12: false });
 
 // Re-export recording/screen/browser tools from browser-tools
 export { describeScreenTool, clickTool, scrollAndDescribeTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, switchTabTool, closeTabTool, scrollTool, openUrlTool } from './browser-tools.js';
-import { describeScreenTool, clickTool, scrollAndDescribeTool, screenRecordTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, switchTabTool, closeTabTool, scrollTool, openUrlTool } from './browser-tools.js';
+import { describeScreenTool, clickTool, pointAtTool, scrollAndDescribeTool, screenRecordTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, switchTabTool, closeTabTool, scrollTool, openUrlTool } from './browser-tools.js';
 
 // Vision: one-shot frame + start/stop live screen-to-Gemini video.
 export { sendVisionFrameTool, startVisionTool, stopVisionTool } from './vision-tools.js';
@@ -25,6 +31,8 @@ import { sendVisionFrameTool, startVisionTool, stopVisionTool } from './vision-t
 
 // Active artifact cache — load a file once, query repeatedly without task-bridge round-trips.
 export { setActiveArtifactTool, queryActiveArtifactTool, clearActiveArtifactTool, clearActiveArtifact } from './artifact-cache-tools.js';
+export { switchVoiceConfigTool } from './voice-config-switch.js';
+import { switchVoiceConfigTool } from './voice-config-switch.js';
 import { setActiveArtifactTool, queryActiveArtifactTool, clearActiveArtifactTool } from './artifact-cache-tools.js';
 
 // --- File-open tool (moved out of recording-tools — generic file open, optionally fullscreen) ---
@@ -131,9 +139,11 @@ export const openFileTool: ToolDefinition = {
 	},
 };
 
-// Re-export Zoom tools from skill
-export { summonTool, dismissTool, joinZoomTool } from '../skills/zoom/tools.js';
-import { summonTool, dismissTool, joinZoomTool } from '../skills/zoom/tools.js';
+// Zoom tools (summon, dismiss, join_zoom) are NOT imported here — they live in
+// the manifest-loaded skill `skills/zoom/` (manifest.json + tools.ts) and reach
+// `inlineTools` / `ownerOnlyTools` via the loadSkillManifestTools() path below
+// (#976 conformance). Core no longer has a compile-time dependency on the skill,
+// so it is genuinely optional.
 // Re-export remaining meeting tools
 export { joinGmeetTool, lookupMeetingIdTool, callContactTool } from './meeting-tools.js';
 import { joinGmeetTool, lookupMeetingIdTool, callContactTool } from './meeting-tools.js';
@@ -282,16 +292,25 @@ export const typeTextTool: ToolDefinition = {
 	name: 'type_text',
 	description:
 		'Type text into the currently focused field. Use for: "type hello", "enter my email". Instant. ' +
-		'Pass `append=true` when the user wants the text added AFTER any existing selection ("add this", ' +
-		'"append", "type at the end") — without it, the paste branch will REPLACE the selection per macOS ' +
-		'Cmd-V semantics. Default is replace, which matches most "type X here" intents.',
+		'Pass `mode` to control how the text lands relative to existing content. `mode: "replace_all"` selects ' +
+		'everything in the field first, then writes the new text — pick this for in-place edits (rewrite the ' +
+		'draft, shorten, add words to the existing paragraph; compute the FULL edited version and call with ' +
+		'replace_all). `mode: "append"` collapses any selection to its end before writing — pick this when the ' +
+		'user says "add", "append", "type at the end". `mode: "at_caret"` (default) inserts at the current ' +
+		'caret position — pick this for fill-in-a-blank ("type hello", "enter my email"). The legacy ' +
+		'`append: true` is still honored and treated as `mode: "append"` for backward compat.',
 	parameters: z.object({
-		text: z.string().describe('The text to type'),
-		append: z.boolean().optional().describe('If true, collapse any selection to its end before pasting so the text is appended rather than replacing the selection. Use when the user says "add", "append", or "type at the end".'),
+		text: z.string().describe('The text to type. For mode="replace_all" this is the FULL new content of the field (compute the edited version locally before calling).'),
+		mode: z.enum(['replace_all', 'append', 'at_caret']).optional().describe('How the text lands: "replace_all" selects all + writes new content (in-place edits); "append" collapses selection to end + writes (add-to-end); "at_caret" (default) inserts at caret.'),
+		append: z.boolean().optional().describe('Deprecated — pass `mode: "append"` instead. Still honored: if true (and mode is unset), behaves like mode="append".'),
 	}),
 	execution: 'inline',
 	async execute(args) {
-		const { text, append } = args as { text: string; append?: boolean };
+		const a = args as { text: string; mode?: 'replace_all' | 'append' | 'at_caret'; append?: boolean };
+		const text = a.text;
+		// Resolve effective mode. Explicit `mode` wins; legacy `append: true` → 'append';
+		// otherwise default to 'at_caret' (the long-standing default behavior pre-2026-06-01).
+		const mode: 'replace_all' | 'append' | 'at_caret' = a.mode ?? (a.append ? 'append' : 'at_caret');
 		// Multi-line, long, or non-ASCII text: use clipboard paste.
 		// AppleScript's `keystroke "..."` routes through virtual-key codes that
 		// can't represent characters outside the basic ASCII typing range —
@@ -315,9 +334,14 @@ export const typeTextTool: ToolDefinition = {
 				// Convert literal \n to actual newlines
 				const pasteText = text.replace(/\\n/g, '\n').replace(/\\t/g, '\t');
 				execSync('pbcopy', { input: pasteText, encoding: 'utf-8', timeout: 2_000, env: utf8Env });
-				// Append mode: collapse selection to its end via Right-arrow before Cmd-V.
-				// Without this, macOS Cmd-V replaces the selection (standard semantics).
-				if (append) {
+				// replace_all: emit Cmd+A first so the subsequent Cmd+V replaces the
+				// entire field content (closes the selection-state ambiguity that
+				// 'replace' default had — relied on caller to have selected).
+				// append: collapse selection to its end via Right-arrow before Cmd+V.
+				// at_caret (default): paste at current caret / replace current selection per macOS Cmd+V semantics.
+				if (mode === 'replace_all') {
+					execSync(`osascript -e 'tell application "System Events" to keystroke "a" using command down'`, { timeout: 3_000, env: utf8Env });
+				} else if (mode === 'append') {
 					execSync(`osascript -e 'tell application "System Events" to key code 124'`, { timeout: 3_000, env: utf8Env });
 				}
 				execSync(`osascript -e 'tell application "System Events" to keystroke "v" using command down'`, { timeout: 5_000, env: utf8Env });
@@ -325,7 +349,7 @@ export const typeTextTool: ToolDefinition = {
 				if (savedClipboard) {
 					execSync('pbcopy', { input: savedClipboard, encoding: 'utf-8', timeout: 2_000, env: utf8Env });
 				}
-				console.log(`${ts()} [TypeText] pasted (multi-line${append ? ', append' : ''}): ${text.slice(0, 40)}...`);
+				console.log(`${ts()} [TypeText] pasted (multi-line, mode=${mode}): ${text.slice(0, 40)}...`);
 				return { status: 'typed', text };
 			} catch (err) {
 				return { error: `Paste failed: ${err instanceof Error ? err.message : err}` };
@@ -337,12 +361,16 @@ export const typeTextTool: ToolDefinition = {
 		// shell breakout via text containing apostrophes.
 		const safeText = text.replace(/\\/g, '\\\\').replace(/'/g, "'\\''").replace(/"/g, '\\"');
 		try {
-			// Append mode: collapse selection to its end via Right-arrow before typing.
-			if (append) {
+			// replace_all: Cmd+A first so the keystroke replaces the entire field.
+			// append: collapse selection to its end via Right-arrow before typing.
+			// at_caret (default): keystroke at caret / replaces current selection per System Events behavior.
+			if (mode === 'replace_all') {
+				execSync(`osascript -e 'tell application "System Events" to keystroke "a" using command down'`, { timeout: 3_000 });
+			} else if (mode === 'append') {
 				execSync(`osascript -e 'tell application "System Events" to key code 124'`, { timeout: 3_000 });
 			}
 			execSync(`osascript -e 'tell application "System Events" to keystroke "${safeText}"'`, { timeout: 5_000 });
-			console.log(`${ts()} [TypeText] typed${append ? ' (append)' : ''}: ${text.slice(0, 40)}`);
+			console.log(`${ts()} [TypeText] typed (mode=${mode}): ${text.slice(0, 40)}`);
 			return { status: 'typed', text };
 		} catch (err) {
 			return { error: `Type failed: ${err instanceof Error ? err.message : err}` };
@@ -641,7 +669,11 @@ export const slideControlTool: ToolDefinition = {
 	name: 'slide_control',
 	description:
 		'Control presentation slides. Use when user says "next slide", "previous slide", "go back", "go to slide 3". ' +
-		'Sends arrow keys to the frontmost browser window.',
+		'Mutates the active slide via DOM (Chrome execute javascript) — works regardless of which element has focus, ' +
+		'so it is safe to call even when a textarea or contenteditable on the deck has focus (e.g. live-edit demos). ' +
+		'PREFER this over press_key("leftarrow"/"rightarrow"/"space") for slide navigation: arrow / space keystrokes ' +
+		'get captured by focused editables (cursor moves within the field) and may be suppressed by deck-side ' +
+		'focus-guard handlers — slide_control sidesteps both.',
 	parameters: z.object({
 		action: z.enum(['next', 'previous', 'goto']).describe('Navigation action'),
 		slideNumber: z.number().optional().describe('Slide number for goto action'),
@@ -820,6 +852,10 @@ export const saveNoteTool: ToolDefinition = {
 		const tagList = tags ? tags.split(',').map(t => t.trim()) : ['personal'];
 		const md = `---\ntitle: ${title}\ndate: ${date}\ntags: [${tagList.join(', ')}]\n---\n\n${content}\n`;
 		try {
+			// NOTES_DIR resolves against the workspace, which may not have a
+			// notes/ subdir yet on a fresh install — create it before writing
+			// so the first save_note never fails with ENOENT.
+			mkdirSync(NOTES_DIR, { recursive: true });
 			writeFileSync(join(NOTES_DIR, `${slug}.md`), md);
 			return { status: 'saved', title, slug, path: `notes/${slug}.md` };
 		} catch (e) { return { error: String(e) }; }
@@ -1071,13 +1107,14 @@ export const inlineTools = assertUniqueToolNames([
 	pressKeyTool, scrollTool, switchTabTool, closeTabTool, openUrlTool,
 	switchAppTool, captureScreenTool, typeTextTool,
 	volumeTool, brightnessTool, clipboardTool,
-	cancelTaskTool, toggleTasksTool, getCurrentTimeTool, getCoreStatusTool, summonTool, dismissTool,
-	joinZoomTool, joinGmeetTool, lookupMeetingIdTool, callContactTool,
-	describeScreenTool, clickTool, scrollAndDescribeTool, screenRecordTool, openFileTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, slideControlTool, fullscreenTool,
+	cancelTaskTool, toggleTasksTool, getCurrentTimeTool, getCoreStatusTool,
+	joinGmeetTool, lookupMeetingIdTool, callContactTool,
+	describeScreenTool, clickTool, pointAtTool, scrollAndDescribeTool, screenRecordTool, openFileTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool, ...(_presenterActive ? [slideControlTool, fullscreenTool] : []),
 	showViewTool, readNoteTool, saveNoteTool, deleteNoteTool,
 	recentContextTool,
 	sendVisionFrameTool, startVisionTool, stopVisionTool,
 	setActiveArtifactTool, queryActiveArtifactTool, clearActiveArtifactTool,
+	switchVoiceConfigTool,
 	...personalAllTools ]);
 
 /** Tools available to any caller (including unverified) */
@@ -1092,13 +1129,14 @@ export const ownerOnlyTools = [
 	volumeTool, brightnessTool,
 	pressKeyTool, scrollTool, switchTabTool, closeTabTool, openUrlTool,
 	switchAppTool, captureScreenTool, typeTextTool,
-	clipboardTool, cancelTaskTool, toggleTasksTool, summonTool, dismissTool,
-	joinZoomTool, joinGmeetTool, callContactTool, slideControlTool, fullscreenTool,
+	clipboardTool, cancelTaskTool, toggleTasksTool,
+	joinGmeetTool, callContactTool, ...(_presenterActive ? [slideControlTool, fullscreenTool] : []),
 	showViewTool, readNoteTool, saveNoteTool, deleteNoteTool,
 	recentContextTool,
-	describeScreenTool, clickTool, scrollAndDescribeTool, screenRecordTool, openFileTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool,
+	describeScreenTool, clickTool, pointAtTool, scrollAndDescribeTool, screenRecordTool, openFileTool, playVideoTool, pauseVideoTool, resumeVideoTool, replayVideoTool, closeVideoTool,
 	sendVisionFrameTool, startVisionTool, stopVisionTool,
 	setActiveArtifactTool, queryActiveArtifactTool, clearActiveArtifactTool,
+	switchVoiceConfigTool,
 	...personalTools.owner,
 ];
 

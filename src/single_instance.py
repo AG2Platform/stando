@@ -54,6 +54,7 @@ def acquire(name: str) -> None:
             file=sys.stderr, flush=True,
         )
         os._exit(0)  # exit(0) so launchd KeepAlive doesn't restart-loop
+    # Overwrite PID so tooling can inspect who holds the lock.
     os.ftruncate(fd, 0)
     os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, f"{os.getpid()}\n".encode())

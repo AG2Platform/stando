@@ -13,6 +13,7 @@ Auto-refreshes every 15 seconds.
 
 from __future__ import annotations
 
+
 import http.server
 import json
 import os
@@ -28,8 +29,9 @@ REPO_DIR = Path(__file__).parent.parent
 # Personal-asset path resolver — see src/util_paths.py. Used for /avatar
 # and /stand-identity endpoints so they prefer per-machine private dir.
 sys.path.insert(0, str(Path(__file__).parent))
+from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 from util_paths import personal_path, shared_personal_path  # noqa: E402
-from state_paths import state_path  # noqa: E402
+WORKSPACE_DIR = resolve_workspace()
 PORT = int(os.environ.get("DASHBOARD_PORT", "7844"))
 
 
@@ -108,11 +110,11 @@ def get_activity(max_items: int = 10) -> list[dict]:
                 from datetime import datetime
                 dt = datetime.strptime(date_str.strip()[:19], '%Y-%m-%d %H:%M:%S')
                 time_str = dt.strftime('%b %d %H:%M')
-            except:
+            except Exception:
                 time_str = date_str[:16]
             entries.append({'time': time_str, 'title': msg.strip(), 'body': sha})
         return entries
-    except:
+    except Exception:
         return []
 
 
@@ -121,8 +123,13 @@ def get_pending_count() -> dict:
     if not pending_file.exists():
         return {"open": 0, "done": 0}
     content = pending_file.read_text()
-    open_count = len(re.findall(r'\*\*Status:\*\* Waiting', content))
-    done_count = len(re.findall(r'\*\*Status:\*\* Answered', content))
+    # Questions are filed as free-form `## ` sections (no **Status:** field — see
+    # #1265) and moved below a top-level `# Resolved` divider once answered. The
+    # old `**Status:** Waiting/Answered` regex matched neither and always returned
+    # 0/0 for the format actually in use — count `## ` sections per region instead.
+    active, _, resolved = content.partition('\n# Resolved')
+    open_count = len(re.findall(r'^## ', active, flags=re.MULTILINE))
+    done_count = len(re.findall(r'^## ', resolved, flags=re.MULTILINE))
     return {"open": open_count, "done": done_count}
 
 
@@ -136,10 +143,15 @@ def get_score() -> str:
 
 
 def get_quota_status() -> dict:
-    """Read quota state from quota-state.json (written by credential proxy)."""
-    quota_file = state_path("quota-state.json")
-    if not quota_file.exists():
-        quota_file = REPO_DIR / "skills" / "quota-tracker" / "quota-state.json"
+    """Read quota state from quota-state.json (written by credential proxy).
+
+    Quota state IS runtime state; the canonical (and only) home is
+    <workspace>/state/quota-state.json. The skill-dir fallback was removed:
+    a stale leftover copy under skills/quota-tracker/ silently shadowed the
+    fresh file and froze this dashboard's quota panel for ~12h (2026-05-21).
+    One path, one source of truth.
+    """
+    quota_file = status_read_path("quota-state.json", WORKSPACE_DIR)
     if not quota_file.exists():
         return {"available": True}
     try:

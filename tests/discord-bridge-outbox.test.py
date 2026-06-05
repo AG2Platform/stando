@@ -57,8 +57,8 @@ def test_three_append_sites_exist_and_are_fail_open():
     Discord reply on an outbox failure."""
     src = DBRIDGE_PATH.read_text()
     sites = list(re.finditer(r"outbox_log\.append\s*\(", src))
-    assert len(sites) == 3, (
-        f"expected 3 outbox_log.append sites in discord-bridge.py, "
+    assert len(sites) == 4, (
+        f"expected 4 outbox_log.append sites in discord-bridge.py, "
         f"got {len(sites)}"
     )
     for m in sites:
@@ -100,7 +100,7 @@ def test_all_appends_include_required_kwargs():
         r"outbox_log\.append\s*\(\s*([\s\S]*?)\)\s*\n",
         src,
     )
-    assert len(matches) == 3, f"expected 3 append arg blocks, got {len(matches)}"
+    assert len(matches) == 4, f"expected 4 append arg blocks, got {len(matches)}"
     for i, args in enumerate(matches, start=1):
         for required in ("channel_type", "recipient", "body", "task_id"):
             assert f"{required}=" in args, (
@@ -216,7 +216,7 @@ def test_appends_follow_text_send_loops():
         i for i, ln in enumerate(lines)
         if "outbox_log.append(" in ln
     ]
-    assert len(append_lines) == 3, (
+    assert len(append_lines) == 4, (
         f"line scan disagrees with regex: {len(append_lines)} append "
         f"lines"
     )
