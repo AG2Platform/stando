@@ -8,6 +8,12 @@ user-invocable: true
 
 Inbox triage + draft generation. Replaces the manual "scroll inbox, read each, decide what matters" flow with a 3-tier urgency classification plus on-demand reply drafting.
 
+> **Prerequisite — Gmail must be connected.** Every mode below shells out to
+> the `gws` (Google Workspace) CLI. If it isn't installed + authenticated, the
+> commands fail. Do NOT swallow that error and silently no-op (feedback
+> 19fa7b9f) — if `gws` is missing, tell the user how to connect:
+> `npm i -g @googleworkspace/cli`, then `gws auth setup --login`.
+
 ## Modes
 
 The user's verb determines the mode — listen for it.
@@ -16,9 +22,10 @@ The user's verb determines the mode — listen for it.
 
 Triggers: "triage my inbox", "what's urgent", "what's new", "any important email", "check my email".
 
-Run:
+Run (confirm Gmail is connected first; surface errors instead of no-oping):
 ```bash
-gws gmail +triage 2>/dev/null
+command -v gws >/dev/null 2>&1 || { echo "Gmail isn't connected. Install the Google Workspace CLI (npm i -g @googleworkspace/cli), then run: gws auth setup --login"; exit 1; }
+gws gmail +triage        # no 2>/dev/null — let auth/connection errors surface
 ```
 
 For each unread thread:
