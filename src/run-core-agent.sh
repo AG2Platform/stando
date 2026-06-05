@@ -91,6 +91,16 @@ if [ -f "$REPO_DIR/skills/install.sh" ]; then
     bash "$REPO_DIR/skills/install.sh" >/dev/null 2>&1 || true
 fi
 
+# Seed the first-time tutorial into the user's notes/ if absent. The tutorial
+# flow (CLAUDE.md "## Tutorial") reads notes/first-time-tutorial.md, but the
+# file was never shipped, so "tutorial" did nothing (feedback 10b961d6).
+# Copy-if-absent so a user's own edits are preserved.
+TUTORIAL_SEED="$REPO_DIR/skills/startup/first-time-tutorial.md"
+if [ -f "$TUTORIAL_SEED" ] && [ ! -e "$WORKSPACE/notes/first-time-tutorial.md" ]; then
+    mkdir -p "$WORKSPACE/notes"
+    cp "$TUTORIAL_SEED" "$WORKSPACE/notes/first-time-tutorial.md"
+fi
+
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 
 if ! command -v tmux >/dev/null 2>&1; then

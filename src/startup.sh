@@ -188,6 +188,14 @@ echo ""
 # Install Claude Code skills (runs every startup, idempotent)
 bash "$REPO/skills/install.sh" 2>/dev/null || true
 
+# Seed the first-time tutorial into the user's notes/ if absent (feedback
+# 10b961d6: the tutorial flow reads notes/first-time-tutorial.md but it was
+# never shipped). Copy-if-absent so a user's own edits are preserved.
+if [ -f "$REPO/skills/startup/first-time-tutorial.md" ] && [ ! -e "$STATE_ROOT/notes/first-time-tutorial.md" ]; then
+  mkdir -p "$STATE_ROOT/notes"
+  cp "$REPO/skills/startup/first-time-tutorial.md" "$STATE_ROOT/notes/first-time-tutorial.md"
+fi
+
 # Create tasks/ and results/ directories under SUTANDO_HOME (or repo fallback)
 mkdir -p "$STATE_ROOT/tasks" "$STATE_ROOT/results" "$STATE_ROOT/data"
 
