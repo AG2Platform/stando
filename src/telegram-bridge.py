@@ -662,6 +662,7 @@ def main():
                 task_file.write_text(
                     f"id: {task_id}\n"
                     f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+                    f"local_time: {time.strftime('%A %Y-%m-%d %I:%M %p %Z', time.localtime())}\n"
                     f"task: [Telegram @{username}{forward_note}] {text}{attachment_note}\n"
                     f"source: telegram\n"
                     f"chat_id: {chat_id}\n"

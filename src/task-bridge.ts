@@ -62,6 +62,19 @@ function archiveFile(srcPath: string, kind: 'tasks' | 'results', taskId: string)
 
 function ts(): string { return new Date().toISOString().slice(11, 23); }
 
+// Owner-local wall-clock, timezone-labeled, for task headers. The bare
+// `timestamp:` is UTC (toISOString); the core agent was mislabeling that UTC
+// value as local time when stating ETAs (feedback c3c28b4b). A self-describing
+// `local_time:` header gives it an authoritative, zone-labeled "now". OWNER_TZ
+// overrides the system zone if the core runs in a different tz than the owner.
+function localTimeLine(): string {
+	const tz = process.env.OWNER_TZ || undefined; // undefined -> system local zone
+	return new Date().toLocaleString('en-US', {
+		timeZone: tz, weekday: 'long', year: 'numeric', month: 'short',
+		day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+	});
+}
+
 /**
  * Write a chat-path task file so the dashboard tracks chat-originated work.
  * Called by the core agent (Claude Code) when it accepts a non-trivial task from chat.
@@ -80,6 +93,7 @@ export function writeChatTask(taskDescription: string): string {
 	const content = [
 		`id: ${taskId}`,
 		`timestamp: ${timestamp}`,
+		`local_time: ${localTimeLine()}`,
 		`source: chat`,
 		`channel_id: local-chat`,
 		`user_id: ${process.env.SUTANDO_DM_OWNER_ID || 'chat-local'}`,
@@ -320,6 +334,7 @@ export const workTool: ToolDefinition = {
 		const content =
 			`id: ${taskId}\n` +
 			`timestamp: ${timestamp}\n` +
+			`local_time: ${localTimeLine()}\n` +
 			`source: voice\n` +
 			`channel_id: local-voice\n` +
 			`user_id: ${ownerId}\n` +
@@ -487,6 +502,7 @@ export function startContextDropWatcher(onContextDrop: (content: string) => void
 						join(TASK_DIR, `${taskId}.txt`),
 						`id: ${taskId}\n` +
 						`timestamp: ${new Date().toISOString()}\n` +
+						`local_time: ${localTimeLine()}\n` +
 						`source: context-drop\n` +
 						`channel_id: local-hotkey\n` +
 						`user_id: ${ownerId}\n` +

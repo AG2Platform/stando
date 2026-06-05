@@ -602,6 +602,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         task_content = (
             f"id: {task_id}\n"
             f"timestamp: {datetime.now().isoformat()}\n"
+            f"local_time: {datetime.now().astimezone().strftime('%A %Y-%m-%d %I:%M %p %Z')}\n"
             f"task: Incoming phone call from {caller}\n"
             f"source: twilio_voice\n"
             f"from: {caller}\n"
@@ -631,6 +632,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         task_content = (
             f"id: {task_id}\n"
             f"timestamp: {datetime.now().isoformat()}\n"
+            f"local_time: {datetime.now().astimezone().strftime('%A %Y-%m-%d %I:%M %p %Z')}\n"
             f"task: SMS from {sender}: {body}\n"
             f"source: twilio_sms\n"
             f"from: {sender}\n"
@@ -654,6 +656,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             task_content = (
                 f"id: {task_id}\n"
                 f"timestamp: {datetime.now().isoformat()}\n"
+                f"local_time: {datetime.now().astimezone().strftime('%A %Y-%m-%d %I:%M %p %Z')}\n"
                 f"task: Voicemail from {caller}: {text}\n"
                 f"source: twilio_voicemail\n"
                 f"from: {caller}\n"
@@ -878,6 +881,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         task_content = (
             f"id: {task_id}\n"
             f"timestamp: {datetime.now().isoformat()}\n"
+            f"local_time: {datetime.now().astimezone().strftime('%A %Y-%m-%d %I:%M %p %Z')}\n"
             f"source: api\n"
             f"from: {from_agent}\n"
             f"task: {task}\n"
