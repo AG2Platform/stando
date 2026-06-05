@@ -108,19 +108,41 @@ def _restore_transport(original):
     dm.urllib.request.urlopen = original
 
 
-def _with_access_json(content, fn):
+def _with_access_json(content, fn, discord_config_data=None):
     """Override ACCESS_JSON to a temp file with the given dict for one
-    test case. Restores afterward."""
-    original = dm.ACCESS_JSON
-    tmp = Path(tempfile.mkdtemp(prefix="sutando-dm-test-")) / "access.json"
-    tmp.write_text(json.dumps(content))
-    dm.ACCESS_JSON = tmp
+    test case. Restores afterward.
+
+    Also isolates `discord_config.config_path()` so the resolver
+    doesn't consult the real workspace's `discord-config.json` (which
+    would short-circuit the legacy access.json tierMap chain that
+    these tests pin). Phase 5.10: `discord-config.json` is consulted
+    BEFORE access.json[tierMap] — without isolation, the dev's live
+    workspace file would route every test through the real owner."""
+    original_access = dm.ACCESS_JSON
+    tmp_dir = Path(tempfile.mkdtemp(prefix="sutando-dm-test-"))
+    tmp_access = tmp_dir / "access.json"
+    tmp_access.write_text(json.dumps(content))
+    dm.ACCESS_JSON = tmp_access
+
+    # Isolate the workspace-local discord-config.json. Write whatever
+    # `discord_config_data` says (None -> file absent -> helper returns
+    # {} -> legacy access.json chain runs).
+    import discord_config as _dc
+    tmp_dc_path = tmp_dir / "discord-config.json"
+    if discord_config_data is not None:
+        tmp_dc_path.write_text(json.dumps(discord_config_data))
+    original_config_path = _dc.config_path
+    _dc.config_path = lambda: tmp_dc_path
+
     try:
         fn()
     finally:
-        dm.ACCESS_JSON = original
-        tmp.unlink()
-        tmp.parent.rmdir()
+        dm.ACCESS_JSON = original_access
+        _dc.config_path = original_config_path
+        tmp_access.unlink()
+        if tmp_dc_path.exists():
+            tmp_dc_path.unlink()
+        tmp_dir.rmdir()
 
 
 # -----------------------------------------------------------------------

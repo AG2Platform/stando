@@ -34,9 +34,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from workspace_default import resolve_workspace  # noqa: E402
+import discord_config  # noqa: E402  — workspace-local Sutando discord config (Phase 5.10)
 REPO = resolve_workspace()
 ACCESS_JSON = Path.home() / ".claude" / "channels" / "discord" / "access.json"
 SSE_STATUS_URL = "http://localhost:8080/sse-status"
+
+# Path allowlist for `[file:|send:|attach:]` markers — sourced from
+# `src/send_allowlist.py` so this REST-fallback path uses the SAME
+# policy as the WS-connected live bridge (`src/discord-bridge.py`).
+# Per @liususan091219 review on the OSS PR #1029: a copied allowlist
+# will drift even with a comment claiming they're in sync — the
+# extract removes that hazard at the boundary. Ported in stando
+# Phase 5.9 of the OSS→private sync.
+from send_allowlist import (  # noqa: E402
+    is_path_sendable as _is_path_sendable,
+    SEND_ALLOWED_PREFIXES as _SEND_ALLOWED_PREFIXES,  # re-exported for tests
+    SEND_ALLOWED_ROOTS as _SEND_ALLOWED_ROOTS,        # re-exported for tests
+)
 
 
 _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*([^\s`~][^`~]*)?\s*$")
@@ -44,12 +58,13 @@ _FENCE_LINE = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*([^\s`~][^`~]*)?\s*$")
 
 # Mirror of discord-bridge.py's `_FILE_MARKER_RE` — agent-emitted file
 # attachment markers embedded in result bodies. dm-result.py is the
-# REST-only fallback delivery path used when voice isn't connected;
-# without parsing these markers it would deliver the literal text
-# `[file: /tmp/sutando-x.png]` in the DM and silently drop the
-# attachment. PR limitation: REST multipart upload for actual file
-# delivery is a follow-up — this commit strips the markers from the
-# body so the user doesn't see the literal text. See dm-result_TODO.
+# REST-only fallback delivery path used when voice isn't connected.
+# The WS-connected live bridge attaches files via `discord.File(path)`;
+# this REST path builds the equivalent multipart upload (see
+# `_send_message_with_files`). Each marker path is allowlist-checked
+# against `_is_path_sendable` — same policy as discord-bridge.py via
+# the shared `send_allowlist` import — to bound exfil if an attacker-
+# controlled marker ever reaches a result body.
 _FILE_MARKER_RE = re.compile(r'\[(?:file|send|attach):\s*((?:/|~/)[^\]:]+)\]')
 
 
@@ -196,55 +211,130 @@ def _discord_api(method, path, token, body=None):
         return json.loads(raw) if raw else None
 
 
+def _send_message_with_files(channel_id: str, token: str, content: str,
+                             file_paths: "list[str]"):
+    """POST a message to a channel as multipart/form-data with attached
+    files. Used by `send_dm()` when an agent-emitted result body
+    contains `[file:|send:|attach:]` markers — the WS-connected live
+    bridge calls `discord.File(path)` directly; this REST path needs
+    to assemble the same multipart payload by hand.
+
+    `content` may be empty (file-only message). `file_paths` are the
+    already-allowlisted absolute paths. Raises on non-2xx; caller
+    handles per-file errors.
+
+    Discord docs: POST /channels/{id}/messages with
+    multipart/form-data, parts named `payload_json` (the message body)
+    and `files[0]`, `files[1]`, ... each with a `filename=` in the
+    `Content-Disposition`.
+    """
+    # Random boundary that won't appear in any payload we send.
+    import uuid
+    boundary = f"----SutandoBoundary{uuid.uuid4().hex}"
+    parts: list[bytes] = []
+    # payload_json part
+    payload = {"content": content} if content else {}
+    parts.append(
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="payload_json"\r\n'
+        f"Content-Type: application/json\r\n\r\n".encode()
+    )
+    parts.append(json.dumps(payload).encode())
+    parts.append(b"\r\n")
+    # files[N] parts
+    for i, fpath in enumerate(file_paths):
+        filename = os.path.basename(fpath)
+        # Sanitize filename header — same shape as discord-bridge.py's
+        # `_safe_attachment_basename`. A filename containing CR/LF
+        # here would let the file inject its own headers into the
+        # multipart envelope.
+        safe_name = (
+            filename
+            .replace("\r", "_")
+            .replace("\n", "_")
+            .replace('"', "_")
+        )[:80] or f"file-{i}"
+        parts.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="files[{i}]"; '
+            f'filename="{safe_name}"\r\n'
+            f"Content-Type: application/octet-stream\r\n\r\n".encode()
+        )
+        with open(fpath, "rb") as fh:
+            parts.append(fh.read())
+        parts.append(b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(parts)
+    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+    req = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+            "User-Agent": "Sutando/1.0",
+        },
+        method="POST",
+    )
+    # 30s timeout — multipart uploads can be slower than JSON; cap to
+    # bound the dm-result.py invocation time.
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read()
+        return json.loads(raw) if raw else None
+
+
 def _resolve_owner_id(token):
     """Return the Discord user ID for the human owner.
 
-    Priority order (mirrors `src/discord-bridge.py:poll_proactive` so
-    the fallback delivery path and the live bridge agree on who the
-    owner is — drift here caused proactive-DM misroutes on the live
-    bridge prior to PR #846, and dm-result.py carried the matching
-    drift uncovered):
+    Delegates the config-driven resolution chain to
+    `discord_config.resolve_owner_id` (Phase 5.10) so this fallback
+    delivery path and the live bridge (`discord-bridge.py:_poll_proactive`)
+    agree on a single owner. Drift between the two sites was the failure
+    mode #846 created; the shared helper prevents it from recurring.
 
-      1. ``$SUTANDO_DM_OWNER_ID`` env var — explicit override.
-      2. ``tierMap[uid] == "owner"`` from access.json. Explicit admin
-         tier tag; preferred over the bot-lookup fallback because it
-         doesn't require a Discord API call AND it survives the
-         degraded-network case (lookup fails → fall through to bot-
-         filter, which returns the first ID even if it's a bot).
-      3. First non-bot ID in ``allowFrom`` per ``GET /users/{id}.bot``.
-         allowFrom often contains multiple bots (MacBook, Mac Mini)
-         plus the human owner.
+    The bot-filtering step (walk `allowFrom`, skip Discord bot accounts)
+    stays here because it requires `GET /users/{id}` REST calls. Keeping
+    the helper pure-Python lets both callers (this sync REST path and
+    the bridge's async discord.py path) share the same chain.
 
-    Set SUTANDO_DM_OWNER_ID in .env if you want to skip the per-id
-    /users lookup (saves 1 API call per dm-result invocation)."""
-    env_override = os.environ.get("SUTANDO_DM_OWNER_ID", "").strip()
-    if env_override:
-        return env_override
+    Resolution order (encoded in discord_config.resolve_owner_id):
+      1. ``$SUTANDO_DM_OWNER_ID`` env var (explicit override).
+      2. ``discord-config.json["owner"]`` (workspace, Sutando-owned).
+      3. ``discord-config.json["tierMap"][uid] == "owner"`` (workspace).
+      4. ``access.json["owner"]`` (legacy plugin-territory).
+      5. ``access.json["tierMap"][uid] == "owner"`` (legacy #846 path).
+      6. (HERE, not helper) First non-bot ID in ``allowFrom`` per
+         ``GET /users/{id}.bot``. allowFrom often contains multiple
+         bots (MacBook, Mac Mini) plus the human owner.
 
-    if not ACCESS_JSON.exists():
-        return ""
-    try:
-        data = json.loads(ACCESS_JSON.read_text())
-    except Exception:
-        return ""
+    Set SUTANDO_DM_OWNER_ID in .env to skip even the helper's lookup
+    (saves 1 API call per dm-result invocation); the env var is honored
+    inside the helper as the first resolution step."""
+    # access_data may be absent (no plugin file). Still let the helper
+    # check env-override + workspace owner/tierMap; if those also miss,
+    # there's nothing the bot-filter walk can do without an allowFrom,
+    # so an empty-string return matches the pre-port behavior.
+    if ACCESS_JSON.exists():
+        try:
+            data = json.loads(ACCESS_JSON.read_text())
+        except Exception:
+            data = {}
+    else:
+        data = {}
+
+    owner = discord_config.resolve_owner_id(data)
+    if owner:
+        return owner
+
     allow = data.get("allowFrom") or []
     if not allow:
         return ""
 
-    # Honor the explicit `tierMap[uid] == "owner"` admin tag IF the
-    # tagged user is still in allowFrom. Defensive: a stale tier-tag
-    # for a removed user must not resolve a delisted owner.
-    tier_map = data.get("tierMap") or {}
-    tier_owner = next(
-        (uid for uid in allow if tier_map.get(uid) == "owner"),
-        None,
-    )
-    if tier_owner is not None:
-        return str(tier_owner)
-
-    # Query each user's is-bot flag. The first human wins. If lookups all
-    # fail (rate limit, network, bad token), fall through to allow[0] as
-    # a degraded default so send_dm() can produce an honest error later.
+    # Step 6: bot-filter walk. Helper intentionally omits this step
+    # (REST-bound). The first non-bot wins. If lookups all fail (rate
+    # limit, network, bad token), fall through to allow[0] as a
+    # degraded default so send_dm() produces an honest error later.
     for uid in allow:
         try:
             user = _discord_api("GET", f"/users/{uid}", token)
@@ -284,32 +374,42 @@ def send_dm(text: str) -> bool:
         print(f"dm-result: failed to open DM channel with {owner_id}: {e}", file=sys.stderr)
         return False
 
-    # Strip [file:|send:|attach:] markers from the body — the bridge's
-    # WS-connected client would attach the file directly, but dm-result
-    # is REST-only and has no multipart upload path yet, so the markers
-    # would otherwise deliver as literal text in the DM. We log the
-    # dropped files so the lossy delivery is visible in the dm-result
-    # output rather than silent.
-    clean_text, dropped_files = _split_file_markers(text)
-    if dropped_files:
+    # Extract [file:|send:|attach:] markers. The WS-connected live
+    # bridge calls `discord.File(path)` for each marker; this REST
+    # path now builds the equivalent multipart upload (see
+    # `_send_message_with_files`). Each marker path is allowlist-
+    # checked against `_is_path_sendable` — same policy as
+    # discord-bridge.py via the shared `send_allowlist` import — to
+    # bound exfil if an attacker-controlled marker ever reaches a
+    # result body.
+    clean_text, marker_files = _split_file_markers(text)
+    expanded_files = [os.path.expanduser(p.strip()) for p in marker_files]
+    sendable_files = [p for p in expanded_files if _is_path_sendable(p)]
+    rejected_files = [p for p in expanded_files if not _is_path_sendable(p)]
+    if rejected_files:
+        # Same security signal as discord-bridge: rejected paths log
+        # but don't leak the failure to the user.
         print(
-            f"dm-result: {len(dropped_files)} file marker(s) stripped from body "
-            f"(REST multipart upload not implemented): {dropped_files}",
+            f"dm-result: {len(rejected_files)} file marker(s) rejected by "
+            f"allowlist (would deliver via [file:] but path is outside "
+            f"_SEND_ALLOWED_ROOTS / _SEND_ALLOWED_PREFIXES): {rejected_files}",
             file=sys.stderr,
         )
 
     # An all-marker / all-whitespace body becomes empty after strip.
     # Sending `""` to Discord returns 400 ("Cannot send an empty
-    # message"); skip the send and report the no-op instead.
-    if not clean_text:
+    # message") for a text-only request. For a multipart upload with
+    # files, an empty `content` is valid.
+    if not clean_text and not sendable_files:
         print(
-            f"dm-result: body is empty after marker-strip; nothing to send "
-            f"(channel {channel_id})"
+            f"dm-result: body is empty after marker-strip and no sendable "
+            f"files; nothing to send (channel {channel_id})"
         )
-        return True  # not an error — the input had no deliverable text
+        return True  # not an error — the input had no deliverable payload
 
-    # Chunk into Discord-safe pieces, preserving code fences across boundaries.
-    chunks = list(_chunk_for_discord(clean_text))
+    # Chunk text into Discord-safe pieces, preserving code fences
+    # across boundaries.
+    chunks = list(_chunk_for_discord(clean_text)) if clean_text else []
     for i, chunk in enumerate(chunks):
         try:
             _discord_api("POST", f"/channels/{channel_id}/messages", token, {"content": chunk})
@@ -320,9 +420,51 @@ def send_dm(text: str) -> bool:
             )
             return False
 
+    # Attach files in batches of 10 (Discord per-message attachment
+    # cap). Each batch goes as a separate multipart message with
+    # empty content — the text was already delivered as chunks above.
+    DISCORD_FILES_PER_MESSAGE = 10
+    for batch_start in range(0, len(sendable_files), DISCORD_FILES_PER_MESSAGE):
+        batch = sendable_files[batch_start : batch_start + DISCORD_FILES_PER_MESSAGE]
+        try:
+            _send_message_with_files(channel_id, token, "", batch)
+        except Exception as e:
+            print(
+                f"dm-result: failed to upload file batch "
+                f"{batch_start // DISCORD_FILES_PER_MESSAGE + 1} "
+                f"({len(batch)} file(s)) to channel {channel_id}: {e}",
+                file=sys.stderr,
+            )
+            return False
+
+    file_summary = f", {len(sendable_files)} file(s)" if sendable_files else ""
     print(
-        f"dm-result: sent to DM ({len(clean_text)} chars in {len(chunks)} chunk(s)) via channel {channel_id}"
+        f"dm-result: sent to DM ({len(clean_text)} chars in {len(chunks)} chunk(s)"
+        f"{file_summary}) via channel {channel_id}"
     )
+    # Record to outbox audit log so the dashboard's Outbox card can
+    # surface the delivery. Best-effort — never block the return path.
+    # This is the REST fallback used when the live discord bridge is
+    # offline; without this write, an offline-bridge owner DM would
+    # land but never appear in the dashboard alongside live-bridge
+    # deliveries from discord-bridge.py (Phase 5.16). Ported in
+    # Phase 5.18 of the OSS → private sync.
+    #
+    # Note the `recipient_label` differs from discord-bridge: that one
+    # uses the fetched Discord username (e.g. "alice DM"); we don't
+    # have that locally without an extra REST call, so we emit a
+    # constant label that's unambiguous for operators reading the card
+    # ("which path delivered this?").
+    try:
+        import outbox_log
+        outbox_log.append(
+            channel_type="discord_dm",
+            recipient=str(owner_id),
+            body=text,
+            recipient_label="owner DM (via dm-result.py)",
+        )
+    except Exception:
+        pass
     return True
 
 

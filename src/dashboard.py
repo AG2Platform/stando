@@ -48,11 +48,28 @@ def _resolve_note_path(raw_slug: str):
     slug = re.sub(r"[^\w-]", "", raw_slug)
     if not slug or slug != raw_slug:
         return None
-    notes_real = os.path.realpath(shared_personal_path("notes", REPO_DIR))
+    notes_real = os.path.realpath(shared_personal_path("notes"))
     note_file_str = os.path.realpath(os.path.join(notes_real, f"{slug}.md"))
     if not note_file_str.startswith(notes_real + os.sep):
         return None
     return Path(note_file_str)
+
+
+def get_outbox(limit: int = 10) -> list[dict]:
+    """Return recent outbox entries for the dashboard card.
+
+    Reads from `src/outbox_log.py` — the audit log every bridge appends
+    to after a successful outbound delivery. Writes are best-effort
+    (each bridge wraps the call in try/except), so callers tolerate
+    empty / missing results. Ported in Phase 5.15 of the OSS → private
+    sync — the writers (currently slack-bridge.py) have existed for
+    some time but the data was invisible until this reader landed.
+    """
+    try:
+        import outbox_log
+        return outbox_log.read_recent(limit)
+    except Exception:
+        return []
 
 
 def get_health() -> list[dict]:
@@ -100,7 +117,7 @@ def get_activity(max_items: int = 10) -> list[dict]:
 
 
 def get_pending_count() -> dict:
-    pending_file = Path(personal_path("pending-questions.md", REPO_DIR))
+    pending_file = state_path("pending-questions.md")  # workspace state, not repo
     if not pending_file.exists():
         return {"open": 0, "done": 0}
     content = pending_file.read_text()
@@ -110,7 +127,7 @@ def get_pending_count() -> dict:
 
 
 def get_score() -> str:
-    build_log = Path(shared_personal_path("build_log.md", REPO_DIR))
+    build_log = Path(shared_personal_path("build_log.md"))
     if not build_log.exists():
         return "?"
     content = build_log.read_text()
@@ -246,7 +263,7 @@ TESTED_USE_CASES = {
 }
 
 def get_use_case_matrix() -> str:
-    build_log = Path(shared_personal_path("build_log.md", REPO_DIR))
+    build_log = Path(shared_personal_path("build_log.md"))
     if not build_log.exists():
         return ""
     content = build_log.read_text()
@@ -322,6 +339,31 @@ def render_dashboard() -> str:
     matrix_html = get_use_case_matrix()
     if matrix_html:
         cards.append(f'<div class="card full"><h2>Capabilities Matrix</h2>{matrix_html}</div>')
+
+    # Outbox (recent outbound messages from any bridge that records to
+    # outbox_log). Hidden when empty — fresh installs and bridges that
+    # haven't recorded anything yet shouldn't see a stub card.
+    outbox = get_outbox(10)
+    if outbox:
+        _channel_icon = {
+            "discord_dm": "💬", "discord_channel": "📢",
+            "slack_dm": "💬", "slack_channel": "📢",
+            "telegram": "✈️", "imessage": "💬", "whatsapp": "📱",
+            "email": "📧", "x": "𝕏",
+        }
+        outbox_html = ""
+        for e in reversed(outbox):
+            icon = _channel_icon.get(e.get("channel_type", ""), "→")
+            ts_str = e.get("iso_ts", "")[:16].replace("T", " ")
+            label = e.get("recipient_label") or e.get("recipient", "?")[:20]
+            preview = e.get("body_preview", "")[:80]
+            outbox_html += (
+                f'<div class="activity-item">'
+                f'<span class="activity-time">{ts_str} {icon} {label}</span> '
+                f'<span class="activity-title" style="color:#666">{preview}</span>'
+                f'</div>\n'
+            )
+        cards.append(f'<div class="card full"><h2>Outbox</h2>{outbox_html}</div>')
 
     # Keyboard shortcuts
     # Match both the dev-built binary (`<repo>/src/Sutando/Sutando`) and the
@@ -455,7 +497,7 @@ load()
             self.end_headers()
             self.wfile.write(html.encode())
         elif urlparse(self.path).path == "/notes":
-            notes_dir = Path(shared_personal_path("notes", REPO_DIR))
+            notes_dir = Path(shared_personal_path("notes"))
             notes = []
             for f in sorted(notes_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
                 title = f.stem.replace("-", " ").title()
