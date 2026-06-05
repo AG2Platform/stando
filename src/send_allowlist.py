@@ -69,16 +69,17 @@ SEND_ALLOWED_ROOTS: tuple[str, ...] = (
 )
 
 # Prefix forms — files whose realpath starts with any of these strings
-# are deliverable. Covers the system scratch dirs the agent writes to:
-# `/tmp/sutando-recording-*.mov` and also ad-hoc working files it exports
-# directly to /tmp (e.g. `/tmp/report.xlsx`, feedback 2033745d). macOS
-# realpath collapses /tmp → /private/tmp and uses /var/folders for the
-# per-user temp dir, so all three roots are listed. Home + system paths
-# (config, keys, browser data) stay off-limits.
+# are deliverable. Covers /tmp working files the agent writes — both the
+# old `/tmp/sutando-recording-*.mov` artifacts and ad-hoc exports like
+# `/tmp/report.xlsx` (feedback 2033745d). Both forms are listed because
+# macOS realpath collapses /tmp → /private/tmp while Linux keeps /tmp.
+# Home + system paths (config, keys, browser data) stay off-limits.
+# (Not /var/folders: realpath turns it into /private/var/folders, so the
+# bare prefix would be dead — add /private/var/folders deliberately if the
+# macOS per-user temp dir ever needs to be deliverable.)
 SEND_ALLOWED_PREFIXES: tuple[str, ...] = (
     "/tmp/",
     "/private/tmp/",
-    "/var/folders/",
 )
 
 

@@ -118,11 +118,10 @@ def test_send_allowlist_module_has_documented_set():
     update this test deliberately."""
     src = (SRC / "send_allowlist.py").read_text()
     must_appear = [
-        # Prefixes — broadened to the system scratch roots (feedback
-        # 2033745d); see tests/send-allowlist.test.py for the rationale.
+        # Prefixes — broadened to all of /tmp, both realpath forms
+        # (feedback 2033745d); see tests/send-allowlist.test.py.
         '"/tmp/"',
         '"/private/tmp/"',
-        '"/var/folders/"',
         # Roots — checking the path components since the literals are
         # built via `str(_REPO / "results")` etc.
         '_REPO / "results"',

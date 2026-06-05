@@ -202,18 +202,17 @@ def test_dm_result_imports_helper_constants_by_identity():
 def test_allowed_prefixes_are_the_documented_set():
     """Architectural assertion: the allowed prefixes must stay a small,
     deliberate set. Broadened 2026-06 (feedback 2033745d) from the
-    `/tmp/sutando-*`/`/tmp/echo-*` prefixes to the system scratch roots so
-    the agent can deliver ad-hoc working files it writes to /tmp (e.g.
-    /tmp/report.xlsx). This is an INTENTIONAL, owner-scoped beta exposure
-    widening — acceptable because (a) bot file-sends are owner-driven
-    (non-owner tasks run sandboxed read-only) and (b) the realpath
+    `/tmp/sutando-*`/`/tmp/echo-*` prefixes to all of /tmp (both realpath
+    forms) so the agent can deliver ad-hoc working files it writes there
+    (e.g. /tmp/report.xlsx). This is an INTENTIONAL, owner-scoped beta
+    exposure widening — acceptable because (a) bot file-sends are owner-
+    driven (non-owner tasks run sandboxed read-only) and (b) the realpath
     sanitizer still blocks symlink/`..` escapes to $HOME + system paths
     (see the escape tests above). Any FURTHER widening (e.g. `/Users/`,
-    `/`) must update this set deliberately."""
+    `/var/folders/`, `/`) must update this set deliberately."""
     documented = {
         "/tmp/",
         "/private/tmp/",
-        "/var/folders/",
     }
     actual = set(send_allowlist.SEND_ALLOWED_PREFIXES)
     assert actual == documented, (

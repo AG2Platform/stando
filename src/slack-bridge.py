@@ -99,14 +99,13 @@ SEND_ALLOWED_ROOTS = (
     str(REPO / "data"),
     str(INBOX_DIR),
 )
-# Broadened from the /tmp/sutando- prefixes to the system scratch dirs so
-# ad-hoc working files (e.g. /tmp/report.xlsx) are sendable — feedback
-# 2033745d. realpath collapses /tmp → /private/tmp on macOS; /var/folders
-# is the per-user temp dir.
+# Broadened from the /tmp/sutando- prefixes to all of /tmp so ad-hoc
+# working files (e.g. /tmp/report.xlsx) are sendable — feedback 2033745d.
+# Both forms listed: macOS realpath collapses /tmp → /private/tmp, Linux
+# keeps /tmp. Mirrors src/send_allowlist.py.
 SEND_ALLOWED_PREFIXES = (
     "/tmp/",
     "/private/tmp/",
-    "/var/folders/",
 )
 
 

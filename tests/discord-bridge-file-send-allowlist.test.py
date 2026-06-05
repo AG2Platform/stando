@@ -162,15 +162,15 @@ def test_path_traversal_dotdot_rejected():
 
 def test_allowed_prefixes_are_the_documented_set():
     """Architectural assertion: the allowed prefixes must stay a small,
-    deliberate set. Broadened 2026-06 (feedback 2033745d) to the system
-    scratch roots so the agent can deliver ad-hoc /tmp working files; an
-    INTENTIONAL owner-scoped beta widening (realpath still blocks escapes
-    to $HOME/system — see the escape tests above). Any FURTHER widening
-    (e.g. `/Users/`, `/`) must update this set deliberately."""
+    deliberate set. Broadened 2026-06 (feedback 2033745d) to all of /tmp
+    (both realpath forms) so the agent can deliver ad-hoc /tmp working
+    files; an INTENTIONAL owner-scoped beta widening (realpath still blocks
+    escapes to $HOME/system — see the escape tests above). Any FURTHER
+    widening (e.g. `/Users/`, `/var/folders/`, `/`) must update this set
+    deliberately."""
     documented = {
         "/tmp/",
         "/private/tmp/",
-        "/var/folders/",
     }
     actual = set(bridge.SEND_ALLOWED_PREFIXES)
     assert actual == documented, (
