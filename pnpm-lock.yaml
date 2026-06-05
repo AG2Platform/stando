@@ -56,6 +56,9 @@ importers:
       ws:
         specifier: ^8.20.0
         version: 8.20.1
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
       zod:
         specifier: ^3.24.0
         version: 3.25.76
@@ -666,7 +669,7 @@ packages:
     resolution: {integrity: sha512-Ko0uX15oIUS7wJ3Rb30Fs6SkVbLmPBAKdlm7q9+ak9bbIeFf0MwuBsQV6z7+X768/cHsfg+WlysDWJcmthjsjQ==}
 
   bodhi-realtime-agent@https://codeload.github.com/sonichi/bodhi_realtime_agent/tar.gz/ffec0cdf60bc8cba5e33e06ff2007b64157df3cd:
-    resolution: {integrity: sha512-dH8aeuDYv2VJzh/UoDJumrslFtb0GkvghuULi3gDShMiZlflB1qWlw2ELXDuMiRdlzWsZy0WwgoPCM/TJiek1w==, tarball: https://codeload.github.com/sonichi/bodhi_realtime_agent/tar.gz/ffec0cdf60bc8cba5e33e06ff2007b64157df3cd}
+    resolution: {tarball: https://codeload.github.com/sonichi/bodhi_realtime_agent/tar.gz/ffec0cdf60bc8cba5e33e06ff2007b64157df3cd}
     version: 0.1.5
     engines: {node: '>=22.0.0'}
 
