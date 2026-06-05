@@ -26,11 +26,15 @@ import urllib.request
 from pathlib import Path
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
-WORKSPACE = SKILL_DIR.parents[1]
+REPO_DIR = SKILL_DIR.parents[1]
 STATE_DIR = SKILL_DIR / "state"
 SEEN_PATH = STATE_DIR / "seen.json"
 CRITERIA_PATH = STATE_DIR / "criteria.json"
-RESULTS_DIR = WORKSPACE / "results"
+
+import sys as _sys  # noqa: E402
+_sys.path.insert(0, str(REPO_DIR / "src"))
+from workspace_default import resolve_workspace as _resolve_workspace  # noqa: E402
+RESULTS_DIR = _resolve_workspace(migrate=False) / "results"
 
 UA = (
     "Sutando-Personal-Agent/1.0 "
@@ -46,7 +50,7 @@ HDRS = {
 
 def load_env():
     env = {}
-    env_path = WORKSPACE / ".env"
+    env_path = REPO_DIR / ".env"
     if env_path.exists():
         for line in env_path.read_text().splitlines():
             line = line.strip()
