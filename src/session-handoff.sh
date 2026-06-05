@@ -34,7 +34,7 @@ TRANSCRIPT="$1"  # Passed by PreCompact hook as $TRANSCRIPT_PATH
 
   # What's running
   echo "## System Status"
-  python3 "$REPO/src/health-check.py" 2>/dev/null | grep -E "✓|⚠|✗" | head -15
+  python3 "$DEV_REPO/src/health-check.py" 2>/dev/null | grep -E "✓|⚠|✗" | head -15
   echo ""
 
   # Recent git activity (what was built)
