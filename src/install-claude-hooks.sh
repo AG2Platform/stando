@@ -55,9 +55,9 @@ SETTINGS="$REPO_DIR/.claude/settings.json"
 
 # Hook specs: each line is "<event>|<command>".  Order = install order.
 HOOKS=(
-  "PreCompact|cp \"\$TRANSCRIPT_PATH\" \"\$HOME/Desktop/sutando-conversations/\$(date +%Y-%m-%dT%H-%M-%S).jsonl\""
-  "PreCompact|bash \$HOME/Desktop/sutando/src/session-handoff.sh \"\$TRANSCRIPT_PATH\""
-  "Stop|bash \$HOME/Desktop/sutando/src/check-pending-tasks.sh"
+  "PreCompact|mkdir -p \"\${SUTANDO_WORKSPACE:-\$HOME/.sutando/workspace}/logs/conversations\" && cp \"\$TRANSCRIPT_PATH\" \"\${SUTANDO_WORKSPACE:-\$HOME/.sutando/workspace}/logs/conversations/\$(date +%Y-%m-%dT%H-%M-%S).jsonl\""
+  "PreCompact|bash \"\${SUTANDO_WORKSPACE:-\$HOME/.sutando/workspace}/src/session-handoff.sh\" \"\$TRANSCRIPT_PATH\""
+  "Stop|bash \"\${SUTANDO_WORKSPACE:-\$HOME/.sutando/workspace}/src/check-pending-tasks.sh\""
 )
 
 # Deprecated hooks to uninstall on re-run.  Each line: "<event>|<substring>".
