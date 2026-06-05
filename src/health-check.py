@@ -703,6 +703,72 @@ def check_task_queue(threshold_count: int = 3, threshold_age_sec: int = 300) -> 
     return {"name": name, "status": "ok", "detail": f"{len(files)} task(s), oldest {oldest_age}s"}
 
 
+def check_discord_voice() -> dict:
+    """Detect the discord-voice-server process — an on-demand voice session
+    process under skills/discord-voice/scripts/discord-voice-server.ts.
+
+    Like conversation-server, this is NOT a long-lived daemon: it's launched
+    per Discord voice session and SIGTERM'd by the `dismiss` tool when the
+    session ends. So "not running" is the expected steady state, not an error
+    — this returns a soft `warn` ("not running (on-demand)") when down and
+    `ok` when up, mirroring the conversation-server check. `warn` keeps it out
+    of the `N issue(s) found` error count (main() treats only down/missing/
+    not_loaded/fail as issues; warn is excluded).
+
+    Detection: `pgrep -f discord-voice-server` — the process has no listening
+    port, unlike conversation-server (port 3100), so it can't use check_port.
+    The detail string deliberately contains the word "running" in both states
+    so the dashboard's service filter (src/dashboard.py — keeps checks whose
+    detail mentions "port"/"running") surfaces it either way.
+    """
+    name = "discord-voice"
+    try:
+        result = subprocess.run(
+            ["/usr/bin/pgrep", "-f", "discord-voice-server"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = [p for p in result.stdout.strip().split("\n") if p] if result.returncode == 0 else []
+    except (subprocess.TimeoutExpired, OSError):
+        pids = []
+    if pids:
+        check = {"name": name, "status": "ok", "detail": "running"}
+        mark_stale_if_outdated(
+            check,
+            REPO_DIR / "skills" / "discord-voice" / "scripts" / "discord-voice-server.ts",
+            "discord-voice-server.ts",
+        )
+        return check
+    return {"name": name, "status": "warn", "detail": "not running (on-demand)"}
+
+
+def check_notes_split_brain() -> "dict | None":
+    """Detect notes/ split-brain (#1266): overlapping .md files in both
+    <repo>/notes/ and <workspace>/notes/ — fires only when the two paths differ."""
+    repo_notes = REPO_DIR / "notes"
+    ws_notes = Path(shared_personal_path("notes", WORKSPACE_DIR))
+    if repo_notes.resolve() == ws_notes.resolve():
+        return None
+    if not repo_notes.exists() or not ws_notes.exists():
+        return None
+    repo_files = {p.name for p in repo_notes.glob("*.md")}
+    ws_files = {p.name for p in ws_notes.glob("*.md")}
+    overlap = repo_files & ws_files
+    if not overlap:
+        return None
+    examples = ", ".join(sorted(overlap)[:3])
+    tail = f" … and {len(overlap) - 3} more" if len(overlap) > 3 else ""
+    return {
+        "name": "notes-split-brain",
+        "status": "warn",
+        "detail": (
+            f"{len(overlap)} .md file(s) duplicated across <repo>/notes/ and <workspace>/notes/ "
+            f"— edits to one side are invisible to the other. "
+            f"Run scripts/sutando-migrate.sh to consolidate. "
+            f"Overlap: {examples}{tail}"
+        ),
+    }
+
+
 def run_all_checks() -> list[dict]:
     checks = []
 
@@ -753,6 +819,11 @@ def run_all_checks() -> list[dict]:
     # ~/.sutando/workspace/notes rather than <repo>/notes — the notes/
     # .gitkeep was removed from the repo in #793's workspace migration.
     checks.append(check_directory(Path(shared_personal_path("notes", WORKSPACE_DIR)), "notes-dir"))
+
+    # Notes split-brain: both <repo>/notes/ and <workspace>/notes/ with overlapping files (#1266)
+    _notes_sb = check_notes_split_brain()
+    if _notes_sb:
+        checks.append(_notes_sb)
 
     # Memory sync
     checks.append(check_memory_sync())
@@ -941,6 +1012,12 @@ def run_all_checks() -> list[dict]:
             pass
 
         checks.append({"name": name, "status": status, "detail": detail})
+
+    # Discord voice server — on-demand process (launched per voice session,
+    # SIGTERM'd by the `dismiss` tool). Soft-warn when down, like
+    # conversation-server. Always checked: discord-voice can be started any
+    # time the discord-bridge / owner triggers a voice session.
+    checks.append(check_discord_voice())
 
     # Sutando menu bar app — dev-built binary OR installed .app. The fork
     # ships as a signed .app, so on a real install only app_bin exists;
@@ -1268,36 +1345,41 @@ def main():
                     result = fix_launchd(c["name"])
                     print(f"  {c['name']}: {result}")
                 elif c["name"] in ("telegram-bridge", "discord-bridge"):
-                    # If stale (process older than source code), kill old PID first
-                    # so the new process doesn't conflict with a still-running zombie.
-                    if c["status"] == "stale":
-                        try:
-                            # Anchor to `\.py$` to match the detect path at
-                            # line ~277. Without this, a bare `pgrep -f
-                            # discord-bridge` also catches grep pipelines
-                            # and shell invocations whose command line
-                            # contains the bridge name, and we'd kill them
-                            # instead of (or in addition to) the real
-                            # bridge process. PR #243 fixed the detect
-                            # side; this keeps the kill side consistent.
-                            old_pids = subprocess.run(
-                                ["/usr/bin/pgrep", "-f", f"{c['name']}\\.py$"], capture_output=True, text=True
-                            ).stdout.strip().split("\n")
-                            for pid in old_pids:
-                                if pid:
-                                    subprocess.run(["/bin/kill", pid], check=False)
-                            import time as _t; _t.sleep(1)
-                        except Exception:
-                            pass
-                    # Use sys.executable to avoid launchd's minimal PATH
-                    # resolving `python3` to /usr/bin/python3 (3.9), which
-                    # doesn't have the homebrew site-packages (discord,
-                    # dotenv, etc.) — restart would crash on import.
-                    # Log path uses logs/ (post-PR #251 refactor).
-                    subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
-                                     stdout=open(str(WORKSPACE_DIR / "logs" / f"{c['name']}.log"), "a"),
-                                     stderr=subprocess.STDOUT, start_new_session=True)
-                    print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
+                    # LoginFailure means the token is bad — restarting won't help
+                    # and would create a duplicate alongside the launchd-managed one.
+                    if "LoginFailure" in c.get("detail", "") or "token invalid" in c.get("detail", ""):
+                        print(f"  {c['name']}: token invalid — regenerate at discord.com/developers/applications (no restart)")
+                    else:
+                        # If stale (process older than source code), kill old PID first
+                        # so the new process doesn't conflict with a still-running zombie.
+                        if c["status"] == "stale":
+                            try:
+                                # Anchor to `\.py$` to match the detect path at
+                                # line ~277. Without this, a bare `pgrep -f
+                                # discord-bridge` also catches grep pipelines
+                                # and shell invocations whose command line
+                                # contains the bridge name, and we'd kill them
+                                # instead of (or in addition to) the real
+                                # bridge process. PR #243 fixed the detect
+                                # side; this keeps the kill side consistent.
+                                old_pids = subprocess.run(
+                                    ["/usr/bin/pgrep", "-f", f"{c['name']}\\.py$"], capture_output=True, text=True
+                                ).stdout.strip().split("\n")
+                                for pid in old_pids:
+                                    if pid:
+                                        subprocess.run(["/bin/kill", pid], check=False)
+                                import time as _t; _t.sleep(1)
+                            except Exception:
+                                pass
+                        # Use sys.executable to avoid launchd's minimal PATH
+                        # resolving `python3` to /usr/bin/python3 (3.9), which
+                        # doesn't have the homebrew site-packages (discord,
+                        # dotenv, etc.) — restart would crash on import.
+                        # Log path uses logs/ (post-PR #251 refactor).
+                        subprocess.Popen([sys.executable, str(REPO_DIR / "src" / f"{c['name']}.py")],
+                                         stdout=open(str(WORKSPACE_DIR / "logs" / f"{c['name']}.log"), "a"),
+                                         stderr=subprocess.STDOUT, start_new_session=True)
+                        print(f"  {c['name']}: {'restarted (stale code)' if c['status'] == 'stale' else 'restarted'}")
                 elif c["name"] == "sutando-app":
                     # Stale here means main.swift is newer than the binary's
                     # process start time. The bare Popen below was leaking

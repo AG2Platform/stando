@@ -79,6 +79,25 @@ if [ ! -d node_modules ]; then
   fi
 fi
 
+# The conversation UI lives in the private stando-ui repo, not this tree.
+# web-server.ts serves whatever CLIENT_DIST_DIR points at; with nothing set
+# it 503s. For dev convenience, if CLIENT_DIST_DIR is unset but a built
+# sibling checkout exists (../stando-ui/dist), point at it automatically.
+# Override anytime by exporting CLIENT_DIST_DIR yourself.
+if [ -z "${CLIENT_DIST_DIR:-}" ]; then
+  _sibling_ui="$(cd "$REPO/.." 2>/dev/null && pwd)/stando-ui/dist"
+  if [ -f "$_sibling_ui/index.html" ]; then
+    export CLIENT_DIST_DIR="$_sibling_ui"
+    echo "  ✓ UI: serving sibling stando-ui (CLIENT_DIST_DIR=$_sibling_ui)"
+  else
+    echo "  ~ UI: CLIENT_DIST_DIR unset and no built ../stando-ui/dist found."
+    echo "    The web UI at http://localhost:8080 will 503 until you build the"
+    echo "    private stando-ui repo and export CLIENT_DIST_DIR=/abs/path/to/dist."
+  fi
+else
+  echo "  ✓ UI: serving CLIENT_DIST_DIR=$CLIENT_DIST_DIR"
+fi
+
 # Check prerequisites
 missing=0
 if ! command -v node > /dev/null 2>&1; then echo "  ✗ node not found — brew install node"; missing=1; fi
@@ -92,6 +111,36 @@ if [ -f .env ]; then
   if [ -z "$GEMINI_API_KEY" ]; then echo "  ✗ GEMINI_API_KEY not set in .env — get one at https://ai.google.dev"; missing=1; fi
 fi
 if [ $missing -eq 1 ]; then echo ""; echo "Fix the above and try again."; exit 1; fi
+
+# Build the conversation UI from the sibling stando-ui repo, if present.
+# The UI lives in private AG2Platform/stando-ui (extracted from client/);
+# web-server.ts serves whatever CLIENT_DIST_DIR points at, so we rebuild
+# the sibling on every startup so the served bundle reflects the latest
+# stando-ui changes without a separate `pnpm build` step. Opt out with
+# SKIP_UI_BUILD=1 (e.g. when iterating with `pnpm dev` on :5173).
+_sibling_ui_repo="$(cd "$REPO/.." 2>/dev/null && pwd)/stando-ui"
+if [ -f "$_sibling_ui_repo/package.json" ] && [ "${SKIP_UI_BUILD:-}" != "1" ]; then
+  if ! command -v pnpm > /dev/null 2>&1; then
+    echo "  ⚠ stando-ui found but pnpm not installed — skipping rebuild"
+    echo "    Install with: npm install -g pnpm    (or set SKIP_UI_BUILD=1)"
+  else
+    echo "  Building stando-ui ($_sibling_ui_repo)..."
+    if [ ! -d "$_sibling_ui_repo/node_modules" ]; then
+      (cd "$_sibling_ui_repo" && pnpm install 2>&1 | tail -3)
+    fi
+    if (cd "$_sibling_ui_repo" && pnpm build 2>&1 | tail -3); then
+      echo "  ✓ stando-ui built → $_sibling_ui_repo/dist"
+      # Auto-point at the sibling dist if .env didn't already.
+      if [ -z "${CLIENT_DIST_DIR:-}" ] && [ -f "$_sibling_ui_repo/dist/index.html" ]; then
+        export CLIENT_DIST_DIR="$_sibling_ui_repo/dist"
+        echo "  ✓ CLIENT_DIST_DIR=$CLIENT_DIST_DIR"
+      fi
+    else
+      echo "  ⚠ stando-ui build failed — serving previous dist if any"
+    fi
+  fi
+fi
+unset _sibling_ui_repo
 
 # Check macOS permissions (can't grant programmatically, just warn)
 # Prevent display sleep (important for always-on Mac Mini — Zoom/summon fails on lock screen)
