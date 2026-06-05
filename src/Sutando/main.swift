@@ -2696,17 +2696,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// this only restarts the Claude Code CLI session.
     @objc func restartCore() {
         notify("Sutando", "Restarting Core CLI…")
+        // Production runs the core as the launchd job `com.sutando.core-agent`
+        // (run-core-agent.sh) with KeepAlive — its `claude` has no `--name`, so
+        // the old `start-cli.sh --restart` path (which finds the session via
+        // `pgrep claude --name sutando-core` then spawns its own tmux session)
+        // both missed the kill AND raced launchd's respawn, so the menu item
+        // did nothing (feedback 9c5e68f6). Restart the launchd job directly via
+        // `kickstart -k`, which kills+restarts it cleanly under launchd. Fall
+        // back to the script for the dev workflow, where the launchd job isn't
+        // bootstrapped but start-cli.sh's own `--name sutando-core` session is.
+        let uid = getuid()
         let script = workspace + "/scripts/start-cli.sh"
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-        proc.arguments = [script, "--restart"]
-        // Capture stderr so we can surface failures via notify rather than
-        // silently swallowing (per Mini's #608 review nit #1). stdout still
-        // discarded — script's success messages aren't useful to the user.
-        let errPipe = Pipe()
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = errPipe
         DispatchQueue.global(qos: .utility).async { [weak self] in
+            let kick = Process()
+            kick.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            kick.arguments = ["kickstart", "-k", "gui/\(uid)/com.sutando.core-agent"]
+            kick.standardOutput = FileHandle.nullDevice
+            kick.standardError = FileHandle.nullDevice
+            do {
+                try kick.run()
+                kick.waitUntilExit()
+            } catch {
+                self?.notify("Sutando", "Core restart failed to start: \(error.localizedDescription)")
+                return
+            }
+            if kick.terminationStatus == 0 {
+                self?.notify("Sutando", "Core restarted. Attach via Open Core CLI in menu.")
+                return
+            }
+            // launchd job not loaded (dev workflow) — fall back to the script,
+            // which kills + restarts start-cli.sh's own `--name` tmux session.
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = [script, "--restart"]
+            // Capture stderr so we can surface failures via notify rather than
+            // silently swallowing (per Mini's #608 review nit #1). stdout still
+            // discarded — script's success messages aren't useful to the user.
+            let errPipe = Pipe()
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = errPipe
             do {
                 try proc.run()
             } catch {
