@@ -31,7 +31,7 @@ tags: [ideas, projects, voice]
 Content here...
 ```
 
-**Email (Gmail)** — use the `gws-gmail` skill (OAuth, no app password needed):
+**Email (Gmail)** — use the `email-triage` skill (OAuth, no app password needed):
 ```bash
 gws gmail +send --to "to@x.com" --subject "subj" --body "body"
 gws gmail +triage                               # unread inbox summary

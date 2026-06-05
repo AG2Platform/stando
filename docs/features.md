@@ -37,7 +37,7 @@ These are inline tools — instant, no round-trip. Available in voice and phone.
 
 **Productivity & information**
 - **Calendar** — read Google Calendar (`gws calendar`): today, week, N-day agenda.
-- **Email (Gmail)** — send, triage unread, read, search via the `gws-gmail` OAuth skill.
+- **Email (Gmail)** — send, triage unread, read, search via the `email-triage` skill (`gws-gmail-voice` inline for voice/phone).
 - **Contacts** — look up people by name/email (resolves "email Bob" → address).
 - **Reminders** — read/write macOS Reminders (add, list, complete, due dates).
 - **Notes** — a second brain: save/retrieve markdown notes with tags.
