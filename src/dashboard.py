@@ -48,7 +48,7 @@ def _resolve_note_path(raw_slug: str):
     slug = re.sub(r"[^\w-]", "", raw_slug)
     if not slug or slug != raw_slug:
         return None
-    notes_real = os.path.realpath(shared_personal_path("notes", REPO_DIR))
+    notes_real = os.path.realpath(shared_personal_path("notes"))
     note_file_str = os.path.realpath(os.path.join(notes_real, f"{slug}.md"))
     if not note_file_str.startswith(notes_real + os.sep):
         return None
@@ -117,7 +117,7 @@ def get_activity(max_items: int = 10) -> list[dict]:
 
 
 def get_pending_count() -> dict:
-    pending_file = Path(personal_path("pending-questions.md", REPO_DIR))
+    pending_file = state_path("pending-questions.md")  # workspace state, not repo
     if not pending_file.exists():
         return {"open": 0, "done": 0}
     content = pending_file.read_text()
@@ -127,7 +127,7 @@ def get_pending_count() -> dict:
 
 
 def get_score() -> str:
-    build_log = Path(shared_personal_path("build_log.md", REPO_DIR))
+    build_log = Path(shared_personal_path("build_log.md"))
     if not build_log.exists():
         return "?"
     content = build_log.read_text()
@@ -263,7 +263,7 @@ TESTED_USE_CASES = {
 }
 
 def get_use_case_matrix() -> str:
-    build_log = Path(shared_personal_path("build_log.md", REPO_DIR))
+    build_log = Path(shared_personal_path("build_log.md"))
     if not build_log.exists():
         return ""
     content = build_log.read_text()
@@ -497,7 +497,7 @@ load()
             self.end_headers()
             self.wfile.write(html.encode())
         elif urlparse(self.path).path == "/notes":
-            notes_dir = Path(shared_personal_path("notes", REPO_DIR))
+            notes_dir = Path(shared_personal_path("notes"))
             notes = []
             for f in sorted(notes_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True):
                 title = f.stem.replace("-", " ").title()
