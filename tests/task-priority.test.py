@@ -65,12 +65,15 @@ class TestEnumAndDefaults(unittest.TestCase):
 
 class TestParsing(unittest.TestCase):
     def test_parse_priority_from_text_finds_header(self):
+        # Field order: `task:` LAST. Writers place `task:` last so
+        # `priority:` lines AFTER `task:` are body content, not header
+        # (see task-priority-stop-at-task-delimiter.test.py).
         body = (
             "id: task-1\n"
             "timestamp: 2026-05-16T00:00:00Z\n"
-            "task: do something\n"
             "source: voice\n"
             "priority: urgent\n"
+            "task: do something\n"
         )
         self.assertEqual(parse_priority_from_text(body), "urgent")
 
