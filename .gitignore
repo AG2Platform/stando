@@ -6,11 +6,9 @@ device.json
 PERSONAL_CLAUDE.md
 node_modules/
 dist/
-# Vite + React frontend (PR-B). The src/ tree is checked in; node_modules
-# + dist are regenerable via `pnpm install` + `pnpm --filter @sutando/client build`.
-client/node_modules/
-client/dist/
-client/.vite/
+# The Vite + React frontend lives in the private AG2Platform/stando-ui repo
+# now (extracted from client/). It plugs back in via CLIENT_DIST_DIR — no
+# client/ tree in this repo anymore.
 *.log
 __pycache__/
 .DS_Store
@@ -43,7 +41,6 @@ telegram-inbox/
 discord-inbox/
 archive/
 assets/
-!client/src/assets/
 stand-identity.json
 stand-avatar.png
 docs/youtube/

@@ -198,24 +198,40 @@ cp "$REPO/CLAUDE.md" "$APP/Contents/Resources/repo/CLAUDE.md"
 [ -d "$REPO/assets" ] && cp -R "$REPO/assets" "$APP/Contents/Resources/repo/assets"
 
 # React frontend (Vite + React 19) — `src/web-server.ts` serves
-# `client/dist/index.html` + hashed assets at GET / and /v2. Without this
-# step the bundle falls back to the legacy inline HTML even though
-# web-server.ts knows the React routes — which is the exact symptom we
-# hit after PR-C step 5 shipped.
+# `index.html` + hashed assets at GET / and /v2. The UI no longer lives in
+# this repo; it was extracted to the private AG2Platform/stando-ui repo.
+# We stage its built dist at the bundle's `repo/client/dist` path so the
+# in-bundle web-server resolves it via its default (`../client/dist/`) with
+# no runtime CLIENT_DIST_DIR needed — the shipped app stays self-contained.
 #
-# Build first if dist/ is missing or stale relative to the workspace
-# package.json. `pnpm` is required at build time but not at runtime
-# (everything ends up in client/dist/ which is plain static files).
-echo "  Building + staging React client (client/dist/)..."
-if [ ! -d "$REPO/client/dist" ] || [ "$REPO/client/package.json" -nt "$REPO/client/dist/index.html" ]; then
-    (cd "$REPO" && pnpm --filter @sutando/client build 2>&1 | tail -5)
+# UI source resolution (first hit wins):
+#   1. $CLIENT_DIST_DIR        — an already-built dist (CI passes this).
+#   2. ../stando-ui            — a sibling checkout; build it here.
+# `pnpm` is required at build time but not at runtime (the staged dist is
+# plain static files).
+echo "  Staging UI from private stando-ui repo..."
+UI_DIST=""
+if [ -n "${CLIENT_DIST_DIR:-}" ] && [ -f "${CLIENT_DIST_DIR%/}/index.html" ]; then
+    UI_DIST="${CLIENT_DIST_DIR%/}"
+    echo "    Using prebuilt CLIENT_DIST_DIR=$UI_DIST"
+else
+    UI_REPO="$(cd "$REPO/.." 2>/dev/null && pwd)/stando-ui"
+    if [ ! -d "$UI_REPO" ]; then
+        echo "  ✗ stando-ui not found at $UI_REPO and CLIENT_DIST_DIR unset."
+        echo "    Clone the private UI repo next to stando, or export CLIENT_DIST_DIR:"
+        echo "    git clone git@github.com:AG2Platform/stando-ui.git \"$UI_REPO\""
+        exit 1
+    fi
+    echo "    Building $UI_REPO..."
+    (cd "$UI_REPO" && pnpm install 2>&1 | tail -2 && pnpm build 2>&1 | tail -5)
+    UI_DIST="$UI_REPO/dist"
+fi
+if [ ! -f "$UI_DIST/index.html" ]; then
+    echo "  ✗ UI build produced no index.html at $UI_DIST — aborting."
+    exit 1
 fi
 mkdir -p "$APP/Contents/Resources/repo/client"
-cp -R "$REPO/client/dist" "$APP/Contents/Resources/repo/client/dist"
-# package.json + index.html are useful for diagnostics inside the bundle
-# (lets you run `node` against the staged copy if something goes wrong).
-cp "$REPO/client/package.json" "$APP/Contents/Resources/repo/client/package.json"
-[ -f "$REPO/client/index.html" ] && cp "$REPO/client/index.html" "$APP/Contents/Resources/repo/client/index.html"
+cp -R "$UI_DIST" "$APP/Contents/Resources/repo/client/dist"
 
 # Production-only install directly into the bundle. Skips devDeps
 # (typescript, @types/*) which a runtime never touches. Cuts ~30MB and
