@@ -261,6 +261,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 maybeRunFirstLaunchFlow()
             } else {
                 scheduleAutoOpenWebUI()
+                // One-time nudge for existing 0.4.x users to move to the 0.5.0
+                // Electron build (Sparkle can't auto-hand-off across app types).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    MigrationPrompt.maybeShow(stateRoot: self.stateRoot)
+                }
             }
         } else {
             logToFile("Not signed in — services held, opening sign-in flow")

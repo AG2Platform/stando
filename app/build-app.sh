@@ -75,6 +75,7 @@ echo "  Compiling launcher..."
 # ENABLE_SPARKLE.
 SWIFT_SOURCES=(
     "$REPO/src/Sutando/main.swift"
+    "$REPO/src/Sutando/MigrationPrompt.swift"
     "$REPO/src/Sutando/LaunchAgentInstaller.swift"
     "$REPO/src/Sutando/SparkleUpdater.swift"
     "$REPO/src/Sutando/ClaudeCodeAuth.swift"
