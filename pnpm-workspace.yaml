@@ -3,3 +3,7 @@ packages:
 
 onlyBuiltDependencies:
   - "bodhi-realtime-agent"
+  # pnpm 10.x on CI stopped matching git-hosted deps by bare name here; it wants
+  # the full resolved spec (with the pinned commit). Keep both so a pnpm revert
+  # or future bare-name matching still works.
+  - "bodhi-realtime-agent@https://codeload.github.com/sonichi/bodhi_realtime_agent/tar.gz/ffec0cdf60bc8cba5e33e06ff2007b64157df3cd"
