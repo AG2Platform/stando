@@ -133,6 +133,80 @@ migrate_legacy_runtime_state() {
   fi
 }
 
+# One-time sweep of loose workspace-root status .json files into state/.
+# Bash twin of workspace_default.py's _migrate_root_status — shares the
+# `.status-migrated` sentinel so whichever runs first does the move and the
+# other short-circuits. init.sh runs before the Python services (startup.sh),
+# so without this sweep the create_file_if_missing calls below would seed a
+# fresh state/ file and strand a real workspace-root copy. Non-destructive on
+# collision; file list matches _STATUS_FILES.
+migrate_root_status_to_state() {
+  local sentinel="$WORKSPACE/.status-migrated"
+  if [ -f "$sentinel" ]; then
+    return 0
+  fi
+  mkdir -p "$WORKSPACE/state"
+  local moved_any=0
+  # Single source of truth for this list is `_STATUS_FILES` in
+  # src/workspace_default.py — keep the two in sync. Adding a 6th status
+  # file there without adding it here (or vice versa) silently drifts the
+  # Python and bash migrator twins.
+  for f in core-status.json voice-state.json contextual-chips.json dynamic-content.json quota-state.json; do
+    local src="$WORKSPACE/$f"
+    local dst="$WORKSPACE/state/$f"
+    if [ -f "$src" ] && [ ! -e "$dst" ]; then
+      if mv "$src" "$dst" 2>/dev/null; then
+        echo "  → migrated $f into state/" >&2
+        moved_any=1
+      fi
+    fi
+  done
+  : > "$sentinel"
+  if [ "$moved_any" -eq 1 ]; then
+    echo "  ✓ workspace-root status files swept into state/" >&2
+  fi
+}
+
+# One-time stderr notice when legacy repo-root state is detected. Replaces
+# the auto-fire of migrate_legacy_runtime_state / migrate_root_status_to_state
+# from tier1() — see #1169 / #1170 (option B: auto-migration disabled).
+#
+# Scans for evidence the bash twins would have moved (a) on a fresh
+# install or (b) on a populated-workspace collision where the old
+# migrator would have skipped the move silently. Both cases now require
+# explicit invocation of `bash scripts/sutando-migrate.sh`.
+legacy_state_notice() {
+  local notice_sentinel="$WORKSPACE/.legacy-notice-printed"
+  if [ -f "$notice_sentinel" ]; then
+    return 0
+  fi
+  local found=()
+  for d in logs state tasks results notes data; do
+    if [ -d "$REPO/$d" ] && [ ! -L "$REPO/$d" ] && [ -n "$(ls -A "$REPO/$d" 2>/dev/null)" ]; then
+      found+=("$REPO/$d/")
+    fi
+  done
+  for f in pending-questions.md core-status.json contextual-chips.json voice-state.json build_log.md conversation.log; do
+    if [ -f "$REPO/$f" ]; then
+      found+=("$REPO/$f")
+    fi
+  done
+  for f in core-status.json voice-state.json contextual-chips.json dynamic-content.json quota-state.json; do
+    if [ -f "$WORKSPACE/$f" ]; then
+      found+=("$WORKSPACE/$f (should be in state/)")
+    fi
+  done
+  if [ "${#found[@]}" -gt 0 ]; then
+    mkdir -p "$WORKSPACE"
+    {
+      echo "  ⚠ legacy state detected: ${found[*]}"
+      echo "    Auto-migration is disabled as of #1169 (option B)."
+      echo "    Run \`bash scripts/sutando-migrate.sh --dry-run\` to preview, then \`--commit\` to relocate."
+    } >&2
+    : > "$notice_sentinel"
+  fi
+}
+
 # --- Tier 1: auto-bootstrap (always safe to run) ---
 tier1() {
   log "Tier 1 — auto-bootstrap..."

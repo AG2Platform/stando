@@ -5,7 +5,7 @@
  * - Runs as a local HTTP proxy between Claude Code and api.anthropic.com
  * - Injects OAuth credentials from macOS keychain
  * - Reads `anthropic-ratelimit-unified-*` headers from responses
- * - Writes quota state to quota-state.json for the dashboard
+ * - Writes quota state to <workspace>/state/quota-state.json for the dashboard
  *
  * Usage:
  *   npx tsx src/credential-proxy.ts              # start on port 7846
@@ -15,12 +15,23 @@
 import { createServer, request as httpRequest, type RequestOptions } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { execSync } from 'node:child_process';
-import { writeFileSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { statusPath } from '../../../src/workspace_default.js';
 
 const PORT = 7846;
 const UPSTREAM = 'https://api.anthropic.com';
-const QUOTA_FILE = join(import.meta.dirname, '..', 'quota-state.json');
+// Inactivity guard on the upstream socket. Claude streams tokens, so a healthy
+// request keeps the socket active and this never fires; it only trips when NO
+// bytes flow for the window — the silently-dead-socket case (sleep/wake, wifi
+// drop) that otherwise leaves an in-flight request hanging forever and wedges
+// the core. Tunable via PROXY_IDLE_TIMEOUT_MS (default 120s — comfortably longer
+// than the worst-case time-to-first-token on a 1M-context prompt).
+const IDLE_TIMEOUT_MS = Number(process.env.PROXY_IDLE_TIMEOUT_MS) || 120_000;
+// Quota state is per-user runtime state — canonical home is <workspace>/state/.
+// Historically written into the skill dir; readers (dashboard.py, read-quota.py)
+// keep the skill-dir path as a last-resort fallback for one release.
+const QUOTA_FILE = statusPath('quota-state.json');
 
 function ts(): string { return new Date().toISOString().slice(11, 23); }
 
@@ -64,6 +75,7 @@ function updateQuotaState(headers: Record<string, string>): void {
 			state.exhausted_since = new Date().toISOString();
 		}
 
+		mkdirSync(dirname(QUOTA_FILE), { recursive: true });
 		writeFileSync(QUOTA_FILE, JSON.stringify(state, null, 2));
 	} catch { /* best effort */ }
 }
@@ -132,14 +144,36 @@ const server = createServer((req, res) => {
 
 				res.writeHead(upRes.statusCode!, upRes.headers);
 				upRes.pipe(res);
+				// Disarm the idle guard once the response completes, so a pooled
+				// keep-alive socket sitting idle later can't fire it spuriously.
+				upRes.on('end', () => upstream.setTimeout(0));
 			},
 		);
+
+		// Streaming-safe inactivity guard. socket.setTimeout fires only when the
+		// socket has been idle (no read/write) for the window — token streaming
+		// resets it continuously, so legitimate long generations are unaffected,
+		// but a silently dead socket trips it. Without this an in-flight request
+		// hangs forever and the core sits on the dead socket (the indefinite
+		// "agent went silent" freeze). On trip, destroy upstream → 'error' below.
+		upstream.setTimeout(IDLE_TIMEOUT_MS, () => {
+			console.error(`${ts()} [Proxy] Upstream idle >${IDLE_TIMEOUT_MS}ms — aborting (dead socket?)`);
+			upstream.destroy(new Error('upstream idle timeout'));
+		});
 
 		upstream.on('error', (err) => {
 			console.error(`${ts()} [Proxy] Upstream error:`, err.message);
 			if (!res.headersSent) {
-				res.writeHead(502);
+				// 504 for the idle-timeout trip, 502 for other upstream failures —
+				// both are retryable by Claude Code, which is the whole point: surface
+				// a normal error it can retry, never an infinite hang.
+				res.writeHead(err.message === 'upstream idle timeout' ? 504 : 502);
 				res.end('Bad Gateway');
+			} else {
+				// Headers already flushed mid-stream — status can't change. Abort the
+				// client socket so Claude Code's HTTP layer sees a broken stream and
+				// retries, instead of blocking on a half-open connection forever.
+				res.destroy(err);
 			}
 		});
 

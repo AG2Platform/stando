@@ -56,8 +56,10 @@ if (_sutandoHome) {
 	if (_existsSync(_homeEnv)) _dotenvConfig({ path: _homeEnv, override: true });
 }
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { mkdirSync, writeFileSync, appendFileSync, unlinkSync, existsSync, readFileSync, readdirSync, symlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, copyFileSync, appendFileSync, unlinkSync, existsSync, readFileSync, readdirSync, renameSync, symlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { voiceApiKey } from '../../../src/voice-key.js';
+import { loadVoiceConfig } from '../../../src/voice-config.js';
 import { hostname } from 'node:os';
 
 // Personal-asset path resolver — twin of util_paths.py / voice-agent.ts:personalPath.
@@ -72,7 +74,7 @@ function personalPath(filename: string): string {
 	return filename;
 }
 import { fileURLToPath } from 'node:url';
-import { execSync, spawn, type ChildProcess } from 'node:child_process';
+import { execSync, execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { isAllowedAudioPath } from './audio_path_guard.js';
 import { VoiceSession, type ToolDefinition, type MainAgent } from 'bodhi-realtime-agent';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -88,26 +90,106 @@ import {
 	recordEvent as cloudRecordEvent,
 	recordOnboarding as cloudRecordOnboarding,
 } from '../../../src/cloud-client.js';
+import { recordSession, recordConversation, recordToolCall } from '../../../src/conversation-store.js';
+import { resultBelongsTo, phoneCallKey } from '../../../src/result-channel-key.js';
 
 // --- Config ---
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? '';
+// Voice surfaces share the GEMINI_VOICE_API_KEY → GEMINI_API_KEY fallback
+// chain via voiceApiKey() (src/voice-key.ts). VOICE-key path isolates voice
+// billing onto a paid-tier key; MAIN-key fallback preserves single-key setup.
+const GEMINI_API_KEY = voiceApiKey();
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID ?? '';
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN ?? '';
 const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER ?? '';
 const NGROK_AUTHTOKEN = process.env.NGROK_AUTHTOKEN ?? '';
 const PORT = Number(process.env.PHONE_PORT) || 3100;
+// Phone VAD keepalive. Twilio silence-suppresses inbound audio (drops from ~50
+// to ~4 frames/sec while the caller is quiet), starving Gemini's server-side
+// VAD so it stops re-arming after a completed turn — the call goes "deaf after
+// the first turn" (AG2-402). We backfill the gaps with zeroed 20ms PCM16@16kHz
+// frames so Gemini's input stays dense and keeps detecting speech onset. Real
+// inbound frames always win (we only fill when none arrived in the last ~25ms).
+// Set PHONE_VAD_KEEPALIVE=0 to disable if a model/Twilio change makes it
+// counterproductive.
+const PHONE_VAD_KEEPALIVE = process.env.PHONE_VAD_KEEPALIVE !== '0';
+const SILENCE_FRAME_16K = Buffer.alloc(640); // 320 samples × 2 bytes = 20ms @ 16kHz, zeroed
 const WORKSPACE_DIR = process.env.SUTANDO_WORKSPACE || join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const RESULTS_DIR = process.env.PHONE_RESULTS_DIR || join(WORKSPACE_DIR, 'results');
 const TASKS_DIR = join(WORKSPACE_DIR, 'tasks');
+
+// Archive helper — matches src/task-bridge.ts:archiveFile() pattern so phone
+// tasks + results aren't left behind in tasks/ or results/ forever (#1235).
+// Same audit-trail rationale Chi quoted on 2026-04-18 ("instead of deleting
+// we should archive the tasks. It can be useful for self-improving"). Silent
+// on failure; falls back to unlink if renameSync throws for ANY reason
+// (ENOENT race / permission / disk-full) so we never leave stale files.
+// (Note: tasks/ → tasks/archive/ is same-filesystem by construction; EXDEV
+// won't fire — calling out renameSync-failed-for-any-reason rather than
+// implying cross-device portability per liususan091219's #1237 review.)
+function archivePhoneFile(srcPath: string, kind: 'tasks' | 'results', taskId: string): void {
+	try {
+		if (!existsSync(srcPath)) return;
+		const ym = new Date().toISOString().slice(0, 7); // YYYY-MM
+		const baseDir = kind === 'tasks' ? TASKS_DIR : RESULTS_DIR;
+		const destDir = join(baseDir, 'archive', ym);
+		mkdirSync(destDir, { recursive: true });
+		renameSync(srcPath, join(destDir, `${taskId}.txt`));
+	} catch {
+		try { unlinkSync(srcPath); } catch { /* ignore */ }
+	}
+}
+
 const TASK_POLL_INTERVAL_MS = 500;
 const TASK_TIMEOUT_MS = 120_000;
 const OWNER_NAME = process.env.owner ?? '';
 const OWNER_NUMBER = process.env.OWNER_NUMBER ?? '';
+const OWNER_TZ = process.env.OWNER_TZ ?? 'America/Los_Angeles';
 
-// Model configuration — override via .env
+// Build a date-context string injected into the system prompt at session-open
+// so Gemini resolves date-relative phrases ("tomorrow", "this Friday") against
+// the owner's local clock, not UTC or server-local. Without this, US-Pacific
+// owners get an off-by-one whenever a call lands after ~5pm PT (UTC midnight
+// rollover): the model says "tomorrow = May 28" when owner-local says May 27.
+// See sonichi/sutando#1243.
+function ownerLocalDateContext(now: Date = new Date()): string {
+	const tz = OWNER_TZ;
+	const today = now.toLocaleDateString('en-CA', { timeZone: tz }); // YYYY-MM-DD
+	const dayName = now.toLocaleDateString('en-US', { timeZone: tz, weekday: 'long' });
+	const timeStr = now.toLocaleTimeString('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' });
+	const tomorrow = new Date(now.getTime() + 86_400_000).toLocaleDateString('en-CA', { timeZone: tz });
+	const yesterday = new Date(now.getTime() - 86_400_000).toLocaleDateString('en-CA', { timeZone: tz });
+	return `Owner-local time: ${dayName}, ${today}, ${timeStr} (${tz}). Tomorrow = ${tomorrow}. Yesterday = ${yesterday}. When the owner says "today", "tomorrow", "yesterday", "this week", etc., resolve against THESE owner-local dates — never against UTC or server-local time. Pass absolute YYYY-MM-DD values to tools (not relative phrases).`;
+}
+
+// Model configuration — text/STT model still env-driven; the native-audio
+// model + googleSearch grounding are per-user config: data, not code, so they
+// live in the workspace, NOT in the git repo.
+//   live config: $SUTANDO_WORKSPACE/config/phone-conversation.json
+//   template:    skills/phone-conversation/config.json.example (committed)
+// On first run, if the workspace config is missing, the committed .example
+// template is copied into place so the operator has a file to edit. If the
+// copy fails (or the template is gone), loadVoiceConfig falls back to its
+// built-in defaults (schema: src/voice-config.ts). Phone ships with the
+// package default 2.5+search:true.
 const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
-const VOICE_NATIVE_AUDIO_MODEL = process.env.VOICE_NATIVE_AUDIO_MODEL || 'gemini-3.1-flash-live-preview';
+const _phoneSkillDir = dirname(dirname(fileURLToPath(import.meta.url)));
+const PHONE_VOICE_CONFIG_PATH = join(WORKSPACE_DIR, 'config', 'phone-conversation.json');
+if (!existsSync(PHONE_VOICE_CONFIG_PATH)) {
+	const _exampleConfigPath = join(_phoneSkillDir, 'config.json.example');
+	try {
+		mkdirSync(dirname(PHONE_VOICE_CONFIG_PATH), { recursive: true });
+		if (existsSync(_exampleConfigPath)) {
+			copyFileSync(_exampleConfigPath, PHONE_VOICE_CONFIG_PATH);
+			console.log(`${new Date().toISOString().slice(11, 23)} [phone-conversation] seeded config from template → ${PHONE_VOICE_CONFIG_PATH}`);
+		}
+	} catch (e) {
+		console.warn(`${new Date().toISOString().slice(11, 23)} [phone-conversation] could not seed config at ${PHONE_VOICE_CONFIG_PATH}: ${(e as Error).message} — using built-in defaults`);
+	}
+}
+const PHONE_VOICE_CONFIG = loadVoiceConfig(PHONE_VOICE_CONFIG_PATH);
+const VOICE_NATIVE_AUDIO_MODEL = PHONE_VOICE_CONFIG.model;
+const PHONE_GOOGLE_SEARCH = PHONE_VOICE_CONFIG.googleSearch;
 
 // SUBAGENT_PROVIDER picks the LLM used for subagent text generation (Vercel
 // AI SDK calls fired from voice tool execution). Default 'gemini' (no
@@ -128,7 +210,10 @@ function normalizePhone(num: string): string {
 	return digits.length === 10 ? '1' + digits : digits;
 }
 
-/** Read recent conversation context, relabeled to avoid identity confusion */
+/** Read recent conversation context, relabeled to avoid identity confusion.
+ *  Reads the text conversation.log directly — it is the primary truth for
+ *  per-turn content. The sqlite mirror is a best-effort parallel write and
+ *  may lag, so it must not be authoritative here. */
 function getSafeContext(lines = 5): string {
 	try {
 		const logPath = join(WORKSPACE_DIR, 'conversation.log');
@@ -273,6 +358,15 @@ interface CallSession {
 	// Observability: per-call metrics (startTime already on CallSession from #209)
 	toolCalls: { name: string; durationMs: number; timestamp: string }[];
 	events: { event: string; timestamp: string }[];
+	// Per-call channel-scan state (results/<callSid>.task-*.txt pull path).
+	channelScanHandle?: NodeJS.Timeout;
+	// VAD keepalive (PHONE_VAD_KEEPALIVE): 20ms silence-fill timer + the ts of the
+	// last REAL inbound frame, so we only fill gaps, never step on live audio.
+	silenceKeepaliveHandle?: NodeJS.Timeout;
+	lastInboundAudioAt?: number;
+	// Safety-net against silent unlinkSync failures — `name -> first-seen ms`,
+	// pruned at 60s/tick so it can't grow unbounded for long calls.
+	channelScanSeen?: Map<string, number>;
 }
 
 const activeCalls = new Map<string, CallSession>();
@@ -301,7 +395,15 @@ function tryFastPath(callSession: CallSession, task: string): Promise<unknown> |
 			const image = execSync('ls -t /tmp/discord-inbox/*.jpg /tmp/discord-inbox/*.png 2>/dev/null | head -1', { timeout: 3000 }).toString().trim();
 			const video = execSync('ls -t /tmp/sutando-recording-*-narrated-subtitled.mov /tmp/sutando-recording-*-narrated.mov /tmp/sutando-recording-*.mov 2>/dev/null | head -1', { timeout: 3000 }).toString().trim();
 			if (image && video) {
-				const result = execSync(`bash ~/.claude/skills/video-concat/scripts/prepend-image.sh "${image}" "${video}" 3`, { timeout: 60000 }).toString().trim();
+				// Defense-in-depth: even after discord-bridge sanitizes
+				// inbound attachment filenames, use execFileSync so the
+				// path strings are argv entries, not shell-spliced.
+				// Pre-fix: a filename like `x"; touch /tmp/pwn; #.jpg`
+				// from a Discord attachment would break out of the
+				// double-quoted shell argument and execute the injected
+				// command.
+				const scriptPath = `${process.env.HOME}/.claude/skills/video-concat/scripts/prepend-image.sh`;
+				const result = execFileSync('bash', [scriptPath, image, video, '3'], { timeout: 60000 }).toString().trim();
 				const parsed = JSON.parse(result);
 				callSession.pendingTasks++;
 				setTimeout(() => {
@@ -351,6 +453,13 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 		if (callSession.hangingUp || !activeCalls.has(callSession.callSid)) {
 			clearInterval(poll);
 			callSession.pendingTasks = Math.max(0, callSession.pendingTasks - 1);
+			// Call ended before the result came back — archive the task file
+			// anyway so it doesn't linger in tasks/. The result-watcher in
+			// task-bridge.ts will pick up + archive `results/<task_id>.txt`
+			// independently if the core finishes the work later.
+			// (Per VasiliyRad's review on #1237 — closes the leak in the
+			// hang-up / call-not-active branch.)
+			archivePhoneFile(taskPath, 'tasks', taskId);
 			return;
 		}
 		if (existsSync(resultPath)) {
@@ -359,20 +468,39 @@ function delegateTask(callSession: CallSession, taskDescription: string): Promis
 			const result = readFileSync(resultPath, 'utf-8').trim();
 			console.log(`${ts()} [Task] result for ${taskId} (${Date.now() - startTime}ms): ${result.slice(0, 200)}`);
 			callSession.events.push({ event: `task_result:${taskId}:${Date.now() - startTime}ms`, timestamp: new Date().toISOString() });
-			try { unlinkSync(resultPath); } catch {}
+			// Archive both the result + task files so phone surfaces match the
+			// task-bridge.ts archiveFile() audit-trail pattern (#1235).
+			archivePhoneFile(resultPath, 'results', taskId);
+			archivePhoneFile(taskPath, 'tasks', taskId);
 			// Cache result so duplicate requests get instant replay
 			if (!callSession.taskResultCache) callSession.taskResultCache = new Map();
 			callSession.taskResultCache.set(taskDescription, result);
+			// Anti-hallucination wrapping. See sonichi/sutando#1244 — Gemini
+			// was filling silence with plausible-sounding fabrications when
+			// the work tool returned empty/sparse content. Two layers:
+			// (1) a RESULT_EMPTY sentinel on truly-empty results so the model
+			// has an explicit "say nothing" signal instead of an empty string
+			// it can pattern-fill; (2) an explicit "items present verbatim"
+			// guardrail on every result.
+			const isEmpty = result.length === 0;
+			const injectedText = isEmpty
+				? `[Task result for "${taskDescription}"]\nRESULT_EMPTY — the tool returned no items.\n\nTell the caller plainly that there is nothing to report (e.g. "nothing scheduled", "your inbox is empty", "no matches"). Do NOT invent, guess, or extrapolate any items. Use only the literal RESULT_EMPTY signal.`
+				: `[Task result for "${taskDescription}"]\n${result}\n\nReport this result to the caller now. Only reference items that appear verbatim in the result above — do NOT invent, fabricate, or extrapolate items that aren't there.`;
 			// Queue result — will be injected on next turn.end to avoid interrupting speech
-			callSession.resultQueue.push({
-				text: `[Task result for "${taskDescription}"]\n${result}\n\nReport this result to the caller now.`,
-			});
+			callSession.resultQueue.push({ text: injectedText });
 			return;
 		}
 		if (Date.now() - startTime > POLL_TIMEOUT_MS) {
 			clearInterval(poll);
 			callSession.pendingTasks = Math.max(0, callSession.pendingTasks - 1);
 			console.log(`${ts()} [Task] timeout for ${taskId}`);
+			// Archive the task file even on timeout — the work may still complete
+			// async on the core side, but the call's polling window is closed.
+			// Don't archive the result file here: if it eventually lands, the
+			// canonical result-watcher in src/task-bridge.ts will archive it
+			// via its own archiveFile() call. (Per liususan091219's #1237
+			// review — avoids redundant result-archive logic here.)
+			archivePhoneFile(taskPath, 'tasks', taskId);
 			try {
 				(callSession.voiceSession as any).transport.sendContent([
 					{ role: 'user', text: `[Task "${taskDescription}" timed out — still being worked on. Let the caller know.]` },
@@ -478,6 +606,14 @@ function buildAgent(callSession: CallSession): MainAgent {
 				'',
 				'## Known info',
 				(() => { try { const url = execSync('git remote get-url origin', { timeout: 2_000 }).toString().trim().replace(/\.git$/, ''); return `Sutando GitHub repo: ${url}`; } catch { return ''; } })(),
+				ownerLocalDateContext(),
+				// Session-level anti-hallucination backstop (cherry-picked from
+				// bassilkhilo-ag2's parallel PR #1249). Pre-warms the model
+				// with the constraint at session-open so the rule is in scope
+				// BEFORE any result-injection wrapper lands. Combined with the
+				// per-result wrapper below at conversation-server.ts:405, the
+				// model gets the rule twice: at boot and at delivery.
+				'TOOL RESULT TRUTHFULNESS: When a work task result is empty or says nothing was found, you MUST say "nothing scheduled" or "nothing found" — never invent, guess, or fill with plausible-sounding calendar events, emails, or other items. Fabricated events mislead the owner and are worse than silence.',
 				'',
 				'## Style',
 				'Be natural, warm, and conversational. Keep responses to 1-2 sentences.',
@@ -488,9 +624,17 @@ function buildAgent(callSession: CallSession): MainAgent {
 		instructions = instructions.filter(Boolean).join('\n');
 	}
 
-	// Grounding
+	// Grounding. The "look it up" pointer is conditional on per-surface
+	// config: native Web search when googleSearch is enabled (~2-3s, answer
+	// in conversation), `work` tool otherwise (round-trip ~8-15s). Earlier
+	// versions had a permanent "use work" line + a soft nudge toward native
+	// search — the model read the first as imperative and the nudge as
+	// optional, so it kept delegating even with search on. One conditional
+	// line so only one path is presented per config.
 	if (callSession.isOwner) {
-		instructions += '\n\nNEVER fabricate specific details. If you don\'t know it, use the work tool to look it up.';
+		instructions += PHONE_GOOGLE_SEARCH
+			? '\n\nNEVER fabricate specific details. If you don\'t know it, use your built-in Web search to look it up — it\'s faster than delegating, and the answer stays in the conversation. If your built-in search returns nothing useful, OR the question needs deeper-than-one-lookup research (multi-step, multiple sources, file reading), call the work tool — it routes to the core agent which can do extensive research.'
+			: '\n\nNEVER fabricate specific details. If you don\'t know it, use the work tool to look it up.';
 	}
 
 	const tools: ToolDefinition[] = [];
@@ -650,7 +794,7 @@ function buildAgent(callSession: CallSession): MainAgent {
 		name: 'phone',
 		instructions,
 		tools,
-		googleSearch: true,
+		googleSearch: PHONE_GOOGLE_SEARCH,
 		// Greeting is injected as role:"user" by bodhi to trigger Gemini to speak.
 		// Use directive prefix so Gemini speaks the text verbatim instead of responding to it.
 		greeting: callSession.isMeeting
@@ -720,7 +864,7 @@ async function createCallSession(params: {
 		host: '127.0.0.1',
 		model: subagentModel,
 		geminiModel: VOICE_NATIVE_AUDIO_MODEL,
-		googleSearch: true,
+		googleSearch: PHONE_GOOGLE_SEARCH,
 		speechConfig: { voiceName: 'Aoede' },
 		hooks: {
 			onToolCall: (e) => {
@@ -729,14 +873,21 @@ async function createCallSession(params: {
 				// bodhi's onToolResult only provides toolCallId, not toolName.
 				if (!callSession._toolIdMap) callSession._toolIdMap = new Map();
 				callSession._toolIdMap.set(e.toolCallId, e.toolName);
-				callSession.events.push({ event: `tool_call:${e.toolName}`, timestamp: new Date().toISOString() });
+				// tool_call event push removed per #1052 — canonical record is
+				// the phone-table row written in onToolResult via recordToolCall().
 			},
 			onToolResult: (e) => {
 				// Resolve tool name from the map since e.toolName is undefined in onToolResult
 				const toolName = callSession._toolIdMap?.get(e.toolCallId) || 'unknown';
 				console.log(`${ts()} [Tool] result: ${toolName} (${e.status}, ${e.durationMs}ms)`);
 				callSession.toolCalls.push({ name: toolName, durationMs: e.durationMs, timestamp: new Date().toISOString() });
-				callSession.events.push({ event: `tool_result:${toolName}:${e.durationMs}ms`, timestamp: new Date().toISOString() });
+				// tool_result event push removed per #1052 — recordToolCall
+				// below is the canonical write (phone table, kind='tool_call').
+				// Phone tool_call rows must key on callSid (same as recordConversation
+				// at the user/agent write below) — CallSession has no `sessionId` field,
+				// so the old `callSession.sessionId` wrote NULL and diagnose.py's
+				// `session_id OR call_sid` loader could never join them (Echo, #1357 review).
+				recordToolCall('phone', toolName, e.durationMs, callSession.callSid);
 				// Log REC indicator status for recording tools
 				if (toolName === 'record_screen_with_narration' || toolName === 'screen_record' || toolName === 'open_file') {
 					const hasIndicator = existsSync('/tmp/sutando-rec-indicator.pid');
@@ -823,14 +974,21 @@ async function createCallSession(params: {
 			if (item.content === lastTranscriptText) continue;
 			if (item.role === 'user') {
 				callSession.transcript.push({ role: 'caller', text: item.content });
-				// 12s offset: Gemini STT commits transcript ~12s after the caller actually spoke
-				// (measured via iPad recording comparison on 2026-04-09). Without this, caller
-				// timestamps appear after Sutando's responses in the observability timeline.
-				callSession.events.push({ event: `caller:${item.content}`, timestamp: new Date(Date.now() - 12000).toISOString() });
+					// Real-time sqlite mirror so the phone table gets a per-utterance
+					// timestamp (was batch-written at cleanup -> every phone row had the
+					// end-of-call ts, breaking diagnose.py's timeline ordering; #1357 review
+					// -- Echo). The dedup guard above (item.content === lastTranscriptText)
+					// prevents double-writes across reconnects.
+					recordConversation('phone-caller', item.content, callSession.callSid);
+				// caller event push removed per #1052 — canonical record is
+				// the phone-table row written via recordConversation (called
+				// elsewhere in this server). session_events keeps only
+				// lifecycle entries to stop triple-encoding utterances.
 				try { appendFileSync(`/tmp/sutando-live-transcript-${callSession.callSid}.txt`, `[${new Date(Date.now() - 12000).toLocaleTimeString('en-US', {hour12:false})}] Caller: ${item.content}\n`); } catch {}
 			} else if (item.role === 'assistant') {
 				callSession.transcript.push({ role: 'sutando', text: item.content });
-				callSession.events.push({ event: `sutando:${item.content}`, timestamp: new Date().toISOString() });
+					recordConversation('phone-agent', item.content, callSession.callSid);
+				// sutando event push removed per #1052 — see comment above.
 				try { appendFileSync(`/tmp/sutando-live-transcript-${callSession.callSid}.txt`, `[${new Date().toLocaleTimeString('en-US', {hour12:false})}] Sutando: ${item.content}\n`); } catch {}
 			}
 		}
@@ -852,6 +1010,18 @@ async function createCallSession(params: {
 			}
 		}
 	});
+
+	// VAD keepalive — backfill inbound-audio gaps with 20ms silence so Gemini's
+	// server VAD keeps re-arming between turns (see PHONE_VAD_KEEPALIVE note).
+	// Real frames update lastInboundAudioAt in the media handler and take
+	// precedence; this only fires during quiet. Cleared in cleanupCall.
+	if (PHONE_VAD_KEEPALIVE) {
+		callSession.lastInboundAudioAt = Date.now();
+		callSession.silenceKeepaliveHandle = setInterval(() => {
+			if (Date.now() - (callSession.lastInboundAudioAt ?? 0) < 25) return; // live audio already dense
+			try { (callSession.voiceSession as any).handleAudioFromClient(SILENCE_FRAME_16K); } catch {}
+		}, 20);
+	}
 
 	// Trigger client connected (so VoiceSession sends greeting and starts Gemini)
 	sessionAny.handleClientConnected();
@@ -906,6 +1076,71 @@ async function createCallSession(params: {
 		import('../../../skills/screen-record/scripts/narration-tee.js').then(m => m.cleanup()).catch(() => {});
 	};
 
+	// --- Per-call pull path for non-delegated task results -----------------
+	// Regular `work`-tool delegations land at `results/task-phone-*.txt` and
+	// are claimed by the per-task poll in delegateTask(). This separate scan
+	// picks up the scoped namespace `results/<callSid>.task-*.txt` — used
+	// when the core agent (or another tool) needs to deliver a result to THIS
+	// specific call without having delegated through the work tool. Existing
+	// consumers' patterns don't match the `<callSid>.` prefix, so a file in
+	// this namespace is invisible to them — only this scan and the matching
+	// discord-voice scan claim it.
+	//
+	// Scoped by callSid so different concurrent calls never cross — a
+	// parent-call result can't land in the child call's session and vice
+	// versa. Cadence is 3s (cross-surface handoffs, not turn-taking). Read-
+	// and-delete mirrors delegateTask()'s fail-soft style.
+	callSession.channelScanSeen = new Map();
+	const CHANNEL_SCAN_TTL_MS = 60_000;
+	callSession.channelScanHandle = setInterval(() => {
+		if (callSession.hangingUp || !activeCalls.has(callSession.callSid)) return;
+		// Prune entries older than the TTL so the map doesn't grow unbounded
+		// during long calls.
+		const cutoff = Date.now() - CHANNEL_SCAN_TTL_MS;
+		for (const [k, ts0] of callSession.channelScanSeen!) {
+			if (ts0 < cutoff) callSession.channelScanSeen!.delete(k);
+		}
+		let entries: string[];
+		try {
+			entries = readdirSync(RESULTS_DIR);
+		} catch {
+			return;
+		}
+		for (const name of entries) {
+			// .txt guard — never touch a writer's atomic-write temp
+			// (`<callSid>.task-X.txt.tmp`, `.sending`, `.partial`, etc).
+			// Belt-and-suspenders: `resultBelongsTo` also gates on .txt.
+			if (!name.endsWith('.txt')) continue;
+			if (callSession.channelScanSeen!.has(name)) continue;
+			// Typed key constructor — keeps writer + consumer in sync on
+			// the `phone-` prefix; prevents cross-consumer namespace collisions.
+			if (!resultBelongsTo(name, phoneCallKey(callSession.callSid))) continue;
+			callSession.channelScanSeen!.set(name, Date.now());
+			const full = join(RESULTS_DIR, name);
+			let body: string;
+			try {
+				body = readFileSync(full, 'utf-8').trim();
+			} catch {
+				continue;
+			}
+			if (!body) {
+				try { unlinkSync(full); } catch {}
+				continue;
+			}
+			console.log(`${ts()} [ChannelScan] picked up ${name} for ${callSession.callSid} (${body.length}B)`);
+			callSession.events.push({ event: `channel_result:${name}`, timestamp: new Date().toISOString() });
+			try {
+				(callSession.voiceSession as any).transport.sendContent(
+					[{ role: 'user', text: `[Channel result]\n${body}\n\nReport this result to the caller now.` }],
+					true,
+				);
+			} catch (e) {
+				console.log(`${ts()} [ChannelScan] inject failed for ${name}: ${e}`);
+			}
+			try { unlinkSync(full); } catch {}
+		}
+	}, 3000);
+
 	return callSession;
 }
 
@@ -921,6 +1156,8 @@ function cleanupCall(callSid: string): void {
 
 	import('../../../src/browser-tools.js').then(bt => bt.onCallEnd()).catch(() => {});
 	session.cleanupNarration?.();
+	try { if (session.channelScanHandle) clearInterval(session.channelScanHandle); } catch {}
+	try { if (session.silenceKeepaliveHandle) clearInterval(session.silenceKeepaliveHandle); } catch {}
 	try { unlinkSync('/tmp/sutando-playback-pause'); } catch {}
 	try { unlinkSync('/tmp/sutando-playback-path'); } catch {}
 
@@ -954,13 +1191,17 @@ function cleanupCall(callSid: string): void {
 	// Append to shared conversation.log + sqlite mirror for cross-agent context
 	if (session.transcript.length > 0) {
 		const logPath = join(WORKSPACE_DIR, 'conversation.log');
+		// The workspace root is created by init.sh, but a service started outside
+		// that path (e.g. a direct `tsx` run) may hit this write first — ensure it.
+		mkdirSync(WORKSPACE_DIR, { recursive: true });
 		const callType = session.meetingId ? `meeting-${session.meetingId}` : `call-${session.callerNumber || 'unknown'}`;
 		for (const t of session.transcript) {
 			const role = t.role === 'sutando' ? 'phone-agent' : 'phone-caller';
 			const text = `[${callType}] ${t.text.replace(/\n/g, ' ').slice(0, 200)}`;
 			const line = `${new Date().toISOString()}|${role}|${text}\n`;
 			try { appendFileSync(logPath, line); } catch { /* best effort */ }
-			recordConversation(role, text, callSid); // #603 sqlite mirror
+			// recordConversation moved to the real-time turn handler (#1357 review -- Echo);
+			// cleanup only mirrors to conversation.log to avoid duplicate phone-table rows.
 		}
 	}
 	console.log(`${ts()} [Phone] call finalized: ${callSid}`);
@@ -1444,8 +1685,20 @@ const server = createServer(async (req, res) => {
 			const dialIn = body.dialIn ?? '+12532158782';
 			const digits = body.meetingId.replace(/\D/g, '');
 			const passcode = body.passcode?.replace(/\D/g, '') ?? '';
-			const platform = (body.platform ?? 'zoom').toLowerCase(); // 'zoom' | 'meet' | 'teams'
-			const originalId = body.meetingId.trim();
+			// `platform` is user-controlled (Gemini tool argument). The
+			// pre-fix `.toLowerCase()` did NOT strip newlines, so a value
+			// like `"zoom\nchannel_id: local-voice"` would survive into
+			// the task-file template literal below and forge a
+			// `_isVoiceTask` match. Same shape as the agent-api /task
+			// injection (PR #982). Strip CR/LF at the source.
+			const platform = (body.platform ?? 'zoom').toLowerCase().replace(/[\r\n]/g, ' ').trim();
+			// Same rationale for `originalId` — it survives untouched
+			// from `body.meetingId.trim()` and lands in the multi-line
+			// `task:` field of the task-file template literal below.
+			// Multi-line meeting IDs aren't meaningful; flatten to
+			// spaces and cap to a reasonable length to bound abuse via
+			// oversized inputs.
+			const originalId = body.meetingId.trim().replace(/[\r\n]/g, ' ').slice(0, 80);
 			const connectUrl = `${WEBHOOK_BASE_URL}/twilio/connect?meeting=true&meetingId=${encodeURIComponent(originalId)}&passcode=${encodeURIComponent(passcode)}`;
 
 			let sid: string;
@@ -1701,6 +1954,7 @@ wss.on('connection', (ws: WebSocket) => {
 
 					try {
 						(callSession.voiceSession as any).handleAudioFromClient(pcm16k);
+						callSession.lastInboundAudioAt = Date.now(); // real frame → suppress silence fill this window
 					} catch (e) {
 						if (mediaEventCount % 100 === 0) {
 							console.error(`${ts()} [WS] handleAudioFromClient error:`, e);
@@ -1774,6 +2028,62 @@ wss.on('connection', (ws: WebSocket) => {
 
 // --- Startup ---
 
+// Point the Twilio number's inbound Voice webhook at our current tunnel.
+// Inbound calls hit the number's VoiceUrl; without this the user had to
+// paste the tunnel URL into the Twilio console by hand — AND re-paste it on
+// every reboot, because ngrok hands out a new random URL each start. We
+// already hold the account creds, so set it via the REST API on every boot:
+// the webhook is always current and the manual console step disappears.
+// Best-effort — a failure logs the manual fallback and does NOT stop the
+// server. Opt out with TWILIO_AUTO_WEBHOOK=0 (e.g. number managed elsewhere).
+async function syncTwilioWebhook(): Promise<void> {
+	const voiceUrl = `${WEBHOOK_BASE_URL}/twilio/connect`;
+	const statusUrl = `${WEBHOOK_BASE_URL}/twilio/status`;
+	if (process.env.TWILIO_AUTO_WEBHOOK === '0') {
+		console.log(`${ts()} [Webhook] auto-config disabled (TWILIO_AUTO_WEBHOOK=0) — set the Voice webhook to ${voiceUrl} manually`);
+		return;
+	}
+	const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+	const headers = { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' };
+	const base = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers`;
+	try {
+		// The update API keys off the number's SID, not its E.164 — look it up.
+		const listUrl = `${base}.json?${new URLSearchParams({ PhoneNumber: TWILIO_PHONE_NUMBER }).toString()}`;
+		const listRes = await fetch(listUrl, { headers });
+		if (!listRes.ok) throw new Error(`lookup ${listRes.status}: ${(await listRes.text()).slice(0, 160)}`);
+		const list = (await listRes.json()) as { incoming_phone_numbers?: Array<{ sid: string; voice_url?: string }> };
+		const num = list.incoming_phone_numbers?.[0];
+		if (!num?.sid) {
+			console.warn(`${ts()} [Webhook] configured number not found on this Twilio account — set the Voice webhook to ${voiceUrl} manually`);
+			return;
+		}
+		if (num.voice_url === voiceUrl) {
+			console.log(`${ts()} [Webhook] Twilio Voice webhook already current → ${voiceUrl}`);
+			return;
+		}
+		const updRes = await fetch(`${base}/${num.sid}.json`, {
+			method: 'POST',
+			body: new URLSearchParams({
+				VoiceUrl: voiceUrl, VoiceMethod: 'POST',
+				StatusCallback: statusUrl, StatusCallbackMethod: 'POST',
+			}).toString(),
+			headers,
+		});
+		if (!updRes.ok) throw new Error(`update ${updRes.status}: ${(await updRes.text()).slice(0, 160)}`);
+		console.log(`${ts()} [Webhook] Twilio Voice webhook set → ${voiceUrl}`);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.warn(`${ts()} [Webhook] auto-config failed (${msg}) — set the Voice webhook to ${voiceUrl} manually in the Twilio console`);
+		try {
+			cloudRecordError({
+				kind: 'phone.webhook_sync_failed',
+				severity: 'warn',
+				message: `Twilio webhook auto-config failed: ${msg}`,
+			});
+		} catch {}
+	}
+}
+
 async function start(): Promise<void> {
 	killPortOccupant(PORT);
 	await new Promise<void>(resolve => server.listen(PORT, '0.0.0.0', resolve));
@@ -1788,6 +2098,11 @@ async function start(): Promise<void> {
 		} else {
 			WEBHOOK_BASE_URL = await startNgrokCli(PORT);
 		}
+
+		// Point the Twilio number at this tunnel so inbound calls reach us —
+		// removes the manual console step and self-heals ngrok's per-reboot URL.
+		await syncTwilioWebhook();
+
 		console.log(`\n╔════════════════════════════════════════════════════╗`);
 		console.log(`║  Phone Server (bodhi VoiceSession)                 ║`);
 		console.log(`╠════════════════════════════════════════════════════╣`);

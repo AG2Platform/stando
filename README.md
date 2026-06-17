@@ -20,20 +20,13 @@ https://github.com/user-attachments/assets/a86ec34e-3b26-4011-824c-d2d124753c25
 
 ---
 
-## 🎬 Recent autonomous output
+## Sutando in action
 
 **Sutando WIRE** — Sutando reads the news, drafts the script, generates narration, renders the video. No editor, no animator, no narration session.
 - [Declassified, Debunked, Unexplained: 3 Pentagon UAP Files in 40 Seconds](https://youtu.be/eBvHemYhc2o) — ep002
 - [162 UAP Files Just Declassified. The Pentagon's Apollo 17 Photo](https://youtu.be/JoltTj3x410) — ep001
 
 [@sutando-ai channel](https://www.youtube.com/@sutando-ai) · [Sutando WIRE playlist](https://www.youtube.com/playlist?list=PLoEaHbP1bU5FDWAyeLDL9J9i7Iblp3_m_)
-
-**Recent capability proofs:**
-- [An AI agent caught a bug humans missed — phantom voice sessions, found via anomaly detection](https://youtu.be/FeLfufsMJpY)
-- [42 Days of Sutando — a fleet-growth visualization](https://youtu.be/t2SQqR07T3c)
-- [The AI agent that presented live](https://youtu.be/tisE8YjmLdU)
-- [9-year-old planned her birthday party with AI agent — by voice](https://youtu.be/YuhWklKBP2Q)
-- [When one AI agent can't fix itself, it asks another — same owner or different](https://youtu.be/k_aNNEN_GAc)
 
 ---
 
@@ -201,7 +194,7 @@ These unlock more capabilities. Add to `.env` when ready:
 
 | Integration | What it unlocks | Setup |
 |-------------|----------------|-------|
-| Gmail | Read/send/search email from voice | `gws auth setup --login` (OAuth, no app password) |
+| Gmail | Read/send/search email from voice | `python3 skills/email-triage/scripts/connect-gmail.py` (OAuth, no app password; opens sign-in + verifies) |
 | Twilio + ngrok | Phone calls, SMS, meeting dial-in, task delegation via phone | [twilio.com](https://www.twilio.com) + `brew install ngrok` (see [Running costs](#running-costs)) |
 | Telegram | Message Sutando from your phone | [Create bot via @BotFather](https://t.me/BotFather), then `/telegram:configure <token>` |
 | Discord | Message Sutando from Discord (DM + channel @mentions) | [Developer portal](https://discord.com/developers), then `/discord:configure <token>` |
@@ -254,7 +247,6 @@ One table, organized by capability. The only required paid piece is your Claude 
 | Health monitoring | `health-check.py` | Verified |
 | Pattern detection + user modeling | Built into Claude Code memory system | Verified |
 | System dashboard | `dashboard.py` | Verified |
-| Cross-node sync (memory + notes between Macs) | `cross-node-sync` skill | Verified |
 | Info-radar (arXiv / GitHub / HN / news monitoring) | `info-radar` skill + daily digest | Verified |
 | Menu-bar avatar states (idle/listening/speaking/working) | `src/Sutando/main.swift` + `/sse-status` | Verified |
 

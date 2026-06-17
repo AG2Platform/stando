@@ -129,9 +129,12 @@ def main() -> int:
     tmp_sutando_file = tmp_sutando / "ok.txt"
     tmp_sutando_file.write_text("ok")
 
-    # Disallowed: a file outside any allowed root or prefix
-    not_allowed_dir = Path(tempfile.mkdtemp(prefix="other-not-sutando-"))
-    not_allowed_file = not_allowed_dir / "secret.txt"
+    # Disallowed: a real file outside any allowed root or prefix. Lives at
+    # the $HOME root (NOT a temp dir) because /tmp + /private/tmp are now
+    # broadly allowed (feedback 2033745d) — a tempfile-default path would
+    # land in /tmp on Linux / /var/folders on macOS and no longer count as
+    # "disallowed". Cleaned up at the end of main().
+    not_allowed_file = Path.home() / "sutando-disallowed-allowlist-test-DELETEME.txt"
     not_allowed_file.write_text("secret")
 
     cases = [
@@ -173,6 +176,13 @@ def main() -> int:
                 symlink_path.unlink()
             except FileNotFoundError:
                 pass
+
+    # Clean up the $HOME-root disallowed fixture so local runs don't leave
+    # cruft in the user's home dir.
+    try:
+        not_allowed_file.unlink()
+    except FileNotFoundError:
+        pass
 
     if failed:
         print(f"\nFAIL: {failed} case(s) failed", file=sys.stderr)

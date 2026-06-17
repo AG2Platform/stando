@@ -31,13 +31,17 @@ tags: [ideas, projects, voice]
 Content here...
 ```
 
-**Email (Gmail)** — use the `gws-gmail` skill (OAuth, no app password needed):
+**Email (Gmail)** — use the `email-triage` skill (OAuth, no app password needed). Connect/verify first; the helper drives the sign-in to completion and verifies it (don't ask the user to "confirm on your end"):
 ```bash
+python3 skills/email-triage/scripts/connect-gmail.py --check  # verify connection (exit 0 = connected)
+python3 skills/email-triage/scripts/connect-gmail.py          # not connected → drive sign-in + verify
 gws gmail +send --to "to@x.com" --subject "subj" --body "body"
 gws gmail +triage                               # unread inbox summary
 gws gmail +read <messageId>                     # read a message
 gws gmail users messages list --params 'q=keyword'  # search
 ```
+
+**Finding a specific email** — when the obvious query fails, invoke `/email-find <description>`. Broad-before-narrow playbook (full-inbox scan → partner-domain fanout → thread re-walk) that refuses to give up after one or two failed queries. See `skills/email-find/SKILL.md` for the workflow and rules around subject-mismatch + `get_thread` truncation. Per-user partner-domain mappings live in your own memory (the skill describes the file format).
 
 **Contacts** — look up people by name or email:
 ```bash
@@ -118,9 +122,9 @@ mdfind "kMDItemKind == 'PDF'" -onlyin ~/Documents  # by file type in a folder
 
 **Meeting join** — join Zoom or Google Meet with computer audio:
 ```bash
-npx tsx -e "import 'dotenv/config'; import { joinZoomTool } from './src/inline-tools.ts'; joinZoomTool.execute({}, null).then(r => console.log(JSON.stringify(r)))"
+npx tsx -e "import 'dotenv/config'; import { joinZoomTool } from './skills/zoom/tools.ts'; joinZoomTool.execute({}, null).then(r => console.log(JSON.stringify(r)))"
 npx tsx -e "import 'dotenv/config'; import { joinGmeetTool } from './src/inline-tools.ts'; joinGmeetTool.execute({ meetingCode: 'abc-defg-hij' }, null).then(r => console.log(JSON.stringify(r)))"
-npx tsx -e "import 'dotenv/config'; import { summonTool } from './src/inline-tools.ts'; summonTool.execute({}, null).then(r => console.log(JSON.stringify(r)))"
+npx tsx -e "import 'dotenv/config'; import { summonTool } from './skills/zoom/tools.ts'; summonTool.execute({}, null).then(r => console.log(JSON.stringify(r)))"
 ```
 - `joinZoomTool` — Zoom desktop app + computer audio (no screen share)
 - `joinGmeetTool` — Chrome browser + computer audio + camera off

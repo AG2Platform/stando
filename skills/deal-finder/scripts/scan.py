@@ -12,6 +12,11 @@ Notifies on the first sight of any listing matching criteria.json:
 - SMS via Twilio REST (TWILIO_* + OWNER_NUMBER from .env)
 - Telegram via results/proactive-{ts}.txt (telegram-bridge picks it up)
 """
+# The `int | None` / `str | None` (PEP 604) return annotations below are
+# evaluated at def time, which raises TypeError on Python 3.9. Defer all
+# annotation evaluation so the module loads cleanly on 3.9+.
+from __future__ import annotations
+
 import argparse
 import collections
 import datetime as dt
@@ -353,6 +358,18 @@ def main():
         return
     criteria = json.loads(CRITERIA_PATH.read_text())
 
+    # ZIP is the search origin, NOT the user's home location. It ships empty so
+    # a fresh install can't be mistaken for living in the sample area (feedback
+    # fb79f790 — agent had read this skill's old hard-coded 94566 and reported
+    # the user as living in California). Refuse to scan until it's configured.
+    if not str(criteria.get("zip", "")).strip():
+        print(
+            "deal-finder: no search ZIP configured. Set \"zip\" in "
+            f"{CRITERIA_PATH} to the postal code you want to search near.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     if args.reset:
         SEEN_PATH.write_text(json.dumps({"urls": []}))
         print("Cleared seen.json")
@@ -383,7 +400,7 @@ def main():
     if args.verbose:
         print(f"Found {len(listings)} listings on page")
 
-    now = dt.datetime.now(dt.UTC).replace(tzinfo=None)
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
     matches = 0
     new_urls = []
     for li in listings:

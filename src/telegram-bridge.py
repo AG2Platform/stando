@@ -29,6 +29,8 @@ from task_priority import default_priority_for_source  # noqa: E402
 from result_markers import parse_markers  # noqa: E402
 
 from workspace_default import resolve_workspace  # noqa: E402
+from task_archive import find_task_file  # noqa: E402
+from single_instance import acquire as _single_instance_acquire  # noqa: E402
 REPO = resolve_workspace()
 TASKS_DIR = REPO / "tasks"
 RESULTS_DIR = REPO / "results"
@@ -85,17 +87,20 @@ def _cap_hit_reply_text(reason: str | None) -> str:
     )
 
 # Allowlist for paths that may be sent via Telegram [file: /path] markers.
-# Mirrors _is_path_sendable() in discord-bridge.py.
+# Mirrors src/send_allowlist.py (the shared discord/dm-result source).
 SEND_ALLOWED_ROOTS = (
     str(REPO / "results"),
     str(REPO / "notes"),
     str(REPO / "docs"),
+    str(REPO / "data"),
 )
+# Broadened from the /tmp/sutando- prefixes to all of /tmp so ad-hoc
+# working files (e.g. /tmp/report.xlsx) are sendable — feedback 2033745d.
+# Both forms listed: macOS realpath collapses /tmp → /private/tmp, Linux
+# keeps /tmp. Mirrors src/send_allowlist.py.
 SEND_ALLOWED_PREFIXES = (
-    "/tmp/sutando-",
-    "/private/tmp/sutando-",
-    "/tmp/echo-",
-    "/private/tmp/echo-",
+    "/tmp/",
+    "/private/tmp/",
 )
 
 
@@ -310,11 +315,11 @@ def _resolve_proactive_owner_id(env_override: str | None, access_data: dict) -> 
         None,
     )
     if tier_owner is not None:
-        return tier_owner
+        return str(tier_owner)
     tofu_owner = access_data.get("tofuOwner")
     if tofu_owner is not None and tofu_owner in allow_list:
-        return tofu_owner
-    return allow_list[0]
+        return str(tofu_owner)
+    return str(allow_list[0])
 
 
 def tofu_onboard(sender_id, username):
@@ -415,7 +420,7 @@ def send_file(chat_id, file_path, caption=""):
         print(f"  Send file failed: {e}")
         return {"ok": False}
 
-def send_reply(chat_id, text):
+def send_reply(chat_id, text, task_id: str | None = None):
     import re
     # Extract file paths: [file: /path/to/file] or [send: /path/to/file]
     file_pattern = re.compile(r'\[(?:file|send|attach):\s*([^\]]+)\]')
@@ -426,6 +431,22 @@ def send_reply(chat_id, text):
     if clean_text:
         for i in range(0, len(clean_text), 4000):
             api("sendMessage", chat_id=chat_id, text=clean_text[i:i+4000])
+        # Record to outbox audit log so the dashboard's Outbox card
+        # can surface the delivery. Best-effort: any failure here must
+        # NOT block the reply or its downstream archival (telemetry is
+        # never load-bearing). Ported in Phase 5.17 of the OSS → private
+        # sync — Phase 5.15 added the reader, Phase 5.16 added discord
+        # writes, this closes bridge-family symmetry.
+        try:
+            import outbox_log
+            outbox_log.append(
+                channel_type="telegram",
+                recipient=str(chat_id),
+                body=clean_text,
+                task_id=task_id,
+            )
+        except Exception:
+            pass
 
     # Send files (allowlist-gated; see _is_path_sendable)
     for fpath in files:
@@ -454,8 +475,65 @@ def send_reply(chat_id, text):
             },
         )
 
+def _recover_orphan_sending_files() -> int:
+    """Restart-safety: rename any orphan `results/proactive-*.sending`
+    files back to `*.txt` so they get re-claimed on the next poll.
+    Returns the number of files recovered.
+
+    Atomic-claim-by-rename (`proactive-*.txt` → `.sending`) prevents
+    same-tick double-deliveries between concurrent poll iterations.
+    But if the bridge crashes BETWEEN the rename and the delivery,
+    the `.sending` file sits orphaned in `results/` — no poll
+    iteration ever looks at `.sending` suffixes, so the owner
+    notification is silently dropped until next manual intervention.
+
+    This function runs on startup to bring orphans back into the
+    polling stream. Idempotent: a second call sees no `.sending`
+    files and is a no-op. Fail-open: any per-file error is logged
+    but doesn't block the bridge from starting.
+
+    Mirrors `_recover_orphan_sending_files` in `discord-bridge.py`
+    so the same bug class is closed on both proactive-delivery
+    surfaces; ported in Phase 5.11 of the OSS→private sync.
+    """
+    if not RESULTS_DIR.exists():
+        return 0
+    recovered = 0
+    for f in RESULTS_DIR.iterdir():
+        if not (f.name.startswith("proactive-") and f.suffix == ".sending"):
+            continue
+        target = f.with_suffix(".txt")
+        try:
+            # Don't clobber a same-named .txt that somehow re-appeared
+            # (e.g. an operator manually re-dropped the file). The
+            # atomic-claim invariant guarantees they don't normally
+            # coexist, but be defensive on startup.
+            if target.exists():
+                print(
+                    f"  [startup] skipping orphan recovery: {target.name} "
+                    f"already exists (collision with {f.name})",
+                    flush=True,
+                )
+                continue
+            f.rename(target)
+            recovered += 1
+            print(f"  [startup] recovered orphan {f.name} → {target.name}", flush=True)
+        except FileNotFoundError:
+            # Lost the race to another process; that's fine.
+            pass
+        except Exception as e:
+            print(f"  [startup] failed to recover {f.name}: {e}", flush=True)
+    if recovered:
+        print(f"  [startup] recovered {recovered} orphan .sending file(s)", flush=True)
+    return recovered
+
+
 def main():
+    _single_instance_acquire("telegram-bridge")
     print(f"Telegram bridge started. Polling for messages...", flush=True)
+    # Restart-safety: sweep orphan `.sending` files before the poll
+    # loop starts. See _recover_orphan_sending_files for rationale.
+    _recover_orphan_sending_files()
     offset = None
     allowed = load_allowed()
     pending_replies = {}  # task_id -> chat_id
@@ -584,6 +662,7 @@ def main():
                 task_file.write_text(
                     f"id: {task_id}\n"
                     f"timestamp: {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+                    f"local_time: {time.strftime('%A %Y-%m-%d %I:%M %p %Z', time.localtime())}\n"
                     f"task: [Telegram @{username}{forward_note}] {text}{attachment_note}\n"
                     f"source: telegram\n"
                     f"chat_id: {chat_id}\n"
@@ -617,8 +696,17 @@ def main():
                 not presenter_mode_active()
                 and should_claim_proactive(OWNER_ACTIVITY_FILE, "telegram")
             ):
+                # discord-bridge.poll_dm_fallback handles briefing-/insight-/
+                # friction-*.txt via FALLBACK_PREFIXES; telegram-bridge only
+                # matched `proactive-`, so morning-briefing output (which
+                # writes `results/briefing-{date}.txt` per the skill
+                # contract) was silently archived without reaching Telegram.
+                # Treat the same prefixes as proactive-equivalent so
+                # cron-originated results land in the owner's DM regardless
+                # of which bridge is the active channel.
+                PROACTIVE_PREFIXES = ("proactive-", "briefing-", "insight-", "friction-")
                 for f in RESULTS_DIR.iterdir():
-                    if f.name.startswith("proactive-") and f.suffix == ".txt":
+                    if any(f.name.startswith(p) for p in PROACTIVE_PREFIXES) and f.suffix == ".txt":
                         # Claim-by-rename: atomic move to a `.sending`
                         # suffix before reading, so a concurrent poll
                         # (same bridge, or a race with discord-bridge)
@@ -668,6 +756,13 @@ def main():
             result_file = RESULTS_DIR / f"{task_id}.txt"
             if result_file.exists():
                 reply_text = result_file.read_text().strip()
+                # feedback 77dc1b98: a shell-redirect (`> file`) creates the
+                # result file empty before the body flushes; reading mid-write
+                # and archiving below silently drops the reply. Skip empty
+                # reads for a short grace window (retry next poll), then fall
+                # through so a genuinely empty result still gets cleaned up.
+                if not reply_text and (time.time() - result_file.stat().st_mtime) < 2.0:
+                    continue
                 chat_id = pending_replies.pop(task_id)
                 # Parse markers via the unified module (#873). Telegram
                 # honors [no-send] / [REPLIED] / [deduped: <id>] as skip
@@ -678,17 +773,17 @@ def main():
                 if any(a.kind == "skip" for a in parsed.actions):
                     print(f"  Skipped (marker): {task_id}", flush=True)
                     archive_file(result_file, "results", task_id)
-                    task_file = TASKS_DIR / f"{task_id}.txt"
+                    task_file = find_task_file(TASKS_DIR, task_id) or TASKS_DIR / f"{task_id}.txt"
                     archive_file(task_file, "tasks", task_id)
                     continue
                 try:
-                    send_reply(chat_id, reply_text)
+                    send_reply(chat_id, reply_text, task_id=task_id)
                     print(f"  Replied to {chat_id}: {reply_text[:80]}...", flush=True)
                 except Exception as e:
                     print(f"[Telegram] Reply error: {e}", flush=True)
                 # Archive (not delete) so we can mine patterns later.
                 archive_file(result_file, "results", task_id)
-                task_file = TASKS_DIR / f"{task_id}.txt"
+                task_file = find_task_file(TASKS_DIR, task_id) or TASKS_DIR / f"{task_id}.txt"
                 archive_file(task_file, "tasks", task_id)
 
         time.sleep(1)

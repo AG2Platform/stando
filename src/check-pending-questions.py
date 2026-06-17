@@ -73,13 +73,32 @@ def voice_client_connected():
 
 def get_waiting_questions():
     """Parse pending-questions.md — matches both legacy `## Q1 — Title` and
-    the current `## Title` / `- **Status:** unanswered` format."""
+    the current `## Title` / `- **Status:** unanswered` format.
+
+    If a section has no explicit **Status:** marker, it is treated as
+    unanswered (the free-form prose format used in practice never writes
+    a status field; sections are deleted when resolved, not marked done).
+    Sections with an explicit status of "resolved" / "done" / "answered"
+    are skipped so the old structured format still works correctly.
+
+    Ported in Phase 5.19 of the OSS → private sync. Previously,
+    sections without a Status field were silently dropped from the
+    waiting list — meaning anyone who wrote a question in the
+    free-form prose style never received a notification.
+    """
     if not PQ_FILE.exists():
         return []
     content = PQ_FILE.read_text()
+    # Only the active region counts. Resolved questions are kept below a
+    # top-level "# Resolved" divider (audit trail), not deleted — without
+    # this cut the heading-agnostic split below sweeps the whole file and
+    # every resolved entry is miscounted as pending, re-notifying the owner
+    # about already-answered questions. No-op when there is no such divider.
+    content = re.split(r'^#\s+Resolved\b', content, maxsplit=1, flags=re.MULTILINE)[0]
     questions = []
     # Walk each ## section; a section is waiting if its body contains
-    # `Status: unanswered` or `Status: Waiting`.
+    # `Status: unanswered` or `Status: Waiting`, OR has no Status field
+    # at all (free-form prose sections are always unanswered by convention).
     sections = re.split(r'^## ', content, flags=re.MULTILINE)
     for sec in sections[1:]:  # skip pre-header
         title_line, _, body = sec.partition('\n')
@@ -87,11 +106,12 @@ def get_waiting_questions():
         if not title:
             continue
         status_m = re.search(r'\*\*Status:\*\*\s*(.+)', body)
-        if not status_m:
-            continue
-        status = status_m.group(1).strip().lower()
-        if status.startswith('unanswered') or status.startswith('waiting'):
-            questions.append({"id": title[:40], "title": title})
+        if status_m:
+            status = status_m.group(1).strip().lower()
+            if not (status.startswith('unanswered') or status.startswith('waiting')):
+                continue  # explicitly resolved/done/answered — skip
+        # No status field, or status is unanswered/waiting → notify
+        questions.append({"id": title[:40], "title": title})
     return questions
 
 

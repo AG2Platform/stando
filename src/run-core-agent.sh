@@ -80,6 +80,27 @@ for name in src skills node_modules package.json package-lock.json tsconfig.json
     fi
 done
 
+# Link any new skills into ~/.claude/skills/ before launching claude. Claude
+# Code loads skills by name at process start, so a skill added to the repo
+# (via upstream sync, skill-installer, or a manual add) stays invisible to the
+# core until it's symlinked — a footgun on every skill install (feedback
+# d920b18b). install.sh is idempotent (skips existing links, relinks broken
+# ones) and is the same linker startup.sh + the app installer already use, so
+# running it on every core (re)start safely picks up newly-added skills.
+if [ -f "$REPO_DIR/skills/install.sh" ]; then
+    bash "$REPO_DIR/skills/install.sh" >/dev/null 2>&1 || true
+fi
+
+# Seed the first-time tutorial into the user's notes/ if absent. The tutorial
+# flow (CLAUDE.md "## Tutorial") reads notes/first-time-tutorial.md, but the
+# file was never shipped, so "tutorial" did nothing (feedback 10b961d6).
+# Copy-if-absent so a user's own edits are preserved.
+TUTORIAL_SEED="$REPO_DIR/skills/startup/first-time-tutorial.md"
+if [ -f "$TUTORIAL_SEED" ] && [ ! -e "$WORKSPACE/notes/first-time-tutorial.md" ]; then
+    mkdir -p "$WORKSPACE/notes"
+    cp "$TUTORIAL_SEED" "$WORKSPACE/notes/first-time-tutorial.md"
+fi
+
 ts() { date "+%Y-%m-%dT%H:%M:%S%z"; }
 
 if ! command -v tmux >/dev/null 2>&1; then

@@ -94,10 +94,14 @@ def test_allowed_prefix_match():
 
 
 def test_disallowed_prefix_rejected():
-    """Files under `/tmp/other-*` are NOT in `SEND_ALLOWED_PREFIXES`.
-    Allowed prefixes are a deliberate small set; anything else fails."""
+    """A real file outside every allowed root/prefix must reject. Since
+    /tmp is now broadly allowed (feedback 2033745d), this fixture lives at
+    the $HOME root — which is NOT allowed (only ~/Desktop/iclr-backups and
+    ~/Documents/sutando-launch-assets are) — to keep the fail-closed
+    default under test."""
     with tempfile.NamedTemporaryFile(
-        prefix="other-not-sutando-", suffix=".txt", dir="/tmp", delete=False
+        prefix="sutando-disallowed-root-", suffix=".txt",
+        dir=str(Path.home()), delete=False
     ) as f:
         f.write(b"x")
         path = f.name
@@ -122,17 +126,14 @@ def test_symlink_pointing_outside_allowed_root_rejected():
     `_is_path_sendable` calls `realpath` before the prefix comparison
     precisely to defeat this. Regression guard for the original allowlist
     motivation (PR #494)."""
-    # Create a real file outside the allowlist
-    target = Path("/tmp/sutando-symlink-target-outside.txt")
-    target.write_text("secret")
-    # Create a symlink under an allowed prefix pointing at it
+    # Create a symlink under an allowed prefix (/tmp/sutando-) pointing at a
+    # real file outside every allowed root. Since /tmp is now broadly
+    # allowed (feedback 2033745d), the target lives at the $HOME root so the
+    # escape is genuinely outside policy and realpath-collapse stays tested.
     link = Path("/tmp/sutando-symlink-pointer.txt")
     if link.exists() or link.is_symlink():
         link.unlink()
-    # Wait — the link itself starts with `/tmp/sutando-` which IS an
-    # allowed prefix. The fix is `realpath`-then-compare. Make the link
-    # point at a file outside the allowed prefixes:
-    outside = Path("/tmp/escaped-not-sutando.txt")
+    outside = Path.home() / "sutando-escaped-symlink-target-DELETEME.txt"
     outside.write_text("would be exfil")
     try:
         os.symlink(outside, link)
@@ -144,45 +145,32 @@ def test_symlink_pointing_outside_allowed_root_rejected():
         if link.exists() or link.is_symlink():
             link.unlink()
         outside.unlink()
-        if target.exists():
-            target.unlink()
 
 
 def test_path_traversal_dotdot_rejected():
-    """`/tmp/sutando-../etc/passwd` evaluates by `realpath` to
-    `/etc/passwd`, which fails the allowlist. Guards the same
-    path-injection class as the symlink test, just via the textual
-    `..` segment instead of a symlink."""
-    # The realpath of /tmp/sutando-X/../passwd is /tmp/passwd. So we just
-    # check that a `..` traversal that lands somewhere not on the
-    # allowlist is rejected:
-    rogue_target = Path("/tmp/passwd-not-sutando-no-write")
-    if not rogue_target.exists():
-        rogue_target.write_text("not actual passwd")
-    try:
-        traversal = f"/tmp/sutando-x/../passwd-not-sutando-no-write"
-        # Even though the textual path STARTS with /tmp/sutando-,
-        # realpath collapses to /tmp/passwd-not-sutando-no-write, which
-        # does NOT start with /tmp/sutando-.
-        assert not is_sendable(traversal), (
-            "path traversal via .. bypassed the allowlist — "
-            "realpath collapse is broken"
-        )
-    finally:
-        if rogue_target.exists():
-            rogue_target.unlink()
+    """A `..` traversal that escapes the allowlist must reject. Since /tmp
+    is now broadly allowed (feedback 2033745d), the traversal must leave
+    /tmp entirely — realpath collapses `/tmp/sutando-x/../../../etc/hosts`
+    to /etc/hosts (a real file outside every allowed root) before the
+    prefix check."""
+    traversal = "/tmp/sutando-x/../../../etc/hosts"
+    assert not is_sendable(traversal), (
+        "path traversal via .. bypassed the allowlist — "
+        "realpath collapse is broken"
+    )
 
 
 def test_allowed_prefixes_are_the_documented_set():
     """Architectural assertion: the allowed prefixes must stay a small,
-    deliberate set. A future refactor that adds `/tmp/` (no suffix) or
-    `/Users/` would massively widen the attack surface; this test
-    forces a deliberate update of the test if the allowlist grows."""
+    deliberate set. Broadened 2026-06 (feedback 2033745d) to all of /tmp
+    (both realpath forms) so the agent can deliver ad-hoc /tmp working
+    files; an INTENTIONAL owner-scoped beta widening (realpath still blocks
+    escapes to $HOME/system — see the escape tests above). Any FURTHER
+    widening (e.g. `/Users/`, `/var/folders/`, `/`) must update this set
+    deliberately."""
     documented = {
-        "/tmp/sutando-",
-        "/private/tmp/sutando-",
-        "/tmp/echo-",
-        "/private/tmp/echo-",
+        "/tmp/",
+        "/private/tmp/",
     }
     actual = set(bridge.SEND_ALLOWED_PREFIXES)
     assert actual == documented, (

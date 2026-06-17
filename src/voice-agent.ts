@@ -48,24 +48,25 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createOpenAI } from '@ai-sdk/openai';
 import { OpenAIWhisperSTTProvider } from './openai-whisper-stt-provider.js';
 import { z } from 'zod';
-import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, mkdirSync, appendFileSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, unlinkSync, mkdirSync, copyFileSync, appendFileSync, writeFileSync, openSync, writeSync, closeSync } from 'node:fs';
 import { execSync as execSyncTop } from 'node:child_process';
 import { inlineTools, coreDocumentedSkills } from './inline-tools.js';
-import { setVisionSession, startVisionControlServer, stopVisionControlServer } from './vision-tools.js';
+import { setVisionSession, startVisionControlServer, stopVisionControlServer, setSessionToolUpdater } from './vision-tools.js';
 import { clearActiveArtifact } from './artifact-cache-tools.js';
 import { injectText } from './browser-tools.js';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { VoiceSession, OpenAIRealtimeTransport } from 'bodhi-realtime-agent';
 import type { MainAgent, ToolDefinition, LLMTransport } from 'bodhi-realtime-agent';
 function assertMacOS() { if (process.platform !== 'darwin') { console.error('Sutando requires macOS'); process.exit(1); } }
 import { workTool, startResultWatcher, startContextDropWatcher, startNoteViewingWatcher, resetNoteViewingDebounce, logConversation, logSessionBoundary, getRecentConversation, getSecondsSinceLastTurn, setTaskStatusCallback } from './task-bridge.js';
-import { recordSession } from './conversation-store.js';
+import { recordSession, recordToolCall } from './conversation-store.js';
 import { buildSutandoSystemPrompt, buildVoiceAgentContext } from './voice-context.js';
 import { classifyTransportClose, type ClassifiedClose } from './voice-error-classifier.js';
 import { startWebServer } from './web-server.js';
 
-import { personalPath, sharedPersonalPath } from './util_paths.js';
+import { personalPath, sharedPersonalPath, claudeHomePath } from './util_paths.js';
 import { statePath, stateDir } from './state-paths.js';
 import {
 	recordEvent as cloudRecordEvent,
@@ -214,16 +215,37 @@ const CALL_RESULTS_DIR = join(stateDir('results'), 'calls');
 
 // Model configuration — override via .env for cost/quality tuning
 const VOICE_MODEL = process.env.VOICE_MODEL || 'gemini-2.5-flash';
-const VOICE_NATIVE_AUDIO_MODEL = process.env.VOICE_NATIVE_AUDIO_MODEL || 'gemini-3.1-flash-live-preview';
+// Per-user voice config (native-audio model + googleSearch grounding) is
+// data, not code: it lives in the workspace, NOT in the git repo.
+//   live config: $SUTANDO_WORKSPACE/config/voice-agent.json
+//   template:    src/voice-agent.config.json.example (committed)
+// On first run, if the workspace config is missing, the committed .example
+// template is copied into place so the operator (and the switch_voice_config
+// tool) have a file to edit. If the copy fails (or the template is gone),
+// loadVoiceConfig falls back to its built-in defaults. Schema + defaults: see
+// src/voice-config.ts. voice-agent ships with model=3.1 + googleSearch=false
+// because the web client's code-heavy workload prefers 3.1 and the (key,
+// 3.1, googleSearch) combo trips a 1011 close on the VOICE key when search
+// is true. Phone inherits the package default (2.5+search).
+import { loadVoiceConfig } from './voice-config.js';
+const _voiceAgentDir = dirname(fileURLToPath(import.meta.url));
+const VOICE_AGENT_CONFIG_PATH = join(WORKSPACE_DIR, 'config', 'voice-agent.json');
+if (!existsSync(VOICE_AGENT_CONFIG_PATH)) {
+	const _exampleConfigPath = join(_voiceAgentDir, 'voice-agent.config.json.example');
+	try {
+		mkdirSync(dirname(VOICE_AGENT_CONFIG_PATH), { recursive: true });
+		if (existsSync(_exampleConfigPath)) {
+			copyFileSync(_exampleConfigPath, VOICE_AGENT_CONFIG_PATH);
+			console.log(`${new Date().toISOString().slice(11, 23)} [voice-agent] seeded config from template → ${VOICE_AGENT_CONFIG_PATH}`);
+		}
+	} catch (e) {
+		console.warn(`${new Date().toISOString().slice(11, 23)} [voice-agent] could not seed config at ${VOICE_AGENT_CONFIG_PATH}: ${(e as Error).message} — using built-in defaults`);
+	}
+}
+const VOICE_AGENT_CONFIG = loadVoiceConfig(VOICE_AGENT_CONFIG_PATH);
+const VOICE_NATIVE_AUDIO_MODEL = VOICE_AGENT_CONFIG.model;
+const VOICE_GOOGLE_SEARCH = VOICE_AGENT_CONFIG.googleSearch;
 const VOICE_NAME = process.env.VOICE_NAME || 'Puck';
-// Google Search grounding — MUST be false under gemini-3.1-flash-live-preview
-// native audio (the current default). Combining googleSearch: true + 3.1
-// native audio causes the transport to reject setup with close code 1011
-// "exceeded your current quota" (misleading error text — actual cause is
-// the unsupported combo; 2.5 silently accepted it). Set
-// VOICE_GOOGLE_SEARCH=true in .env only if you also pin
-// VOICE_NATIVE_AUDIO_MODEL back to a 2.5 model that supports grounding.
-const VOICE_GOOGLE_SEARCH = (process.env.VOICE_GOOGLE_SEARCH ?? 'false').toLowerCase() !== 'false';
 const CARTESIA_API_KEY = process.env.CARTESIA_API_KEY || '';
 
 // Lazy-load Cartesia TTS only when a key is set. This means Gemini-only
@@ -596,20 +618,16 @@ const endSession: ToolDefinition = {
 
 let voiceSessionRef: VoiceSession | null = null;
 
-// Synchronously query the iclr-highlight server for current presenter-mode
-// state. Returns a system-marker string when active, '' otherwise. Failure-
-// silent: if the server is down or the curl call errors, returns '' so the
-// greeting/reconnect path stays unchanged.
-function getPresenterStateMarker(): string {
-	try {
-		const out = execSyncTop('curl -s --max-time 1 http://localhost:7877/presenter', { timeout: 2_000 }).toString();
-		const json = JSON.parse(out);
-		if (json && json.active === true) {
-			return ' [System: PRESENTER MODE IS CURRENTLY ACTIVE — apply the CO-PRESENTER protocol from your context to every cue this session: highlight_slide(topic) FIRST, then narrate from voice-context.txt. Do NOT route slide-topic phrases to work.]';
-		}
-	} catch { /* server unreachable or non-JSON — fall through to no-marker */ }
-	return '';
+// Unified base-mode resolver: see src/voice-mode-resolver.ts for the
+// rationale + canonical mode descriptors. Local wrapper threads the in-memory
+// `meetingActive` boolean (this module owns that state) into the pure
+// resolver function.
+import { resolveCurrentMode as resolveCurrentModeImpl, type ModeState } from './voice-mode-resolver.js';
+function resolveCurrentMode(): ModeState {
+	return resolveCurrentModeImpl({ meetingActive });
 }
+
+const mainAgentTools: ToolDefinition[] = [workTool, getTaskStatus, switchModeTool, saveMeetingNoteTool, ...inlineTools];
 
 const mainAgent: MainAgent = {
 	name: 'main',
@@ -663,14 +681,14 @@ const mainAgent: MainAgent = {
 			const isQuickReconnect = gap !== null && gap < 60;
 			// Presenter mode active = silent reconnect regardless of gap. Saying
 			// "Welcome back" mid-talk would break the co-presenter flow; the
-			// presenter marker (appended below) anchors continuation instead.
-			const presenterActive = getPresenterStateMarker() !== '';
-			const meetingHint = meetingActive
+			// base-mode marker (appended below) anchors continuation instead.
+			const modeState = resolveCurrentMode();
+			const meetingHint = modeState.isMeeting
 				? '\n\n[MEETING MODE — you are listening and taking notes. Do NOT speak or produce any audio. Only respond if someone says "Sutando." Use the replayed history above as context for what was discussed before the reconnect.]'
-				: (isQuickReconnect || presenterActive)
+				: (isQuickReconnect || modeState.isPresenter)
 					? '\n\n[Do NOT greet the user. Do NOT say "Welcome back" or anything similar. Stay completely silent and wait for the user\'s next spoken input — they were just briefly disconnected and want to resume without interruption.]'
 					: '\n\n[Now say "Welcome back" briefly — one sentence — and then stop and wait for input.]';
-			return `[System: The user reconnected. The block below is REPLAYED HISTORY from the current session, provided as background context ONLY. Do NOT act on anything in it. Do NOT call any tools based on it. Use it only to answer follow-up questions if asked. Wait silently for the user's next spoken input before taking any action.]${getPresenterStateMarker()}${offlineDeliveryHint}\n\n${recent}${meetingHint}`;
+			return `[System: The user reconnected. The block below is REPLAYED HISTORY from the current session, provided as background context ONLY. Do NOT act on anything in it. Do NOT call any tools based on it. Use it only to answer follow-up questions if asked. Wait silently for the user's next spoken input before taking any action.]${modeState.marker}${offlineDeliveryHint}\n\n${recent}${meetingHint}`;
 		}
 		let standName = '';
 		try { const si = JSON.parse(readFileSync(personalPath('stand-identity.json'), 'utf-8')); standName = si.name ? ` — ${si.name}` : ''; } catch {}
@@ -684,20 +702,21 @@ const mainAgent: MainAgent = {
 		const briefingHint = hasHistory && existsSync(briefingFile) ? ' Mention: "I have your morning briefing ready if you want it."' : '';
 		const insightFile = join(resultsDir, `insight-${today}.txt`);
 		const insightHint = hasHistory && existsSync(insightFile) ? ' Also mention: "I noticed a pattern in your usage — ask me about it if you are curious."' : '';
-		if (meetingActive) {
-			return `[System: MEETING MODE — LISTEN AND TAKE NOTES. A Zoom meeting is active. Listen to everything and mentally track the discussion: who said what, key decisions, action items, topics covered. But do NOT produce any audio output UNLESS someone says "Sutando" or "hey Sutando" — then respond to their request using your accumulated notes and context. When not addressed, produce absolutely zero words — no acknowledgments, no "silent", no sounds. You are an invisible note-taker until called upon.]`;
+		const modeState = resolveCurrentMode();
+		if (modeState.isMeeting) {
+			return `[System: MEETING MODE — LISTEN AND TAKE NOTES. A Zoom meeting is active. Listen to everything and mentally track the discussion: who said what, key decisions, action items, topics covered. But do NOT produce any audio output UNLESS someone says "Sutando" or "hey Sutando" — then respond to their request using your accumulated notes and context. When not addressed, produce absolutely zero words — no acknowledgments, no "silent", no sounds. You are an invisible note-taker until called upon.]${modeState.marker}`;
 		}
-		return `[System: A user just connected. Say hi and introduce yourself as Sutando${standName} — their personal AI. Ready to help with anything: voice tasks, screen control, meetings, phone calls, research. Keep it brief — 1-2 natural sentences, no theatrics.${tutorialHint}${briefingHint}${insightHint}]${getPresenterStateMarker()}`;
+		return `[System: A user just connected. Say hi and introduce yourself as Sutando${standName} — their personal AI. Ready to help with anything: voice tasks, screen control, meetings, phone calls, research. Keep it brief — 1-2 natural sentences, no theatrics.${tutorialHint}${briefingHint}${insightHint}]${modeState.marker}`;
 	},
 	instructions: () => [
 		// Per-session-evaluated factory (vs static array): lets the prompt
 		// re-check time-sensitive state on every session.start() / reconnect.
-		// The presenter-state marker below MUST be in the system_instruction
+		// The base-mode marker below MUST be in the system_instruction
 		// (this array → joined string → system_instruction), not the greeting,
 		// because Gemini Live treats greetings as a user-style turn — the
 		// model often calls get_core_status to verify "claims" rather than
 		// trust them. System instructions are authoritative.
-		(() => getPresenterStateMarker())(),
+		(() => resolveCurrentMode().marker)(),
 		'You are Sutando, a personal AI that belongs entirely to the user.',
 		'Named after Stands from JoJo\'s Bizarre Adventure — a personal spirit that fights for you.',
 		'Every Sutando evolves differently based on what its user needs. You earned your name and identity.',
@@ -764,7 +783,13 @@ const mainAgent: MainAgent = {
 		'- Asking the user a clarifying question',
 		'- Language/conversation mode questions ("can you speak Chinese?", "说中文", "switch to English", "speak French") — just say yes and switch, no need to delegate',
 		'- get_current_time (current date/time)',
-		'- Google Search (quick factual lookups)',
+		// googleSearch line conditional on VOICE_GOOGLE_SEARCH (per-surface config).
+		// When search is off, omit — model would otherwise be told it can use a
+		// capability that isn't actually available. When on, use a stronger directive
+		// than the prior "quick factual lookups" wording so the model prefers
+		// native grounding over the `work` tool for current-info queries
+		// (news/scores/weather/stocks) — wins ~5-10s vs the delegation round-trip.
+		(() => VOICE_GOOGLE_SEARCH ? '- Google Search for current-info queries (news, scores, weather, stocks, recent events) — use it directly, it returns faster than delegating to work' : '')(),
 		`- ${inlineTools.map(t => t.name).join(', ')} — call these directly, not through work. Instant.`,
 		'',
 		'For EVERYTHING else, call work. This includes:',
@@ -800,13 +825,15 @@ const mainAgent: MainAgent = {
 		)(),
 		'- PRESENTER MODE: Call presenter_mode("on") when user says "presenter mode on", "going live", "starting the talk", "the talk starts", or "I am on stage". Call presenter_mode("off") when user says "presenter mode off", "talk is done", "stop presenting", or "done presenting". Do NOT route these phrases to work — they are direct tool triggers. presenter_mode("on") returns a "say" field; speak it verbatim as your FIRST utterance.',
 		'- GOODBYE: When the user says goodbye, bye, or clearly ends the conversation, respond with a SHORT farewell that STARTS with the word "Goodbye" (e.g. "Goodbye! Talk to you later."). Keep it under one sentence. The session will close automatically. Do NOT start the farewell with "I\'m back", "Hello", "Welcome", or any other greeting word — only use a short starts-with-goodbye response for actual goodbyes.',
-		'- FILLERS ARE NOT REQUESTS: Short utterances that are fillers, acknowledgments, or thinking noises — "hmm", "um", "uh", "ah", "mhm", "oh", "ok", "yeah", "right", or any single-word backchannel — are NOT instructions. Do NOT call work, do NOT say "queued up" or "working on it", do NOT narrate. Either stay silent (preferred) or produce a brief ACK like "mm-hm" if the user seems to expect confirmation. Only act when the user issues a clear directive or question.',
+		'- FILLERS ARE NOT REQUESTS: Short utterances that are fillers, acknowledgments, or thinking noises — "hmm", "um", "uh", "ah", "mhm", "oh", "ok", "yeah", "right", "[BLANK_AUDIO]", or any single-word backchannel — are NOT instructions. Do NOT call work, do NOT say "queued up" or "working on it", do NOT narrate. Either stay silent (preferred) or produce a brief ACK like "mm-hm" if the user seems to expect confirmation. Only act when the user issues a clear directive or question.',
 		'- NEVER pretend you called a tool. NEVER say "done" without actually calling work.',
 		'- NEVER say "I can\'t do that", "I\'m not able to", or "I don\'t think I can" — you CAN do almost anything by calling work. If you\'re unsure, call work and let the core agent handle it. The core agent has full system access. Your job is to relay requests, not gatekeep them.',
 		'- For SIMPLE actions (press enter, clear input, select all), use press_key or type_text — do NOT use work for keystrokes.',
+		'- For IN-PLACE EDITS on text already visible on screen (a draft, an email body, a code block, a focused textarea) — call read_selection FIRST to fetch the current text, compute the edited version, then call type_text to write the edited version into the field. Do NOT delegate to work for in-place edits; the user is on screen watching for the change to appear in the field. work is correct for edits that require server-side logic (commit a change, send the email, mutate files outside the focused field) — not for editing the text the user is looking at.',
 		'- For COMPLEX operations (git commands, code changes, file operations, installing packages), ALWAYS delegate to work — do NOT try to type commands into a terminal. The core agent executes these directly and reliably.',
 		'- If you KNOW the answer from your instructions or context, answer directly. Only delegate to work for questions you genuinely cannot answer.',
 		'- MISSING CONTEXT: When the user references something you don\'t have context for ("the draft", "what we discussed", "type that", "send what I asked for"), ALWAYS delegate to work. The core agent has the full conversation history and knows what was discussed. Never guess or ask the user to repeat — just call work.',
+		'- MISHEARD-RISK CONFIRM (distinct from MISSING CONTEXT): if the request came through GARBLED or you are genuinely unsure you transcribed it correctly — noisy audio, a phrase that does not parse, or two equally-likely readings of WHAT to delegate — do ONE brief read-back of your understanding ("You want me to X — right?") before calling work, rather than delegating a possibly-wrong transcript. Keep it to a single short confirm. If the request is clear, SKIP this and call work normally — the core also receives the recent transcript and can self-correct, so do NOT over-confirm; only when you are genuinely unsure of the words.',
 		(() => meetingActive
 			? '- IN MEETING MODE: When addressed by name, answer DIRECTLY from what you heard in the meeting. Do NOT call work — the core agent cannot hear the meeting audio and has no context. You are the one who listened. Summarize discussions, decisions, and action items from your own memory of the conversation.'
 			: '- When in doubt, call work.'
@@ -851,7 +878,7 @@ const mainAgent: MainAgent = {
 	// enable it once we find a reliable gate signal (probably after
 	// bodhi exposes a proper "user has actually spoken" signal under
 	// native audio).
-	tools: [workTool, getTaskStatus, switchModeTool, saveMeetingNoteTool, ...inlineTools],
+	tools: mainAgentTools,
 	googleSearch: VOICE_GOOGLE_SEARCH,
 	onEnter: async () => console.log(`${ts()} [Agent] Sutando ready`),
 	// Voice-driven close — strict version. User wants to be able to
@@ -933,7 +960,7 @@ const mainAgent: MainAgent = {
 // dir should never block voice startup.
 function bootstrapMemoryDir(): void {
 	const slug = '-' + WORKSPACE_DIR.replace(/\/$/, '').split('/').filter(Boolean).join('-');
-	const memDir = process.env.SUTANDO_MEMORY_DIR || join(homedir(), '.claude', 'projects', slug, 'memory');
+	const memDir = process.env.SUTANDO_MEMORY_DIR || claudeHomePath('projects', slug, 'memory');
 	try {
 		mkdirSync(memDir, { recursive: true });
 		const indexPath = join(memDir, 'MEMORY.md');
@@ -1126,6 +1153,10 @@ async function main() {
 	// happy without affecting behavior (the bodhi docs state apiKey is
 	// ignored when transport is supplied).
 	let voiceApiKey: string;
+	// Hoisted so the transport-close classifier (below) can tell whether
+	// voice is on a managed ephemeral token. Only managed tokens expire
+	// mid-session and need a re-mint-via-restart on a 'token_expired' close.
+	let voiceMode: 'byok' | 'managed' | 'managed-fallback' | 'openai' = 'openai';
 	let openAiTransport: LLMTransport | undefined;
 	if (VOICE_PROVIDER === 'openai') {
 		openAiTransport = new OpenAIRealtimeTransport({
@@ -1138,6 +1169,7 @@ async function main() {
 	} else {
 		const resolvedKey = await resolveVoiceApiKey();
 		voiceApiKey = resolvedKey.key;
+		voiceMode = resolvedKey.mode;
 		console.log(`${ts()} [Voice] Transport: Gemini Live (model=${VOICE_NATIVE_AUDIO_MODEL}, mode=${resolvedKey.mode})`);
 	}
 
@@ -1202,7 +1234,10 @@ async function main() {
 			},
 			onToolCall: (e) => {
 				voiceToolIdMap.set(e.toolCallId, e.toolName);
-				voiceEvents.push({ event: `tool_call:${e.toolName}`, timestamp: new Date().toISOString() });
+				// tool_call event push removed per #1052 — canonical record
+				// is the surface-table row written in onToolResult via
+				// recordToolCall(). Pushing here would duplicate in
+				// session_events.
 				console.log(`${ts()} [Tool] ${e.toolName} (${e.execution})`);
 				// Flag the web-client that a tool is in flight so the avatar
 				// can show the blue `.working` pulse and the menu bar can
@@ -1222,7 +1257,11 @@ async function main() {
 			onToolResult: (e) => {
 				const toolName = voiceToolIdMap.get(e.toolCallId) || 'unknown';
 				voiceToolCalls.push({ name: toolName, durationMs: e.durationMs, timestamp: new Date().toISOString() });
-				voiceEvents.push({ event: `tool_result:${toolName}:${e.durationMs}ms`, timestamp: new Date().toISOString() });
+				// tool_result event push removed per #1052 — recordToolCall
+				// below is the canonical write (surface table, kind='tool_call',
+				// duration_ms column). Pushing here would duplicate in
+				// session_events.
+				recordToolCall('voice', toolName, e.durationMs, SESSION_ID);
 				console.log(`${ts()} [Tool] result: ${toolName} (${e.status}, ${e.durationMs}ms)`);
 				// Per-skill metering for the marketplace. One event per tool
 				// call. metadata.skill names the tool; metadata.source pins
@@ -1265,6 +1304,10 @@ async function main() {
 	// HTTP control endpoint so the web client's Watch button can drive the
 	// same controller.
 	setVisionSession(session);
+	// updateTools is on the private transport (GeminiLiveTransport), not VoiceSession.
+	// Applied on next reconnect — restricts what Gemini sees after the next transport cycle.
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	setSessionToolUpdater((tools) => (session as any).transport?.updateTools?.(tools), mainAgentTools);
 	startVisionControlServer();
 
 	// Bumped 5min into the future on every non-retryable transport close
@@ -1294,6 +1337,25 @@ async function main() {
 			: null;
 		const notifiedCategories = new Set<string>();
 		const handleClose = (c: ClassifiedClose): void => {
+			// Managed ephemeral token can no longer open a Live session (its
+			// newSessionExpireTime/expireTime passed). Reconnecting with the
+			// same dead token just loops on 30s connect timeouts — the "voice
+			// dies after ~10 min" outage. Exit so launchd's KeepAlive restarts
+			// us with a fresh resolveVoiceApiKey() mint (same idiom as the
+			// Settings key-reload path). BYOK keys don't expire, so skip them.
+			if (c.category === 'token_expired' && voiceMode !== 'byok' && voiceMode !== 'openai') {
+				console.error(`${ts()} [VoiceFailure] managed token expired (raw="${c.rawReason}") — exiting for launchd restart to re-mint`);
+				try {
+					cloudRecordError({
+						kind: 'voice.transport.token_expired',
+						severity: 'error',
+						message: 'Managed Gemini token expired mid-session; restarting voice to re-mint.',
+						metadata: { rawReason: c.rawReason },
+					});
+				} catch {}
+				setTimeout(() => process.exit(0), 200);
+				return;
+			}
 			if (c.retryable) return;
 			// Push the health-monitor reconnect window out by 5min on every
 			// non-retryable close — including repeats of an already-notified
@@ -1587,10 +1649,10 @@ async function main() {
 				console.log(`${ts()}   [${item.role}] ${item.content}`);
 				logConversation(item.role, item.content, SESSION_ID);
 				const evtRole = item.role === 'user' ? 'user' : 'sutando';
-				// 7s offset for user speech: Gemini STT commits transcript ~7s after
-				// the user actually spoke (measured via iPad recording comparison).
-				const evtTs = item.role === 'user' ? new Date(Date.now() - 7000).toISOString() : new Date().toISOString();
-				voiceEvents.push({ event: `${evtRole}:${item.content || ''}`, timestamp: evtTs });
+				// utterance event push removed per #1052 — canonical record is
+				// the voice-table row written by logConversation() above
+				// (kind='user'/'agent', ts_unix). session_events keeps only
+				// lifecycle entries to stop triple-encoding the same atom.
 				voiceTranscript.push({ role: evtRole, text: item.content || '' });
 				const label = item.role === 'user' ? 'User' : 'Sutando';
 				try { appendFileSync(liveTranscriptPath, `[${new Date().toLocaleTimeString('en-US', {hour12:false})}] ${label}: ${item.content}\n`); } catch {}
@@ -1617,6 +1679,18 @@ async function main() {
 		console.log(`${ts()} [VoiceSession] user interrupt detected — userHasInterrupted=true`);
 	});
 
+	// Audio-duck relay: flag the slide server (localhost:7877) when Sutando is
+	// producing audio, so the deck ducks the active slide video under the
+	// narration. turn.start → speaking on; turn.end / turn.interrupted → off.
+	// Fire-and-forget; failures are harmless (deck just won't duck). Decouples
+	// ducking from Gemini tool-call timing entirely. (Observe-talk feature.)
+	const _duck = (mode: 'on' | 'off') => {
+		try { fetch(`http://localhost:7877/speaking/${mode}`, { method: 'POST' }).catch(() => {}); } catch {}
+	};
+	session.eventBus.subscribe('turn.start', () => _duck('on'));
+	session.eventBus.subscribe('turn.end', () => _duck('off'));
+	session.eventBus.subscribe('turn.interrupted', () => _duck('off'));
+
 	let shuttingDown = false;
 	const shutdown = async (reason: string) => {
 		if (shuttingDown) return;
@@ -1627,7 +1701,7 @@ async function main() {
 		// cloud session row; cloudFlush drains the queue before exit so
 		// neither the usage_event nor the session-end POST is dropped.
 		try { writeVoiceMetrics(); } catch (e) { console.error('shutdown writeVoiceMetrics:', e); }
-		try { setVisionSession(null); stopVisionControlServer(); } catch (e) { console.error('shutdown vision teardown:', e); }
+		try { setVisionSession(null); setSessionToolUpdater(null, []); stopVisionControlServer(); } catch (e) { console.error('shutdown vision teardown:', e); }
 		try { await session.close('user_hangup'); } catch (e) { console.error('shutdown session.close:', e); }
 		try { await cloudFlush(); } catch (e) { console.error('shutdown cloudFlush:', e); }
 		process.exit(0);
@@ -1702,31 +1776,31 @@ async function main() {
 		};
 	}
 
-	// Reset per-session state on RE-connect. Bodhi's state machine fires
-	// onSessionStart only on the first ACTIVE transition (index.js:1219 —
-	// the `!this.startedAt` guard, and `startedAt` is never reset to null).
-	// Without this wrap, a user's second/third/Nth client-connect within
-	// the same process doesn't retrigger our onSessionStart hook, so
-	// metricsWritten stays true from the last flush, and the next
-	// onSessionEnd `writeVoiceMetrics()` returns early — record lost.
-	// Observed 2026-04-17 when a whole day of voice sessions missed the
-	// jsonl because MBP kept one voice-agent process alive across many
-	// client reconnects. First connect still goes through bodhi's
-	// onSessionStart (our callback resets state there); this wrap only
-	// kicks in on the 2nd+ connect. Also cancels any pending idle teardown.
-	let clientHasConnectedOnce = false;
+	// Reset per-session state on client connect when a stale flush is sitting
+	// in the buffer. Bodhi's onSessionStart only fires on the first ACTIVE
+	// transition (index.js:1219 — `!this.startedAt` guard, never reset). So:
+	//   (a) 2nd+ user-connects within one process miss the onSessionStart reset
+	//   (b) a phantom server-idle session_end can flush `metricsWritten=true`
+	//       BEFORE the first real client ever connects (observed 2026-05-22:
+	//       server starts → 60s idle → bodhi auto-ends a 0/0 phantom session →
+	//       metricsWritten=true → real user connects 30min later → next
+	//       onSessionEnd's writeVoiceMetrics returns early → record lost)
+	// Both reduce to: whenever a client connects while metricsWritten=true,
+	// the previous logical session has already been flushed, so reset for
+	// the new one. (The very first connect on a fresh process with no idle
+	// phantom has metricsWritten=false and skips the reset — onSessionStart
+	// already did it.) Also cancels any pending idle teardown.
 	const origConnect = (session as any).handleClientConnected?.bind(session);
 	if (origConnect) {
 		(session as any).handleClientConnected = () => {
 			cancelIdleTeardown();
-			if (clientHasConnectedOnce) {
+			if (metricsWritten) {
 				userTurnCount = 0; userHasInterrupted = false; sessionEnding = false;
 				voiceSessionStart = Date.now(); metricsWritten = false;
 				voiceEvents.length = 0; voiceToolCalls.length = 0; voiceTranscript.length = 0;
-				voiceEvents.push({ event: 'session_started:client_reconnect', timestamp: new Date().toISOString() });
-				console.log(`${ts()} [Session] Client reconnected — reset metrics buffer (bodhi onSessionStart guard bypass)`);
+				voiceEvents.push({ event: 'session_started:client_connect', timestamp: new Date().toISOString() });
+				console.log(`${ts()} [Session] Client connected after prior flush — reset metrics buffer`);
 			}
-			clientHasConnectedOnce = true;
 			writeVoiceState(true);
 			origConnect();
 		};
@@ -1839,7 +1913,7 @@ async function main() {
 	console.log(`  Session ID:    ${SESSION_ID}`);
 	console.log(`  Models:`);
 	console.log(`    Voice LLM:       ${VOICE_MODEL}`);
-	console.log(`    Native audio:    ${VOICE_NATIVE_AUDIO_MODEL}`);
+	console.log(`    Native audio:    ${VOICE_NATIVE_AUDIO_MODEL} (googleSearch=${VOICE_GOOGLE_SEARCH})`);
 	console.log(`    Voice name:      ${VOICE_NAME}`);
 	console.log(`    STT:             native Gemini Live inputAudioTranscription`);
 	console.log(`    Cartesia TTS:    ${CARTESIA_API_KEY ? 'sonic-3' : 'disabled'}`);

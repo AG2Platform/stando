@@ -58,9 +58,14 @@ def main() -> int:
         return fail("load_allowed must `return None` on FileNotFoundError "
                     "(TOFU relies on None vs empty-set distinction)", block)
 
-    # 2. tofu_onboard exists with race-guard + 0o600 chmod
+    # 2. tofu_onboard exists with race-guard + 0o600 chmod.
+    # Budget bumped 2000 → 4000 in Phase 5.13 (#899 access-cache port):
+    # tofu_onboard gained a docstring + `_restore_access_from_cache()`
+    # check before genuine TOFU, pushing the function's text length past
+    # the previous bound. The next-`\n\ndef ` boundary still terminates
+    # the lookahead — only the budget needs bumping.
     tofu_match = re.search(
-        r"def tofu_onboard\([^)]*\)[^:]*:\s*\n([\s\S]{0,2000}?)(?=\n\ndef |\Z)",
+        r"def tofu_onboard\([^)]*\)[^:]*:\s*\n([\s\S]{0,4000}?)(?=\n\ndef |\Z)",
         src,
     )
     if not tofu_match:

@@ -1088,7 +1088,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         if let url = channel.docsURL {
             let link = NSButton()
-            link.title = "Setup guide →"
+            link.title = "\(channel.displayName) setup guide →"
             link.bezelStyle = .recessed
             link.font = .systemFont(ofSize: 11)
             link.target = self
@@ -1098,7 +1098,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         }
         if let url = channel.helpURL {
             let link = NSButton()
-            link.title = "Get token →"
+            link.title = "Get \(channel.displayName) token →"
             link.bezelStyle = .recessed
             link.font = .systemFont(ofSize: 11)
             link.target = self

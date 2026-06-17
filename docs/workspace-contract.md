@@ -13,7 +13,7 @@ This is the strong form of the split. If you find yourself typing `REPO_DIR / "<
 | Concept | Path on this machine | What lives here | Use it when |
 |---|---|---|---|
 | **Source tree (`REPO_DIR`)** | wherever you cloned the repo (e.g. `~/Documents/github/sutando`) | `src/`, `skills/`, `scripts/`, `docs/`, `tests/`, `CLAUDE.md`, `package.json` — anything that's in git and is part of the codebase. | Exec'ing a source script. Running `git -C` against the tree. Reading a checked-in file (docs, sample config, source). |
-| **Workspace (`WORKSPACE_DIR`)** | `$SUTANDO_WORKSPACE` (if set) or `~/.sutando/workspace/` (canonical default) | Per-user mutable runtime state: `tasks/`, `results/`, `state/`, `data/`, `logs/`, `notes/`, `build_log.md`, `pending-questions.md`, `contextual-chips.json`, `core-status.json`, `voice-state.json`, `quota-state.json`, anything else the running agent generates or accumulates. | Always, unless one of the three "use REPO_DIR" cases above applies. |
+| **Workspace (`WORKSPACE_DIR`)** | `$SUTANDO_WORKSPACE` (if set) or `~/.sutando/workspace/` (canonical default) | Per-user mutable runtime state: `tasks/`, `results/`, `state/`, `data/`, `logs/`, `notes/`, `build_log.md`, `pending-questions.md`, anything else the running agent generates or accumulates. Loose status `.json` files (`core-status.json`, `voice-state.json`, `contextual-chips.json`, `dynamic-content.json`, `quota-state.json`) live under `state/` — use the `status_path` / `statusPath` helpers. | Always, unless one of the three "use REPO_DIR" cases above applies. |
 
 The two paths **can** be the same (default for fresh installs without `SUTANDO_WORKSPACE`), but designing for them as separate is the right structural shape — multiple Sutando nodes on one machine, separate-from-code workspace, OSS readers running the engine without polluting their own git tree.
 
@@ -28,7 +28,7 @@ For every `REPO_DIR / "..."` (or equivalent `Path(__file__).parent.parent / "...
 REPO_DIR = Path(__file__).resolve().parent.parent
 
 # Runtime state — for tasks/, results/, state/, data/, logs/, notes/,
-# build_log.md, pending-questions.md, core-status.json, etc.
+# build_log.md, pending-questions.md, etc. (status .json files: state/)
 from workspace_default import resolve_workspace
 WORKSPACE_DIR = resolve_workspace()
 ```
@@ -105,7 +105,9 @@ If your loop / cron / scripts polled `<repo>/tasks/` directly before #762 (and a
 - Any component still reading from `<repo>/tasks/` via a relative path won't see them.
 - Result: new tasks never reach the loop. Observed 2026-05-16 — 7 owner DMs orphaned over 19 minutes before the divergence was caught.
 
-**Preferred fix:** restart the bridge and sutando-app. The migration code from #762 (`_migrate_from_legacy`) auto-moves `<repo>/{tasks,results,state}` → `~/.sutando/workspace/{tasks,results,state}` on first new-default run. After migration, both sides agree on the canonical default and no env var is needed.
+**Preferred fix (post-#1170):** run `bash scripts/sutando-migrate.sh --dry-run` to preview, then `--commit` to relocate `<repo>/{tasks,results,state,notes,build_log.md,conversation.log,…}` into `~/.sutando/workspace/`. The CLI is the only auto-mover post-#1169 (option B); the old `_migrate_from_legacy` auto-fire was removed because it ran destructively on every `resolve_workspace()` call and bit synced workspaces via symlink-following iterdir(). After migration, both sides agree on the canonical default and no env var is needed.
+
+> **Historical note:** before #1170 (2026-05-26) the Python and bash twins of these migrators ran automatically on every `resolve_workspace()` call / `init.sh --auto` startup. That auto-fire is gone; both code paths now only emit a one-time stderr notice when legacy state is detected and route users to the CLI above. The `sutando-migrate.sh` CLI itself ships in a follow-up PR — until then, `mv` the listed paths manually.
 
 **Stop-gap (if migration won't run):** pin `SUTANDO_WORKSPACE` in `.env` at the repo root and restart the bridges:
 

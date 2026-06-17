@@ -44,6 +44,31 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
+def _iana_timezone() -> str:
+    """Best-effort IANA zone name (e.g. 'Australia/Sydney') for the system.
+
+    Doubles as the user's region/location signal in task headers so the agent
+    stops inferring location from skill configs (feedback fb79f790).
+    """
+    try:
+        link = os.readlink("/etc/localtime")  # .../zoneinfo/<Area>/<City>
+        if "zoneinfo/" in link:
+            return link.split("zoneinfo/", 1)[1]
+    except OSError:
+        pass
+    return os.environ.get("OWNER_TZ") or os.environ.get("TZ") or ""
+
+
+def _local_time_header() -> str:
+    """Zone-labeled local time + IANA zone for task `local_time:` headers.
+
+    Grounds both 'now' (feedback c3c28b4b) and the user's region (fb79f790).
+    """
+    stamp = datetime.now().astimezone().strftime("%A %Y-%m-%d %I:%M %p %Z")
+    zone = _iana_timezone()
+    return f"{stamp} ({zone})" if zone else stamp
+
+
 def _safe_id(raw: str) -> str:
     """Sanitize an ID to prevent path traversal. Only allow alphanumeric, dash, underscore, dot."""
     return re.sub(r'[^a-zA-Z0-9_\-.]', '', raw)
@@ -91,7 +116,7 @@ PORT = int(os.environ.get("AGENT_API_PORT", "7843"))
 sys.path.insert(0, str(Path(__file__).parent))
 from util_paths import personal_path  # noqa: E402
 from state_paths import state_dir, state_path  # noqa: E402
-from workspace_default import resolve_workspace  # noqa: E402
+from workspace_default import resolve_workspace, status_read_path  # noqa: E402
 
 # Per-user mutable state (pending-questions.md, etc.) lives under the
 # workspace, NOT the repo. REPO_DIR is only correct for repo-bundled public
@@ -179,6 +204,17 @@ def get_task_result(task_id: str):
     result_file = _safe_path(RESULT_DIR, task_id)
     if result_file and result_file.exists():
         return {"task_id": _safe_id(task_id), "status": "completed", "result": result_file.read_text()}
+    # Check the month-partitioned archive — task-bridge archives results within
+    # seconds of delivery, so a /result poll can arrive after the file moved to
+    # results/archive/<YYYY-MM>/. Without this, the poll 404s on a task that
+    # actually completed. (Same archive layout /tasks/active already scans.)
+    safe_id = _safe_id(task_id)
+    if safe_id:
+        filename = f"{safe_id}.txt"
+        for month_dir in sorted((RESULT_DIR / "archive").glob("*/"), reverse=True):
+            candidate = month_dir / filename
+            if candidate.exists():
+                return {"task_id": safe_id, "status": "completed", "result": candidate.read_text()}
     task_file = _safe_path(TASK_DIR, task_id)
     if task_file and task_file.exists():
         return {"task_id": _safe_id(task_id), "status": "pending"}
@@ -300,13 +336,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_json(200, {"pong": True})
         elif path == "/core-status":
             # Read loop status file for web UI
-            status_file = state_path("core-status.json")
+            status_file = status_read_path("core-status.json", WORKSPACE)
             if status_file.exists():
                 import json as _json
                 try:
                     data = _json.loads(status_file.read_text())
                     self.send_json(200, data)
-                except:
+                except Exception:
                     self.send_json(200, {"status": "idle"})
             else:
                 self.send_json(200, {"status": "idle"})
@@ -488,7 +524,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 pass
             self.send_json(200, {"activity": activity})
         elif path == "/contextual-chips":
-            chips_file = state_path("contextual-chips.json")
+            chips_file = status_read_path("contextual-chips.json", WORKSPACE)
             if chips_file.exists():
                 try:
                     data = json.loads(chips_file.read_text())
@@ -498,7 +534,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_json(200, {"chips": []})
         elif path == "/dynamic-content":
-            dc_file = state_path("dynamic-content.json")
+            dc_file = status_read_path("dynamic-content.json", WORKSPACE)
             if dc_file.exists():
                 try:
                     data = json.loads(dc_file.read_text())
@@ -591,6 +627,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         task_content = (
             f"id: {task_id}\n"
             f"timestamp: {datetime.now().isoformat()}\n"
+            f"local_time: {_local_time_header()}\n"
             f"task: Incoming phone call from {caller}\n"
             f"source: twilio_voice\n"
             f"from: {caller}\n"
@@ -620,6 +657,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         task_content = (
             f"id: {task_id}\n"
             f"timestamp: {datetime.now().isoformat()}\n"
+            f"local_time: {_local_time_header()}\n"
             f"task: SMS from {sender}: {body}\n"
             f"source: twilio_sms\n"
             f"from: {sender}\n"
@@ -643,6 +681,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             task_content = (
                 f"id: {task_id}\n"
                 f"timestamp: {datetime.now().isoformat()}\n"
+                f"local_time: {_local_time_header()}\n"
                 f"task: Voicemail from {caller}: {text}\n"
                 f"source: twilio_voicemail\n"
                 f"from: {caller}\n"
@@ -690,7 +729,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 data = json.loads(body)
                 voice_desired_state = data.get("state", "disconnected")
                 self.send_json(200, {"state": voice_desired_state})
-            except:
+            except Exception:
                 self.send_json(400, {"error": "invalid"})
             return
 
@@ -709,7 +748,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 else:
                     task_history[tid] = {"status": "done", "text": result[:80], "time": datetime.now().timestamp(), "result": result}
                 self.send_json(200, {"ok": True})
-            except:
+            except Exception:
                 self.send_json(400, {"error": "invalid"})
             return
 
@@ -801,6 +840,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         task = data.get("task", "")
         priority = data.get("priority", "normal")
 
+        # Task-file header injection guard. `from_agent` lands on a single
+        # line in the task file ("from: <value>\n"). Without sanitization,
+        # a `\n` in the value forges extra task-file fields downstream
+        # consumers parse line-by-line — e.g. `from_agent =
+        # "evil\nchannel_id: local-voice"` makes the task file look
+        # voice-originated to `_isVoiceTask` (which scans every line for
+        # `channel_id: local-voice`). The misclassif routes the task
+        # through the voice-only fallback path with incorrect downstream
+        # behavior. Strip line terminators; cap to a sane single-line
+        # length.
+        from_agent = (
+            from_agent.replace("\r", " ").replace("\n", " ").strip()[:120]
+            or "unknown"
+        )
+
         if not task:
             self.send_json(400, {"error": "task is required"})
             return
@@ -840,9 +894,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # task as voice-originated. With `task:` last, the body's newlines
         # have no field to inject into; the file ends with the body.
         task_id = f"task-{int(datetime.now().timestamp() * 1000)}"
+        # Write to tasks/ for sutando-core to pick up. Field order matters:
+        # `task:` is the LAST line so any newlines in the user-supplied
+        # task body just extend the task body rather than forge new
+        # task-file fields below. Pre-fix the format was
+        # `id, timestamp, task, source, from` — a task body containing
+        # `\nsource: voice` would land between the legitimate `source:` and
+        # `from:` lines, and `_isVoiceTask` (any-line scan) would treat the
+        # task as voice-originated. With `task:` last, the body's newlines
+        # have no field to inject into; the file ends with the body.
         task_content = (
             f"id: {task_id}\n"
             f"timestamp: {datetime.now().isoformat()}\n"
+            f"local_time: {_local_time_header()}\n"
             f"source: api\n"
             f"from: {from_agent}\n"
             f"task: {task}\n"
