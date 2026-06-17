@@ -2028,6 +2028,62 @@ wss.on('connection', (ws: WebSocket) => {
 
 // --- Startup ---
 
+// Point the Twilio number's inbound Voice webhook at our current tunnel.
+// Inbound calls hit the number's VoiceUrl; without this the user had to
+// paste the tunnel URL into the Twilio console by hand — AND re-paste it on
+// every reboot, because ngrok hands out a new random URL each start. We
+// already hold the account creds, so set it via the REST API on every boot:
+// the webhook is always current and the manual console step disappears.
+// Best-effort — a failure logs the manual fallback and does NOT stop the
+// server. Opt out with TWILIO_AUTO_WEBHOOK=0 (e.g. number managed elsewhere).
+async function syncTwilioWebhook(): Promise<void> {
+	const voiceUrl = `${WEBHOOK_BASE_URL}/twilio/connect`;
+	const statusUrl = `${WEBHOOK_BASE_URL}/twilio/status`;
+	if (process.env.TWILIO_AUTO_WEBHOOK === '0') {
+		console.log(`${ts()} [Webhook] auto-config disabled (TWILIO_AUTO_WEBHOOK=0) — set the Voice webhook to ${voiceUrl} manually`);
+		return;
+	}
+	const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+	const headers = { Authorization: `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' };
+	const base = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers`;
+	try {
+		// The update API keys off the number's SID, not its E.164 — look it up.
+		const listUrl = `${base}.json?${new URLSearchParams({ PhoneNumber: TWILIO_PHONE_NUMBER }).toString()}`;
+		const listRes = await fetch(listUrl, { headers });
+		if (!listRes.ok) throw new Error(`lookup ${listRes.status}: ${(await listRes.text()).slice(0, 160)}`);
+		const list = (await listRes.json()) as { incoming_phone_numbers?: Array<{ sid: string; voice_url?: string }> };
+		const num = list.incoming_phone_numbers?.[0];
+		if (!num?.sid) {
+			console.warn(`${ts()} [Webhook] configured number not found on this Twilio account — set the Voice webhook to ${voiceUrl} manually`);
+			return;
+		}
+		if (num.voice_url === voiceUrl) {
+			console.log(`${ts()} [Webhook] Twilio Voice webhook already current → ${voiceUrl}`);
+			return;
+		}
+		const updRes = await fetch(`${base}/${num.sid}.json`, {
+			method: 'POST',
+			body: new URLSearchParams({
+				VoiceUrl: voiceUrl, VoiceMethod: 'POST',
+				StatusCallback: statusUrl, StatusCallbackMethod: 'POST',
+			}).toString(),
+			headers,
+		});
+		if (!updRes.ok) throw new Error(`update ${updRes.status}: ${(await updRes.text()).slice(0, 160)}`);
+		console.log(`${ts()} [Webhook] Twilio Voice webhook set → ${voiceUrl}`);
+	} catch (err) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.warn(`${ts()} [Webhook] auto-config failed (${msg}) — set the Voice webhook to ${voiceUrl} manually in the Twilio console`);
+		try {
+			cloudRecordError({
+				kind: 'phone.webhook_sync_failed',
+				severity: 'warn',
+				message: `Twilio webhook auto-config failed: ${msg}`,
+			});
+		} catch {}
+	}
+}
+
 async function start(): Promise<void> {
 	killPortOccupant(PORT);
 	await new Promise<void>(resolve => server.listen(PORT, '0.0.0.0', resolve));
@@ -2042,6 +2098,11 @@ async function start(): Promise<void> {
 		} else {
 			WEBHOOK_BASE_URL = await startNgrokCli(PORT);
 		}
+
+		// Point the Twilio number at this tunnel so inbound calls reach us —
+		// removes the manual console step and self-heals ngrok's per-reboot URL.
+		await syncTwilioWebhook();
+
 		console.log(`\n╔════════════════════════════════════════════════════╗`);
 		console.log(`║  Phone Server (bodhi VoiceSession)                 ║`);
 		console.log(`╠════════════════════════════════════════════════════╣`);
