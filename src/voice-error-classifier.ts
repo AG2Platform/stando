@@ -17,6 +17,7 @@ export type FailureCategory =
 	| 'quota_exceeded'      // Free-tier RPM/RPD cap with no billing on the project
 	| 'credits_depleted'    // Paid-tier prepayment balance hit zero
 	| 'auth_invalid'        // Key revoked, expired, or malformed
+	| 'token_expired'       // Managed ephemeral token can no longer open a session — re-mint
 	| 'model_not_found'     // Configured model name no longer valid
 	| 'rate_limit'          // Transient 429 — bodhi will retry, no user action
 	| 'transient'           // Normal close (1000) or other expected closures
@@ -38,6 +39,19 @@ const PATTERNS: Array<{
 	userMessage: string;
 	userActionUrl: string;
 }> = [
+	{
+		// Managed ephemeral token can no longer OPEN a session (its
+		// newSessionExpireTime / overall expireTime has passed). Surfaces
+		// on reconnect after the ~10-min Gemini Live cap. Not "retryable"
+		// with the same token — the caller must re-mint a fresh one. The
+		// voice agent special-cases this category to exit→launchd-restart,
+		// which re-mints via resolveVoiceApiKey(), instead of looping.
+		rx: /new_session_expire_time|new session expire|session.{0,20}deadline exceeded|token.{0,20}expired/i,
+		category: 'token_expired',
+		retryable: false,
+		userMessage: 'Voice is refreshing its session — one moment.',
+		userActionUrl: '',
+	},
 	{
 		rx: /prepayment.{0,20}credits.{0,20}depleted|prepayment.{0,20}depleted/i,
 		category: 'credits_depleted',

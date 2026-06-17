@@ -1153,6 +1153,10 @@ async function main() {
 	// happy without affecting behavior (the bodhi docs state apiKey is
 	// ignored when transport is supplied).
 	let voiceApiKey: string;
+	// Hoisted so the transport-close classifier (below) can tell whether
+	// voice is on a managed ephemeral token. Only managed tokens expire
+	// mid-session and need a re-mint-via-restart on a 'token_expired' close.
+	let voiceMode: 'byok' | 'managed' | 'managed-fallback' | 'openai' = 'openai';
 	let openAiTransport: LLMTransport | undefined;
 	if (VOICE_PROVIDER === 'openai') {
 		openAiTransport = new OpenAIRealtimeTransport({
@@ -1165,6 +1169,7 @@ async function main() {
 	} else {
 		const resolvedKey = await resolveVoiceApiKey();
 		voiceApiKey = resolvedKey.key;
+		voiceMode = resolvedKey.mode;
 		console.log(`${ts()} [Voice] Transport: Gemini Live (model=${VOICE_NATIVE_AUDIO_MODEL}, mode=${resolvedKey.mode})`);
 	}
 
@@ -1332,6 +1337,25 @@ async function main() {
 			: null;
 		const notifiedCategories = new Set<string>();
 		const handleClose = (c: ClassifiedClose): void => {
+			// Managed ephemeral token can no longer open a Live session (its
+			// newSessionExpireTime/expireTime passed). Reconnecting with the
+			// same dead token just loops on 30s connect timeouts — the "voice
+			// dies after ~10 min" outage. Exit so launchd's KeepAlive restarts
+			// us with a fresh resolveVoiceApiKey() mint (same idiom as the
+			// Settings key-reload path). BYOK keys don't expire, so skip them.
+			if (c.category === 'token_expired' && voiceMode !== 'byok' && voiceMode !== 'openai') {
+				console.error(`${ts()} [VoiceFailure] managed token expired (raw="${c.rawReason}") — exiting for launchd restart to re-mint`);
+				try {
+					cloudRecordError({
+						kind: 'voice.transport.token_expired',
+						severity: 'error',
+						message: 'Managed Gemini token expired mid-session; restarting voice to re-mint.',
+						metadata: { rawReason: c.rawReason },
+					});
+				} catch {}
+				setTimeout(() => process.exit(0), 200);
+				return;
+			}
 			if (c.retryable) return;
 			// Push the health-monitor reconnect window out by 5min on every
 			// non-retryable close — including repeats of an already-notified
