@@ -104,6 +104,16 @@ const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN ?? '';
 const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER ?? '';
 const NGROK_AUTHTOKEN = process.env.NGROK_AUTHTOKEN ?? '';
 const PORT = Number(process.env.PHONE_PORT) || 3100;
+// Phone VAD keepalive. Twilio silence-suppresses inbound audio (drops from ~50
+// to ~4 frames/sec while the caller is quiet), starving Gemini's server-side
+// VAD so it stops re-arming after a completed turn — the call goes "deaf after
+// the first turn" (AG2-402). We backfill the gaps with zeroed 20ms PCM16@16kHz
+// frames so Gemini's input stays dense and keeps detecting speech onset. Real
+// inbound frames always win (we only fill when none arrived in the last ~25ms).
+// Set PHONE_VAD_KEEPALIVE=0 to disable if a model/Twilio change makes it
+// counterproductive.
+const PHONE_VAD_KEEPALIVE = process.env.PHONE_VAD_KEEPALIVE !== '0';
+const SILENCE_FRAME_16K = Buffer.alloc(640); // 320 samples × 2 bytes = 20ms @ 16kHz, zeroed
 const WORKSPACE_DIR = process.env.SUTANDO_WORKSPACE || join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const RESULTS_DIR = process.env.PHONE_RESULTS_DIR || join(WORKSPACE_DIR, 'results');
 const TASKS_DIR = join(WORKSPACE_DIR, 'tasks');
@@ -350,6 +360,10 @@ interface CallSession {
 	events: { event: string; timestamp: string }[];
 	// Per-call channel-scan state (results/<callSid>.task-*.txt pull path).
 	channelScanHandle?: NodeJS.Timeout;
+	// VAD keepalive (PHONE_VAD_KEEPALIVE): 20ms silence-fill timer + the ts of the
+	// last REAL inbound frame, so we only fill gaps, never step on live audio.
+	silenceKeepaliveHandle?: NodeJS.Timeout;
+	lastInboundAudioAt?: number;
 	// Safety-net against silent unlinkSync failures — `name -> first-seen ms`,
 	// pruned at 60s/tick so it can't grow unbounded for long calls.
 	channelScanSeen?: Map<string, number>;
@@ -997,6 +1011,18 @@ async function createCallSession(params: {
 		}
 	});
 
+	// VAD keepalive — backfill inbound-audio gaps with 20ms silence so Gemini's
+	// server VAD keeps re-arming between turns (see PHONE_VAD_KEEPALIVE note).
+	// Real frames update lastInboundAudioAt in the media handler and take
+	// precedence; this only fires during quiet. Cleared in cleanupCall.
+	if (PHONE_VAD_KEEPALIVE) {
+		callSession.lastInboundAudioAt = Date.now();
+		callSession.silenceKeepaliveHandle = setInterval(() => {
+			if (Date.now() - (callSession.lastInboundAudioAt ?? 0) < 25) return; // live audio already dense
+			try { (callSession.voiceSession as any).handleAudioFromClient(SILENCE_FRAME_16K); } catch {}
+		}, 20);
+	}
+
 	// Trigger client connected (so VoiceSession sends greeting and starts Gemini)
 	sessionAny.handleClientConnected();
 	// Suppress greeting on reconnect — mute the first few seconds of audio after reconnect
@@ -1131,6 +1157,7 @@ function cleanupCall(callSid: string): void {
 	import('../../../src/browser-tools.js').then(bt => bt.onCallEnd()).catch(() => {});
 	session.cleanupNarration?.();
 	try { if (session.channelScanHandle) clearInterval(session.channelScanHandle); } catch {}
+	try { if (session.silenceKeepaliveHandle) clearInterval(session.silenceKeepaliveHandle); } catch {}
 	try { unlinkSync('/tmp/sutando-playback-pause'); } catch {}
 	try { unlinkSync('/tmp/sutando-playback-path'); } catch {}
 
@@ -1927,6 +1954,7 @@ wss.on('connection', (ws: WebSocket) => {
 
 					try {
 						(callSession.voiceSession as any).handleAudioFromClient(pcm16k);
+						callSession.lastInboundAudioAt = Date.now(); // real frame → suppress silence fill this window
 					} catch (e) {
 						if (mediaEventCount % 100 === 0) {
 							console.error(`${ts()} [WS] handleAudioFromClient error:`, e);
